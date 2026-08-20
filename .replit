@@ -1,0 +1,13 @@
+modules = ["python-3.11", "nodejs-20"]
+run = "bash run_replit.sh"
+
+[nix]
+channel = "stable-24_05"
+
+[deployment]
+run = ["bash", "run_replit.sh"]
+deploymentTarget = "cloudrun"
+
+[[ports]]
+localPort = 3001
+externalPort = 80

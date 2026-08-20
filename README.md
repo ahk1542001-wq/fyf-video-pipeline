@@ -1,0 +1,121 @@
+# FYF Video Pipeline — Agentic Cinema
+
+Evidence-led Burmese AI video generation with Gemini, native telemetry, and deterministic Remotion rendering.
+
+> [!NOTE]
+> **Current Status:** Verified local-first production path — real browser UI, Vertex/Gemini generation, Gemini TTS, Remotion rendering, deterministic QA, creative QA, final visual QA, Library playback, and in-app Telemetry are working. Replit is a public/demo deployment boundary.
+
+> [!WARNING]
+> **Release boundary**
+> This public snapshot excludes credentials, local job output, non-public voice assets, raw provider payloads, internal agent instructions, and one-off recording/operator scripts. Hosted auth, billing, tenant isolation, and automatic external publishing are not enabled.
+
+## Repository boundary
+
+The public repository is source-first. Keep production values in an ignored local `.env`, never in `.env.example` or GitHub:
+
+```bash
+cp .env.example .env
+# Set FYF_VERTEX_API_KEY locally; never paste it into README, code, telemetry, or chat.
+```
+
+The local `.env`, `gcp-key.json`, `output/`, reference audio assets, and scratch/build directories remain outside the release tree. Rotate any credential that was ever placed in a tracked or shareable file.
+
+## Purpose
+
+FYF Video Pipeline turns a Burmese topic or draft into a reviewable vertical video. It keeps the factual story lock and the visual evidence plan explicit, instruments every provider call, and only publishes a completed artifact after deterministic and semantic checks pass.
+
+- **Evidence-led:** Fact claims, visual claims, and visible numeric evidence are kept traceable.
+- **Flash-first:** Gemini 3.7 Flash is the default text/reasoning route; stage-specific thinking levels are measured in telemetry.
+- **Human-reviewable:** The UI exposes progress, QA state, Library output, and cost-confidence labels before an operator shares a video.
+- **Deterministic assembly:** Remotion renders a 1080x1920 composition with Burmese captions, mascot motion, visual treatments, and synced Gemini TTS.
+- **Partner-ready:** Replit is an optional public/demo path. ClickHouse/Grafana are optional sinks; the in-app `/telemetry` view is the canonical operator surface.
+
+This repository is FYF-only. It does not add authentication, billing, subscriptions, tenant isolation, or automatic Facebook publishing.
+
+## What this product is built to operate
+
+- Topic or draft intake in the Create Studio.
+- Gemini script generation with immutable story locks and bounded retries.
+- Visual evidence planning, deterministic fallback, and final rendered-meaning verification.
+- Gemini-TTS Burmese narration with audio QA and mouth-cue generation.
+- Remotion video rendering with deterministic output QA and creative QA.
+- Library playback/download and privacy-safe per-job Vertex/TTS telemetry.
+
+## Current build vs. production path
+
+| Area | Current FYF build | Future reviewed path |
+| --- | --- | --- |
+| Runtime | Local FastAPI + Next.js + Remotion; Replit demo boundary | Hosted runtime after auth, rate limits, access controls, and storage are separately approved |
+| AI | Vertex/Gemini with Gemini 3.7 Flash text and Gemini TTS | Measured quotas, pricing catalog, and operational alerting |
+| Storage | Local ignored job folders and privacy-safe telemetry ledger | Approved durable storage with retention and access policy |
+| Voice | Gemini mascot voice by default in hackathon mode; optional partner adapter | Explicitly reviewed partner route and reference handling |
+| Observability | Native in-app `/telemetry`; optional ClickHouse sink | Reviewed durable telemetry and Grafana dashboards if needed |
+| Publishing | Operator downloads a completed video | Separate approval required for any external publishing integration |
+
+## Architecture graph
+
+```mermaid
+flowchart TD
+  UI[Create Studio] --> API[FastAPI API]
+  API --> WRITER[Gemini 3.7 Flash Writer]
+  WRITER --> LOCK[Immutable Story Lock]
+  LOCK --> VISUALS[Visual Evidence + Director]
+  VISUALS --> TTS[Gemini TTS]
+  TTS --> RENDER[Remotion 1080x1920]
+  RENDER --> QA[Deterministic + Creative + Final QA]
+  QA --> LIB[Library + Download]
+  API --> TELEMETRY[Native Job Telemetry]
+  TELEMETRY --> OBS[In-app /telemetry]
+```
+
+## Tech stack
+
+- **Backend:** FastAPI, Pydantic, Google Gen AI SDK, Vertex/Gemini
+- **Frontend:** Next.js App Router, React, TypeScript, Tailwind
+- **Video:** Remotion, React, TypeScript, FFmpeg
+- **Voice:** Gemini-TTS with optional Kaggle partner adapter
+- **Observability:** Local privacy-safe ledger, optional ClickHouse sink, in-app telemetry UI
+- **Deployment boundary:** Replit configuration is included for the public/demo runtime boundary
+
+## Local setup
+
+### Backend
+
+```bash
+uv sync
+cp .env.example .env
+# Set FYF_VERTEX_API_KEY in .env
+FYF_RUNTIME_MODE=hackathon .venv/bin/python -B -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
+```
+
+### Frontend
+
+```bash
+cd frontend
+npm ci
+NEXT_PUBLIC_FYF_RUNTIME_MODE=hackathon npm run dev -- --port 3001
+```
+
+Open:
+
+- Create Studio: `http://localhost:3001`
+- Video Library: `http://localhost:3001/library`
+- Telemetry: `http://localhost:3001/telemetry`
+
+Replit runs the same public/demo surface through `run_replit.sh` and defaults to the Google voice route unless explicitly overridden.
+
+## Verification evidence
+
+- Backend regression suite: **320 tests passed**.
+- Voice adapter/audio QA suite: **23 tests passed**.
+- Remotion suite: **27 tests passed**.
+- Frontend ESLint, TypeScript, and production build passed.
+- `uv lock --check`, shell syntax, import checks, and public-tree scans passed.
+- Public demo run: **50.86s** video, Gemini TTS, deterministic/creative/final QA passed.
+- A private end-to-end run was completed locally; raw job identifiers, provider payloads, and private cost records are intentionally omitted from this public snapshot.
+- The public demo path was exercised through the browser from script creation to rendered video, Library playback/download, and Telemetry inspection. Exact provider usage remains in the local ignored job ledger.
+- Browser verification covered Create, real generation, Library preview/download, and Telemetry selection for a completed job.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
