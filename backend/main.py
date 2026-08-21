@@ -151,6 +151,26 @@ def _create_video_job(
     )
 
 
+from backend.runtime_limits import (
+    enforce_generation_guardrails,
+    register_active_job,
+    release_active_job,
+)
+
+
+async def _run_video_pipeline_tracked(
+    job_id: str,
+    script_data: dict,
+    voice_provider: Literal["gemini"],
+    jobs_root: Path,
+):
+    register_active_job(job_id)
+    try:
+        await run_pipeline(job_id, script_data, voice_provider, jobs_root)
+    finally:
+        release_active_job(job_id)
+
+
 def _queue_video_job(
     background_tasks: BackgroundTasks,
     script_data: dict,
@@ -158,7 +178,7 @@ def _queue_video_job(
 ) -> VideoJobItem:
     job = _create_video_job(script_data, voice_provider)
     background_tasks.add_task(
-        run_pipeline, job.job_id, script_data, voice_provider, JOBS_ROOT
+        _run_video_pipeline_tracked, job.job_id, script_data, voice_provider, JOBS_ROOT
     )
     return job
 
@@ -188,6 +208,7 @@ async def generate_script(req: ScriptRequest, background_tasks: BackgroundTasks)
     """Queue persisted Vertex script production and return immediately."""
     if not req.topic.strip():
         raise HTTPException(status_code=400, detail="Topic cannot be empty")
+    enforce_generation_guardrails(root_dir=SCRIPT_JOBS_ROOT)
     job_id = create_job_dir(SCRIPT_JOBS_ROOT)
     job_dir = SCRIPT_JOBS_ROOT / job_id
     write_json_atomically(job_dir / "request.json", req.model_dump(mode="json"))
@@ -323,6 +344,7 @@ async def story_lock(req: ExactLockRequest):
 @app.post("/api/generate-video", status_code=status.HTTP_202_ACCEPTED, response_model=VideoResponse)
 async def generate_video(req: VideoRequest, background_tasks: BackgroundTasks):
     """Takes the generated script JSON, creates job, and queues pipeline."""
+    enforce_generation_guardrails(root_dir=JOBS_ROOT)
     try:
         try:
             script_data = read_script_lock(LOCKS_ROOT, req.lock_id)
