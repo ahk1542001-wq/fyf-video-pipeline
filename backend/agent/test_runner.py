@@ -163,13 +163,36 @@ class ADKAgentTests(unittest.TestCase):
         self.assertEqual(len(agent.tools), 4)
 
     def test_run_adk_pipeline_end_to_end_with_checkpoints(self):
+        from unittest.mock import MagicMock
         with patch(
-            "writer_agent_vertex.generate_narration_script",
-            return_value=_mock_draft(),
-        ), patch(
-            "writer_agent_vertex.generate_exact_lock",
-            return_value=_mock_exact_lock(),
-        ):
+            "google.adk.Runner.run_async",
+        ) as mock_run_async:
+            async def fake_events(*args, **kwargs):
+                e1 = MagicMock()
+                e1.get_function_responses.return_value = [
+                    MagicMock(response={"topic": "စမ်းသပ်ချက်", "suggested_segments": 4, "target_audience": "Burmese"})
+                ]
+                yield e1
+
+                e2 = MagicMock()
+                e2.get_function_responses.return_value = [
+                    MagicMock(response=_mock_draft())
+                ]
+                yield e2
+
+                e3 = MagicMock()
+                e3.get_function_responses.return_value = [
+                    MagicMock(response={"passed": True, "issues": []})
+                ]
+                yield e3
+
+                e4 = MagicMock()
+                e4.get_function_responses.return_value = [
+                    MagicMock(response={"title": "လယ်ယာကဏ္ဍ အခွင့်အလမ်းများ", "language": "my-MM", "segments": _mock_exact_lock()["segments"]})
+                ]
+                yield e4
+            mock_run_async.side_effect = fake_events
+
             with tempfile.TemporaryDirectory() as temp_dir:
                 job_dir = Path(temp_dir)
                 result = run_adk_pipeline("စမ်းသပ်ချက်", "short", job_dir=job_dir)
@@ -177,6 +200,10 @@ class ADKAgentTests(unittest.TestCase):
                 self.assertEqual(result["script"]["title"], "လယ်ယာကဏ္ဍ အခွင့်အလမ်းများ")
                 self.assertEqual(len(result["script"]["segments"]), 5)
                 self.assertTrue(result["audit"]["passed"])
+                self.assertTrue((job_dir / "research.json").exists())
+                self.assertTrue((job_dir / "narration.json").exists())
+                self.assertTrue((job_dir / "story_audit.json").exists())
+                self.assertTrue((job_dir / "result.json").exists())
 
     def test_run_adk_pipeline_executes_through_google_adk_runner(self):
         from unittest.mock import MagicMock
@@ -189,16 +216,31 @@ class ADKAgentTests(unittest.TestCase):
             "writer_agent_vertex.generate_exact_lock",
             return_value=_mock_exact_lock(),
         ):
-            # Async generator mock
+            # Async generator mock returning function responses
             async def fake_events(*args, **kwargs):
-                if False:
-                    yield None
+                mock_event = MagicMock()
+                mock_event.get_function_responses.return_value = [
+                    MagicMock(response={"title": "လယ်ယာကဏ္ဍ အခွင့်အလမ်းများ", "language": "my-MM", "segments": _mock_exact_lock()["segments"]})
+                ]
+                mock_event.is_final_response.return_value = True
+                yield mock_event
             mock_run_async.side_effect = fake_events
 
             with tempfile.TemporaryDirectory() as temp_dir:
                 job_dir = Path(temp_dir)
-                run_adk_pipeline("စမ်းသပ်ချက်", "short", job_dir=job_dir)
+                result = run_adk_pipeline("စမ်းသပ်ချက်", "short", job_dir=job_dir)
                 self.assertTrue(mock_run_async.called, "ADK Runner.run_async MUST be called during pipeline execution")
+                self.assertEqual(result["script"]["title"], "လယ်ယာကဏ္ဍ အခွင့်အလမ်းများ")
+
+    def test_runner_failure_raises_and_cannot_return_success(self):
+        with patch(
+            "google.adk.Runner.run_async",
+            side_effect=RuntimeError("ADK Runner execution exploded"),
+        ):
+            with tempfile.TemporaryDirectory() as temp_dir:
+                job_dir = Path(temp_dir)
+                with self.assertRaises(RuntimeError):
+                    run_adk_pipeline("စမ်းသပ်ချက်", "short", job_dir=job_dir)
 
 
 if __name__ == "__main__":

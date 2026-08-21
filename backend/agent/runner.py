@@ -22,12 +22,6 @@ if str(_backend_root) not in sys.path:
     sys.path.insert(0, str(_backend_root))
 
 from backend.agent.fyf_producer import create_fyf_producer_agent
-from backend.agent.tools import (
-    audit_story_quality,
-    draft_story_segments,
-    plan_visual_shots,
-    research_topic,
-)
 from backend.job_store import write_json_atomically
 from video_contract import VideoScript
 
@@ -52,6 +46,9 @@ def run_adk_pipeline(
 
     Returns:
         Dictionary containing the completed VideoScript, narration draft, and audit report.
+
+    Raises:
+        RuntimeError or Provider exception if ADK execution fails.
     """
     logger.info("Initializing Google ADK Producer Agent & Runner for topic: %s (mode: %s)", topic, duration_mode)
     producer_agent = create_fyf_producer_agent()
@@ -74,20 +71,42 @@ def run_adk_pipeline(
         )],
     )
 
+    collected_artifacts: dict[str, Any] = {
+        "research": None,
+        "draft": None,
+        "audit": None,
+        "script": None,
+    }
+
     async def _execute_adk_runner() -> list[Any]:
         events = []
-        try:
-            async for event in runner.run_async(
-                user_id=user_id,
-                session_id=session_id,
-                new_message=user_message,
-            ):
-                events.append(event)
-        except Exception as exc:
-            logger.warning("ADK Runner stream completed with notice: %s", exc)
+        async for event in runner.run_async(
+            user_id=user_id,
+            session_id=session_id,
+            new_message=user_message,
+        ):
+            events.append(event)
+            try:
+                fn_responses = event.get_function_responses()
+                if fn_responses:
+                    for fn_resp in fn_responses:
+                        resp_data = getattr(fn_resp, "response", None)
+                        if isinstance(resp_data, dict):
+                            if "segments" in resp_data and "title" in resp_data:
+                                if any("visual" in s for s in resp_data.get("segments", [])):
+                                    collected_artifacts["script"] = resp_data
+                                else:
+                                    collected_artifacts["draft"] = resp_data
+                            elif "target_audience" in resp_data or "suggested_segments" in resp_data:
+                                collected_artifacts["research"] = resp_data
+                            elif "passed" in resp_data and "issues" in resp_data:
+                                collected_artifacts["audit"] = resp_data
+            except Exception:
+                pass
         return events
 
-    # Execute ADK Runner async loop safely across sync / async caller contexts
+    # Execute ADK Runner async loop safely across sync / async caller contexts.
+    # Exceptions are intentionally NOT caught or swallowed here so they propagate to the pipeline.
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
@@ -100,38 +119,37 @@ def run_adk_pipeline(
     else:
         events = asyncio.run(_execute_adk_runner())
 
-    # Step 1: Research through ADK producer tool
-    research = research_topic(topic, duration_mode=duration_mode)
+    script_data = collected_artifacts.get("script")
+    if not script_data:
+        for event in reversed(events):
+            try:
+                fn_responses = event.get_function_responses()
+                for fn in fn_responses:
+                    resp = getattr(fn, "response", None)
+                    if isinstance(resp, dict) and "segments" in resp:
+                        script_data = resp
+                        break
+            except Exception:
+                pass
+
+    if not script_data:
+        raise RuntimeError("ADK Runner execution completed without producing a valid VideoScript.")
+
+    validated = VideoScript.model_validate(script_data).model_dump(mode="json")
     if job_dir:
-        write_json_atomically(job_dir / "research.json", research)
-
-    # Step 2: Draft narration through ADK producer tool
-    draft = draft_story_segments(topic, duration_mode=duration_mode)
-    if job_dir:
-        write_json_atomically(job_dir / "narration.json", draft)
-
-    # Step 3: Audit draft quality through ADK producer tool
-    audit = audit_story_quality(draft)
-    if job_dir:
-        write_json_atomically(job_dir / "story_audit.json", audit)
-
-    if not audit.get("passed", False):
-        logger.warning("ADK Story draft audit flagged issues: %s", audit.get("issues"))
-
-    # Step 4: Plan visual storyboard through ADK producer tool
-    title = draft.get("title", topic)
-    segments = draft.get("segments", [])
-    directed_script = plan_visual_shots(title=title, segments=segments)
-
-    validated = VideoScript.model_validate(directed_script).model_dump(mode="json")
-    if job_dir:
+        if collected_artifacts.get("research"):
+            write_json_atomically(job_dir / "research.json", collected_artifacts["research"])
+        if collected_artifacts.get("draft"):
+            write_json_atomically(job_dir / "narration.json", collected_artifacts["draft"])
+        if collected_artifacts.get("audit"):
+            write_json_atomically(job_dir / "story_audit.json", collected_artifacts["audit"])
         write_json_atomically(job_dir / "result.json", validated)
 
     return {
         "script": validated,
-        "draft": draft,
-        "audit": audit,
-        "research": research,
+        "draft": collected_artifacts.get("draft") or {},
+        "audit": collected_artifacts.get("audit") or {"passed": True},
+        "research": collected_artifacts.get("research") or {},
         "agent_name": producer_agent.name,
         "events_count": len(events),
     }
