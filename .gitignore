@@ -11,6 +11,13 @@ gcp-key.json
 
 # Local build/runtime artifacts; keep release commits source-first.
 output/
+jobs/
+script-jobs/
+locks/
+visual-artifacts/
+telemetry/
+*.pem
+*.key
 frontend/node_modules/
 frontend/.next/
 frontend/tsconfig.tsbuildinfo
@@ -19,16 +26,12 @@ remotion/node_modules/
 .superpowers/
 docs/superpowers/
 .DS_Store
-.claude-mcp-test.json
 AGENTS.md
 **/AGENTS.md
-**/CLAUDE.md
 remotion/out/
 remotion/.agents/
-remotion/.claude/
 remotion/.skill/
 remotion/public/*.mp4
 remotion/public/*.wav
 remotion/check_*.png
 frontend/public/video_frames/
-voice_service/_kaggle_kernel/

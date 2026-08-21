@@ -86,7 +86,7 @@ class ScriptPipelineTests(unittest.TestCase):
         job.mkdir(parents=True)
         locks.mkdir()
         (job / "request.json").write_text(
-            json.dumps({"topic": "ရှည်လျားသော စမ်းသပ်မှု", "duration_mode": "long"}),
+            json.dumps({"topic": "ရှည်လျားသော စမ်းသပ်မှု", "duration_mode": "short", "use_adk_agent": True}),
             encoding="utf-8",
         )
         (job / "status.json").write_text(
@@ -99,6 +99,10 @@ class ScriptPipelineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             jobs, locks = self.make_job(root)
+            (jobs / "abcd1234" / "request.json").write_text(
+                json.dumps({"topic": "ရှည်လျားသော စမ်းသပ်မှု", "duration_mode": "long", "use_adk_agent": False}),
+                encoding="utf-8",
+            )
             with (
                 patch("writer_agent_vertex.generate_narration_script", return_value=draft(20)) as narration,
                 patch("writer_agent_vertex.generate_exact_lock", side_effect=lock_batch) as exact,
@@ -141,17 +145,50 @@ class ScriptPipelineTests(unittest.TestCase):
 
     def test_script_retry_limit_is_bounded_and_configurable(self):
         with patch.dict("os.environ", {}, clear=True):
-            self.assertEqual(_script_max_retries(), 4)
+            self.assertEqual(_script_max_retries(), 3)
         with patch.dict("os.environ", {"FYF_SCRIPT_MAX_RETRIES": "1"}, clear=True):
             self.assertEqual(_script_max_retries(), 1)
         with patch.dict("os.environ", {"FYF_SCRIPT_MAX_RETRIES": "99"}, clear=True):
-            self.assertEqual(_script_max_retries(), 6)
+            self.assertEqual(_script_max_retries(), 3)
+
+    def test_transient_error_sets_needs_attention_when_retries_exhausted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            jobs, locks = self.make_job(root)
+            job = jobs / "abcd1234"
+            (job / "status.json").write_text(
+                json.dumps({"job_id": "abcd1234", "status": "queued", "retry_count": 3}),
+                encoding="utf-8",
+            )
+            with patch("backend.agent.runner.run_adk_pipeline", side_effect=TimeoutError("Connection timed out")):
+                run_script_pipeline("abcd1234", jobs, locks)
+
+            status = json.loads((job / "status.json").read_text(encoding="utf-8"))
+            self.assertEqual(status["status"], "needs_attention")
+            self.assertTrue(status["restart_resumable"])
+            self.assertIn("temporarily unavailable", status["error"])
+
+    def test_non_transient_error_fails_closed_immediately(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            jobs, locks = self.make_job(root)
+            job = jobs / "abcd1234"
+            with patch("backend.agent.runner.run_adk_pipeline", side_effect=ValueError("Invalid script contract")):
+                run_script_pipeline("abcd1234", jobs, locks)
+
+            status = json.loads((job / "status.json").read_text(encoding="utf-8"))
+            self.assertEqual(status["status"], "failed")
+            self.assertFalse(status["restart_resumable"])
 
     def test_restart_uses_existing_narration_and_batch_checkpoint(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             jobs, locks = self.make_job(root)
             job = jobs / "abcd1234"
+            (job / "request.json").write_text(
+                json.dumps({"topic": "ရှည်လျားသော စမ်းသပ်မှု", "duration_mode": "long", "use_adk_agent": False}),
+                encoding="utf-8",
+            )
             source = draft(12)
             (job / "narration.json").write_text(json.dumps(source, ensure_ascii=False), encoding="utf-8")
             (job / "locked-batch-000.json").write_text(
@@ -170,6 +207,43 @@ class ScriptPipelineTests(unittest.TestCase):
             self.assertEqual(exact.call_count, 2)
             result = json.loads((job / "result.json").read_text(encoding="utf-8"))
             self.assertEqual(len(result["segments"]), 12)
+
+    def test_script_pipeline_routes_through_adk_agent_when_configured(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            jobs, locks = self.make_job(root)
+            job = jobs / "abcd1234"
+            (job / "request.json").write_text(
+                json.dumps({"topic": "စိုက်ပျိုးရေး", "duration_mode": "short", "use_adk_agent": True}),
+                encoding="utf-8",
+            )
+            mock_video_script = {
+                "title": "လယ်ယာကဏ္ဍ",
+                "language": "my-MM",
+                "segments": [
+                    {
+                        "id": f"s{i}",
+                        "text": f"စာသား {i}",
+                        "visual_action": "explain",
+                        "scene_type": "whiteboard",
+                        "mascot_action": "explain",
+                        "emotion": "focused",
+                        "emphasis": [],
+                    }
+                    for i in range(1, 6)
+                ],
+            }
+            with patch(
+                "backend.agent.runner.run_adk_pipeline",
+                return_value={"script": mock_video_script, "draft": {}, "audit": {"passed": True}},
+            ) as mock_adk:
+                run_script_pipeline("abcd1234", jobs, locks)
+
+            mock_adk.assert_called_once_with("စိုက်ပျိုးရေး", "short", job_dir=job)
+            status = json.loads((job / "status.json").read_text(encoding="utf-8"))
+            self.assertEqual(status["status"], "completed")
+            self.assertEqual(status["stage"], "locked")
+            self.assertIsNotNone(status.get("lock_id"))
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 import re
 
 def clean_and_space_burmese(text: str) -> str:
-    """Adds space before consonants to slow VoxCPM2 down and prevent rushing."""
+    """Adds space before consonants to slow voice synthesis down and prevent rushing."""
     text = text.replace('​', '') # Remove zero-width spaces
     # Lookbehind for [vowels, asat, tone marks] -> lookahead for [consonant]
     pattern = re.compile(r'(?<=[ါ-ှ])(?=[က-ဪ])')

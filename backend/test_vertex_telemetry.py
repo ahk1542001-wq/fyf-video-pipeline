@@ -16,7 +16,7 @@ from backend.vertex_telemetry import (
     telemetry_scope,
     track_client,
 )
-from backend.clickhouse_telemetry import get_job_telemetry
+from backend.telemetry_store import get_job_telemetry
 
 
 def _usage(*, prompt: int = 1000, output: int = 2000, total: int = 3000):

@@ -249,7 +249,7 @@ def read_job_status(job_dir: Path) -> Dict[str, Any]:
 def initialize_job_status(
     job_dir: Path,
     job_id: str,
-    voice_provider: Literal["kaggle", "gemini"] | None = None,
+    voice_provider: Literal["gemini"] | None = "gemini",
 ) -> Dict[str, Any]:
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     status_data = {
@@ -308,15 +308,18 @@ def update_job_status(job_dir: Path, updates: Dict[str, Any]) -> Dict[str, Any]:
                 continue
             current[k] = v
 
-    valid_statuses = {"queued", "visuals", "voice", "rendering", "qa", "creative_qa", "completed", "failed", "needs_human_review"}
+    valid_statuses = {
+        "queued", "visuals", "voice", "rendering", "qa", "creative_qa",
+        "retrying", "needs_attention", "completed", "failed", "needs_human_review",
+    }
     if current["status"] not in valid_statuses:
         raise ValueError(f"Invalid status: {current['status']}")
 
     current["updated_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     if "restart_resumable" not in updates:
-        if current["status"] in {"completed", "needs_human_review"}:
+        if current["status"] == "completed":
             current["restart_resumable"] = False
-        elif current["status"] != "failed":
+        elif current["status"] in {"needs_attention", "retrying", "needs_human_review", "queued", "visuals", "voice", "rendering", "qa", "creative_qa"}:
             current["restart_resumable"] = True
 
     # Visual progress is derived from the atomic evidence checkpoint. Do not

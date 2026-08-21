@@ -19,9 +19,6 @@ from backend.job_store import (
 )
 from backend.mouth_cues import build_render_input
 from backend.output_qa import qa_job_directory
-from backend.final_visual_qa_vertex import verify_final_rendered_meaning
-from backend.creative_quality import audit_creative_quality
-from backend.director_context import DirectorPolicy
 from backend.visual_artifact_store import (
     claim_artifact,
     fail_artifact,
@@ -29,7 +26,9 @@ from backend.visual_artifact_store import (
     seal_artifact,
     visual_artifact_key,
 )
-from backend.paired_visuals import load_adopted_visual_plan
+from backend.final_visual_qa_vertex import verify_final_rendered_meaning
+from backend.creative_quality import audit_creative_quality
+from backend.director_context import DirectorPolicy
 from backend.render_video import render_video_remotion
 from backend.segment_render_cache import render_segments_and_assemble
 from voice_service.voice_generator import generate_voice
@@ -442,8 +441,8 @@ def _load_approved_local_visual_script(
 async def run_pipeline(
     job_id: str,
     script_dict: Dict[str, Any],
-    provider: Literal["kaggle", "gemini"],
-    jobs_root: Path,
+    provider: Literal["gemini"] = "gemini",
+    jobs_root: Path = Path("jobs"),
     visual_artifacts_root: Path | None = None,
 ) -> None:
     job_dir = jobs_root / job_id
@@ -456,11 +455,8 @@ async def run_pipeline(
     telemetry_collector = telemetry_context.__enter__()
     try:
         async with _pipeline_semaphore:
-            if (
-                os.getenv("FYF_RUNTIME_MODE", "product").strip().lower() == "hackathon"
-                and provider != "gemini"
-            ):
-                raise ValueError("Hackathon runtime permits only the Google AI voice route")
+            if provider != "gemini":
+                provider = "gemini"
             begin_job_attempt(job_dir)
             local_visual_repair = False
             previous_final_path = job_dir / "final_visual_qa.json"
@@ -514,15 +510,6 @@ async def run_pipeline(
                 if persisted_render_script is not None:
                     logger.info(f"[{job_id}] Resuming QA from verified job-local rendered output")
                     script_dict = persisted_render_script
-                    local_visual_repair = True
-            if not local_visual_repair:
-                adopted_visual_script = load_adopted_visual_plan(job_dir)
-                if adopted_visual_script is not None:
-                    logger.info(
-                        "[%s] Reusing integrity-checked visual plan from paired voice job",
-                        job_id,
-                    )
-                    script_dict = adopted_visual_script
                     local_visual_repair = True
             update_job_status(job_dir, {"status": "visuals", "error": None})
             logger.info(f"[{job_id}] Generating and verifying Vertex visual evidence")

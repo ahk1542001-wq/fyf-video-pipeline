@@ -28,15 +28,19 @@ FYF Video Pipeline turns a Burmese topic or draft into a reviewable vertical vid
 - **Flash-first:** Gemini 3.7 Flash is the default text/reasoning route; stage-specific thinking levels are measured in telemetry.
 - **Human-reviewable:** The UI exposes progress, QA state, Library output, and cost-confidence labels before an operator shares a video.
 - **Deterministic assembly:** Remotion renders a 1080x1920 composition with Burmese captions, mascot motion, visual treatments, and synced Gemini TTS.
-- **Partner-ready:** Replit is an optional public/demo path. ClickHouse/Grafana are optional sinks; the in-app `/telemetry` view is the canonical operator surface.
+- **Partner-ready:** Replit is the hackathon public/demo path; the in-app `/telemetry` view is the canonical operator surface. The post-hackathon local/private product can omit the Replit boundary.
 
 This repository is FYF-only. It does not add authentication, billing, subscriptions, tenant isolation, or automatic Facebook publishing.
 
 ## What this product is built to operate
 
 - Topic or draft intake in the Create Studio.
-- Gemini script generation with immutable story locks and bounded retries.
+- Google ADK Agent (`fyf_producer`) with tools for topic research, story segment drafting, quality audit, and visual shot planning.
+- Gemini 3.7 Flash writer with immutable story locks and bounded retries.
+- Controlled dynamic video styles (`fyf_explainer`, `cinematic_continuity`, `evidence_story`).
 - Visual evidence planning, deterministic fallback, and final rendered-meaning verification.
+- Public generation budget protection, rate limiting, and concurrency guardrails.
+- Resumable job architecture with `/api/jobs/{job_id}/resume` for recoverable interruptions.
 - Gemini-TTS Burmese narration with audio QA and mouth-cue generation.
 - Remotion video rendering with deterministic output QA and creative QA.
 - Library playback/download and privacy-safe per-job Vertex/TTS telemetry.
@@ -48,8 +52,8 @@ This repository is FYF-only. It does not add authentication, billing, subscripti
 | Runtime | Local FastAPI + Next.js + Remotion; Replit demo boundary | Hosted runtime after auth, rate limits, access controls, and storage are separately approved |
 | AI | Vertex/Gemini with Gemini 3.7 Flash text and Gemini TTS | Measured quotas, pricing catalog, and operational alerting |
 | Storage | Local ignored job folders and privacy-safe telemetry ledger | Approved durable storage with retention and access policy |
-| Voice | Gemini mascot voice by default in hackathon mode; optional partner adapter | Explicitly reviewed partner route and reference handling |
-| Observability | Native in-app `/telemetry`; optional ClickHouse sink | Reviewed durable telemetry and Grafana dashboards if needed |
+| Voice | Gemini mascot voice in hackathon release | Explicitly reviewed partner route and reference handling |
+| Observability | Native in-app `/telemetry` dashboard | Reviewed durable telemetry if needed |
 | Publishing | Operator downloads a completed video | Separate approval required for any external publishing integration |
 
 ## Architecture graph
@@ -70,11 +74,11 @@ flowchart TD
 
 ## Tech stack
 
-- **Backend:** FastAPI, Pydantic, Google Gen AI SDK, Vertex/Gemini
+- **Backend:** FastAPI, Pydantic, Google Gen AI SDK, Google ADK (`google-adk`), Vertex/Gemini
 - **Frontend:** Next.js App Router, React, TypeScript, Tailwind
 - **Video:** Remotion, React, TypeScript, FFmpeg
-- **Voice:** Gemini-TTS with optional Kaggle partner adapter
-- **Observability:** Local privacy-safe ledger, optional ClickHouse sink, in-app telemetry UI
+- **Voice:** Gemini-TTS
+- **Observability:** Local privacy-safe ledger, in-app telemetry UI
 - **Deployment boundary:** Replit configuration is included for the public/demo runtime boundary
 
 ## Local setup
@@ -102,11 +106,11 @@ Open:
 - Video Library: `http://localhost:3001/library`
 - Telemetry: `http://localhost:3001/telemetry`
 
-Replit runs the same public/demo surface through `run_replit.sh` and defaults to the Google voice route unless explicitly overridden.
+Replit runs the same public/demo surface through `run_replit.sh`, which uses the locked Python environment, builds/starts Next.js in production mode, and proxies `/api/*` and `/health` through the same hosted origin. It defaults to the Google voice route unless explicitly overridden.
 
 ## Verification evidence
 
-- Backend regression suite: **320 tests passed**.
+- Backend regression & ADK agent suite: **353 tests passed**.
 - Voice adapter/audio QA suite: **23 tests passed**.
 - Remotion suite: **27 tests passed**.
 - Frontend ESLint, TypeScript, and production build passed.
