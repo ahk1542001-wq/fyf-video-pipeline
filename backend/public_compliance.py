@@ -74,8 +74,9 @@ def check_forbidden_terms(
     tracked_files = get_git_tracked_files(root)
     violations: Dict[str, List[Tuple[int, str, str]]] = {}
 
+    # Match forbidden terms with optional alphanumeric/hyphen/underscore suffixes (e.g. voxcpm, voxcpm2, clickhouse-client)
     pattern = re.compile(
-        r"\b(" + "|".join(re.escape(term) for term in FORBIDDEN_TERMS) + r")\b",
+        r"(?:^|[^\w])(" + "|".join(re.escape(term) for term in FORBIDDEN_TERMS) + r"[\w\-]*)",
         re.IGNORECASE,
     )
 

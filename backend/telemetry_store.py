@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from backend.budget_store import record_cost
 from backend.cost_catalog import estimate_job_cost
 from backend.job_store import is_valid_job_id, read_job_status, write_json_atomically
 
@@ -26,7 +27,7 @@ def record_job_telemetry(
     metrics: Dict[str, Any],
     base_dir: Path | None = None,
 ) -> Path:
-    """Atomically record sanitized per-job telemetry metrics."""
+    """Atomically record sanitized per-job telemetry metrics and debit budget ledger."""
     if not is_valid_job_id(job_id):
         raise ValueError(f"Invalid job ID for telemetry: {job_id}")
 
@@ -81,11 +82,9 @@ def record_job_telemetry(
     }
 
     write_json_atomically(telemetry_file, sanitized)
-    try:
-        from backend.budget_store import record_cost
-        record_cost(cost_estimate.estimated_cost_usd, root_dir=telemetry_file.parent.parent)
-    except Exception:
-        pass
+    if cost_estimate.estimated_cost_usd > 0:
+        from backend.budget_store import reconcile_budget
+        reconcile_budget(job_id, cost_estimate.estimated_cost_usd, outcome=metrics.get("status", "completed"), root_dir=target_dir.parent)
     return telemetry_file
 
 
@@ -122,13 +121,12 @@ def get_job_telemetry(
             except (OSError, json.JSONDecodeError):
                 pass
 
-    # 3. Fallback from job status
+    # 3. Fallback from job status with zero fabricated numbers
     for root in roots:
         job_dir = root / job_id
         if job_dir.is_dir():
             try:
                 status_data = read_job_status(job_dir)
-                est = estimate_job_cost("gemini-3.7-flash", 12000, 2500, 500)
                 job_payload = {
                     "job_id": job_id,
                     "created_at": status_data.get("created_at"),
@@ -136,26 +134,26 @@ def get_job_telemetry(
                     "total_duration_ms": 0,
                     "stage_duration_ms": status_data.get("stage_timings", {}),
                     "model_name": "gemini-3.7-flash",
-                    "model_call_count": 1,
-                    "input_tokens": 12000,
-                    "output_tokens": 2500,
+                    "model_call_count": 0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
                     "retry_count": int(status_data.get("resume_count", 0)),
-                    "tts_request_count": 1,
-                    "tts_characters": 500,
+                    "tts_request_count": 0,
+                    "tts_characters": 0,
                     "render_duration_ms": 0,
-                    "estimated_cost_usd": est.estimated_cost_usd,
-                    "cost_status": est.cost_status,
-                    "cost_catalog_version": est.catalog_version,
-                    "is_estimate": True,
+                    "estimated_cost_usd": 0.0,
+                    "cost_status": "unavailable",
+                    "cost_catalog_version": "2026-08-20",
+                    "is_estimate": False,
                     "status": status_data.get("status", "unknown"),
                     "summary": {
-                        "total_calls": 1,
-                        "total_input_tokens": 12000,
-                        "total_output_tokens": 2500,
-                        "total_tokens": 14500,
-                        "token_status": "complete",
-                        "estimated_cost_usd": est.estimated_cost_usd,
-                        "cost_status": est.cost_status,
+                        "total_calls": 0,
+                        "total_input_tokens": 0,
+                        "total_output_tokens": 0,
+                        "total_tokens": 0,
+                        "token_status": "unavailable",
+                        "estimated_cost_usd": 0.0,
+                        "cost_status": "unavailable",
                         "job_status": status_data.get("status", "unknown"),
                         "retry_calls": int(status_data.get("resume_count", 0)),
                         "failed_calls": 0,
@@ -166,7 +164,6 @@ def get_job_telemetry(
             except Exception:
                 pass
 
-    est = estimate_job_cost("gemini-3.7-flash", 0, 0, 0)
     empty_job = {
         "job_id": job_id,
         "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -182,9 +179,9 @@ def get_job_telemetry(
         "tts_characters": 0,
         "render_duration_ms": 0,
         "estimated_cost_usd": 0.0,
-        "cost_status": est.cost_status,
-        "cost_catalog_version": est.catalog_version,
-        "is_estimate": True,
+        "cost_status": "unavailable",
+        "cost_catalog_version": "2026-08-20",
+        "is_estimate": False,
         "status": "not_found",
         "summary": {
             "total_calls": 0,
@@ -193,7 +190,7 @@ def get_job_telemetry(
             "total_tokens": 0,
             "token_status": "none",
             "estimated_cost_usd": 0.0,
-            "cost_status": est.cost_status,
+            "cost_status": "unavailable",
             "job_status": "not_found",
             "retry_calls": 0,
             "failed_calls": 0,

@@ -378,6 +378,16 @@ class VertexTelemetryCollector:
             write_json_atomically(self.job_dir / "telemetry.json", payload)
         except Exception:
             logger.exception("Could not persist telemetry for job %s", self.job_id)
+
+        try:
+            from backend.budget_store import reconcile_budget
+            summary = payload.get("summary", {})
+            actual_cost = float(summary.get("estimated_cost_usd", 0.0) or 0.0)
+            outcome = summary.get("job_status", "completed")
+            reconcile_budget(self.job_id, actual_cost, outcome=outcome)
+        except Exception:
+            logger.exception("Could not reconcile budget for job %s", self.job_id)
+
         return payload
 
 

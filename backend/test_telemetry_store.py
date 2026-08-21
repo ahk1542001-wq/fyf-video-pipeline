@@ -52,3 +52,23 @@ def test_telemetry_overview_summary(tmp_path: Path):
     assert summary["total_input_tokens"] == 3000
     assert summary["total_output_tokens"] == 600
     assert summary["total_estimated_cost_usd"] > 0.0
+
+
+def test_telemetry_status_fallback_does_not_invent_fake_tokens(tmp_path: Path):
+    # Fallback when job telemetry is absent should report 0 tokens and unavailable status
+    job_id = "55556666"
+    jobs_root = tmp_path / "jobs"
+    job_dir = jobs_root / job_id
+    job_dir.mkdir(parents=True)
+    (job_dir / "status.json").write_text(
+        '{"job_id": "55556666", "status": "completed", "resume_count": 0}',
+        encoding="utf-8",
+    )
+
+    res = get_job_telemetry(job_id, job_roots=(jobs_root,))
+    job = res["job"]
+    assert job["input_tokens"] == 0
+    assert job["output_tokens"] == 0
+    assert job["summary"]["total_input_tokens"] == 0
+    assert job["summary"]["token_status"] == "unavailable"
+    assert job["cost_status"] == "unavailable"

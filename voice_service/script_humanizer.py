@@ -67,7 +67,7 @@ def humanize_burmese(text: str) -> str:
     return result
 
 def add_emotion_hint(style: str = "casual") -> str:
-    """Add natural emotion hint prefix for VoxCPM2 controllable cloning."""
+    """Add natural emotion hint prefix for voice synthesis styling."""
     hints = {
         "casual": "(speak naturally, like a real person talking casually to a friend, relaxed and warm)",
         "friendly": "(speak in a friendly, warm and welcoming way, like greeting a good friend)",
