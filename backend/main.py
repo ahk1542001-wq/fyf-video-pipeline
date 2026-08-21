@@ -92,9 +92,13 @@ class StoryPolishResponse(BaseModel):
     model_used: str | None = None
 
 
+from backend.video_styles import apply_video_style, get_available_styles
+
+
 class VideoRequest(BaseModel):
     lock_id: str = Field(pattern=r"^[0-9a-f]{8}$")
     voice_provider: Literal["gemini"] = "gemini"
+    style: str | None = "fyf_explainer"
 
 
 class VideoResponse(BaseModel):
@@ -172,6 +176,11 @@ def get_runtime():
         script_model=model_for("script"),
         fallback_model=model_for("story_fallback"),
     )
+
+
+@app.get("/api/video-styles")
+def list_video_styles():
+    return {"styles": get_available_styles()}
 
 
 @app.post("/api/generate-script", status_code=status.HTTP_202_ACCEPTED, response_model=ScriptJobResponse)
@@ -320,7 +329,8 @@ async def generate_video(req: VideoRequest, background_tasks: BackgroundTasks):
         except FileNotFoundError as exc:
             raise ValueError("Approved script lock not found") from exc
 
-        queued = _queue_video_job(background_tasks, script_data, "gemini")
+        styled_script = apply_video_style(script_data, req.style)
+        queued = _queue_video_job(background_tasks, styled_script, "gemini")
 
         return VideoResponse(
             success=True,
