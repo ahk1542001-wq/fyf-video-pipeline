@@ -115,6 +115,31 @@ class RuntimeLimitsTests(unittest.TestCase):
                 self.assertEqual(ctx.exception.status_code, 429)
                 self.assertIn("Budget guardrail", ctx.exception.detail)
 
+    def test_guardrail_lease_transactional_rollback_on_slot_rejection(self):
+        from backend.budget_store import get_budget_status
+        from backend.runtime_limits import acquire_guardrail_lease, register_active_job
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            with patch.dict("os.environ", {"FYF_MAX_CONCURRENT_JOBS": "1", "FYF_DAILY_BUDGET_CAP_USD": "10.0"}):
+                # Occupy the only slot
+                register_active_job("job_occupying")
+
+                # Try to acquire lease for job_blocked
+                with self.assertRaises(HTTPException) as ctx:
+                    acquire_guardrail_lease(
+                        operation_id="job_blocked",
+                        client_ip="127.0.0.1",
+                        estimated_charge_usd=0.05,
+                        root_dir=root,
+                    )
+                self.assertEqual(ctx.exception.status_code, 429)
+
+                # Verify TRANSACTIONAL ROLLBACK: zero budget reserved for job_blocked!
+                status_info = get_budget_status(root)
+                self.assertEqual(status_info["active_reserved_usd"], 0.0, "Budget reservation must be rolled back on slot failure")
+                self.assertEqual(get_active_job_count(), 1, "Only the original job must be active")
+
 
 if __name__ == "__main__":
     unittest.main()

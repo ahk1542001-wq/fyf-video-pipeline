@@ -261,6 +261,13 @@ def reconcile_budget(
         return ledger
 
 
+def is_reservation_active(operation_id: str, root_dir: Path | None = None) -> bool:
+    """Check whether an active budget reservation exists for an operation."""
+    with _BUDGET_LOCK:
+        ledger = _read_budget_ledger(root_dir)
+        return operation_id in ledger.get("active_reservations", {})
+
+
 def release_reservation(
     operation_id: str,
     root_dir: Path | None = None,
