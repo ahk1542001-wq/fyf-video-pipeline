@@ -81,6 +81,11 @@ def record_job_telemetry(
     }
 
     write_json_atomically(telemetry_file, sanitized)
+    try:
+        from backend.budget_store import record_cost
+        record_cost(cost_estimate.estimated_cost_usd, root_dir=telemetry_file.parent.parent)
+    except Exception:
+        pass
     return telemetry_file
 
 
