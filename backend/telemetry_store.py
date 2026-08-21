@@ -206,7 +206,7 @@ def get_all_telemetry_summary(
 ) -> Dict[str, Any]:
     """Provide aggregated telemetry overview for dashboard visualization."""
     target_dir = base_dir or DEFAULT_TELEMETRY_DIR
-    roots = job_roots or (REPO_ROOT / "output" / "jobs", REPO_ROOT / "output" / "script-jobs")
+    roots = job_roots if job_roots is not None else (() if base_dir is not None else (REPO_ROOT / "output" / "jobs", REPO_ROOT / "output" / "script-jobs"))
     job_records: List[Dict[str, Any]] = []
 
     seen_ids: set[str] = set()
