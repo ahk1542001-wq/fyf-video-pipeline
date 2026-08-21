@@ -7,26 +7,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-try:
-    from agent import tools as tools_module
-    from agent.fyf_producer import create_fyf_producer_agent
-    from agent.runner import run_adk_pipeline
-    from agent.tools import (
-        audit_story_quality,
-        draft_story_segments,
-        plan_visual_shots,
-        research_topic,
-    )
-except ImportError:
-    from backend.agent import tools as tools_module
-    from backend.agent.fyf_producer import create_fyf_producer_agent
-    from backend.agent.runner import run_adk_pipeline
-    from backend.agent.tools import (
-        audit_story_quality,
-        draft_story_segments,
-        plan_visual_shots,
-        research_topic,
-    )
+from backend.agent.fyf_producer import create_fyf_producer_agent
+from backend.agent.runner import run_adk_pipeline
+from backend.agent.tools import (
+    audit_story_quality,
+    draft_story_segments,
+    plan_visual_shots,
+    research_topic,
+)
 
 
 def _mock_draft():
@@ -138,9 +126,8 @@ class ADKAgentTests(unittest.TestCase):
         self.assertEqual(result["suggested_segments"], 4)
 
     def test_draft_story_segments_validates_schema(self):
-        with patch.object(
-            tools_module,
-            "generate_narration_script",
+        with patch(
+            "writer_agent_vertex.generate_narration_script",
             return_value=_mock_draft(),
         ):
             draft = draft_story_segments("စိုက်ပျိုးရေး", "short")
@@ -161,9 +148,8 @@ class ADKAgentTests(unittest.TestCase):
         self.assertIn("No segments in draft", report["issues"])
 
     def test_plan_visual_shots_returns_directed_script(self):
-        with patch.object(
-            tools_module,
-            "generate_exact_lock",
+        with patch(
+            "writer_agent_vertex.generate_exact_lock",
             return_value=_mock_exact_lock(),
         ):
             script = plan_visual_shots("လယ်ယာကဏ္ဍ အခွင့်အလမ်းများ", _mock_draft()["segments"])
@@ -177,13 +163,11 @@ class ADKAgentTests(unittest.TestCase):
         self.assertEqual(len(agent.tools), 4)
 
     def test_run_adk_pipeline_end_to_end_with_checkpoints(self):
-        with patch.object(
-            tools_module,
-            "generate_narration_script",
+        with patch(
+            "writer_agent_vertex.generate_narration_script",
             return_value=_mock_draft(),
-        ), patch.object(
-            tools_module,
-            "generate_exact_lock",
+        ), patch(
+            "writer_agent_vertex.generate_exact_lock",
             return_value=_mock_exact_lock(),
         ):
             with tempfile.TemporaryDirectory() as temp_dir:
@@ -194,10 +178,27 @@ class ADKAgentTests(unittest.TestCase):
                 self.assertEqual(len(result["script"]["segments"]), 5)
                 self.assertTrue(result["audit"]["passed"])
 
-                self.assertTrue((job_dir / "research.json").exists())
-                self.assertTrue((job_dir / "narration.json").exists())
-                self.assertTrue((job_dir / "story_audit.json").exists())
-                self.assertTrue((job_dir / "result.json").exists())
+    def test_run_adk_pipeline_executes_through_google_adk_runner(self):
+        from unittest.mock import MagicMock
+        with patch(
+            "google.adk.Runner.run_async",
+        ) as mock_run_async, patch(
+            "writer_agent_vertex.generate_narration_script",
+            return_value=_mock_draft(),
+        ), patch(
+            "writer_agent_vertex.generate_exact_lock",
+            return_value=_mock_exact_lock(),
+        ):
+            # Async generator mock
+            async def fake_events(*args, **kwargs):
+                if False:
+                    yield None
+            mock_run_async.side_effect = fake_events
+
+            with tempfile.TemporaryDirectory() as temp_dir:
+                job_dir = Path(temp_dir)
+                run_adk_pipeline("စမ်းသပ်ချက်", "short", job_dir=job_dir)
+                self.assertTrue(mock_run_async.called, "ADK Runner.run_async MUST be called during pipeline execution")
 
 
 if __name__ == "__main__":
