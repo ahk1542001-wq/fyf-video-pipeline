@@ -67,7 +67,7 @@ def record_job_telemetry(
         "is_estimate": True,
         "status": metrics.get("status", "completed"),
         "summary": {
-            "total_calls": int(metrics.get("model_call_count", 1)),
+            "total_calls": int(metrics.get("model_call_count", 0)),
             "total_input_tokens": input_tokens,
             "total_output_tokens": output_tokens,
             "total_tokens": input_tokens + output_tokens,
@@ -203,6 +203,7 @@ def get_job_telemetry(
 def get_all_telemetry_summary(
     base_dir: Path | None = None,
     job_roots: Tuple[Path, ...] | None = None,
+    budget_root: Path | None = None,
 ) -> Dict[str, Any]:
     """Provide aggregated telemetry overview for dashboard visualization."""
     target_dir = base_dir or DEFAULT_TELEMETRY_DIR
@@ -211,21 +212,22 @@ def get_all_telemetry_summary(
 
     seen_ids: set[str] = set()
 
-    # Collect from job roots
-    for root in roots:
-        if not root.is_dir():
-            continue
-        for job_dir in root.iterdir():
-            if not job_dir.is_dir() or not is_valid_job_id(job_dir.name) or job_dir.name in seen_ids:
+    # Collect from job roots IF explicit roots or base_dir is None
+    if base_dir is None or job_roots is not None:
+        for root in roots:
+            if not root.is_dir():
                 continue
-            telemetry_file = job_dir / "telemetry.json"
-            if telemetry_file.is_file():
-                try:
-                    data = json.loads(telemetry_file.read_text(encoding="utf-8"))
-                    job_records.append(data)
-                    seen_ids.add(job_dir.name)
-                except (OSError, json.JSONDecodeError):
+            for job_dir in root.iterdir():
+                if not job_dir.is_dir() or not is_valid_job_id(job_dir.name) or job_dir.name in seen_ids:
                     continue
+                telemetry_file = job_dir / "telemetry.json"
+                if telemetry_file.is_file():
+                    try:
+                        data = json.loads(telemetry_file.read_text(encoding="utf-8"))
+                        job_records.append(data)
+                        seen_ids.add(job_dir.name)
+                    except (OSError, json.JSONDecodeError):
+                        continue
 
     # Collect from telemetry dir
     if target_dir.is_dir():
@@ -261,6 +263,15 @@ def get_all_telemetry_summary(
 
     job_records.sort(key=lambda r: r.get("created_at") or r.get("started_at", ""), reverse=True)
 
+    from backend.budget_store import get_budget_status
+    budget_info = get_budget_status(root_dir=budget_root)
+    if budget_info.get("corrupted") or budget_info.get("total_spend_usd") == float("inf"):
+        computed_budget_status = "corrupted"
+    elif budget_info.get("budget_exceeded"):
+        computed_budget_status = "cap_exceeded"
+    else:
+        computed_budget_status = "healthy"
+
     return {
         "total_jobs": total_jobs,
         "total_tokens_used": total_tokens,
@@ -272,5 +283,5 @@ def get_all_telemetry_summary(
         "total_vertex_calls": total_calls,
         "jobs": job_records[:10],
         "recent_jobs": job_records[:10],
-        "budget_status": "healthy",
+        "budget_status": computed_budget_status,
     }

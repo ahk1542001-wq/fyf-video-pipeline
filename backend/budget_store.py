@@ -45,6 +45,19 @@ def _is_valid_number(val: Any) -> bool:
     return math.isfinite(val) and val >= 0.0
 
 
+def _parse_cap_usd(env_var: str, default: float) -> tuple[float, bool]:
+    val_str = os.getenv(env_var)
+    if val_str is None or not str(val_str).strip():
+        return default, True
+    try:
+        val = float(val_str)
+        if _is_valid_number(val):
+            return val, True
+    except (ValueError, TypeError, OverflowError):
+        pass
+    return 0.0, False
+
+
 def _read_budget_ledger(root_dir: Path | None = None) -> dict[str, Any]:
     budget_file = get_canonical_budget_file(root_dir)
     if not budget_file.exists():
@@ -71,7 +84,13 @@ def _read_budget_ledger(root_dir: Path | None = None) -> dict[str, Any]:
 
         reservations = data.get("active_reservations", {})
         if not isinstance(reservations, dict):
-            data["active_reservations"] = {}
+            raise ValueError("active_reservations must be a dictionary")
+        for res_id, res in reservations.items():
+            if not isinstance(res, dict):
+                raise ValueError(f"Reservation {res_id} must be a dictionary")
+            amount = res.get("amount_usd")
+            if not _is_valid_number(amount):
+                raise ValueError(f"Invalid amount_usd in reservation {res_id}: {amount}")
 
         reconciled = data.get("reconciled_operations", {})
         if not isinstance(reconciled, dict):
@@ -97,21 +116,27 @@ def get_budget_status(root_dir: Path | None = None) -> dict[str, Any]:
     with _BUDGET_LOCK:
         ledger = _read_budget_ledger(root_dir)
 
-    if ledger.get("corrupted"):
+    daily_cap, daily_valid = _parse_cap_usd("FYF_DAILY_BUDGET_CAP_USD", DEFAULT_DAILY_BUDGET_CAP_USD)
+    total_cap, total_valid = _parse_cap_usd("FYF_TOTAL_BUDGET_CAP_USD", DEFAULT_TOTAL_BUDGET_CAP_USD)
+
+    if ledger.get("corrupted") or not daily_valid or not total_valid:
         return {
             "daily_spend_usd": 0.0,
-            "daily_cap_usd": 0.0,
+            "daily_reserved_usd": 0.0,
+            "daily_cap_usd": daily_cap if daily_valid else 0.0,
             "total_spend_usd": float("inf"),
-            "total_cap_usd": 0.0,
+            "total_reserved_usd": 0.0,
+            "total_cap_usd": total_cap if total_valid else 0.0,
             "active_reserved_usd": 0.0,
             "budget_exceeded": True,
-            "reason": "Budget ledger corrupted (fail-closed protection active)",
+            "reason": (
+                "Invalid configured budget cap (fail-closed protection active)"
+                if (not daily_valid or not total_valid)
+                else "Budget ledger corrupted (fail-closed protection active)"
+            ),
         }
 
     today_key = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
-    daily_cap = float(os.getenv("FYF_DAILY_BUDGET_CAP_USD", str(DEFAULT_DAILY_BUDGET_CAP_USD)))
-    total_cap = float(os.getenv("FYF_TOTAL_BUDGET_CAP_USD", str(DEFAULT_TOTAL_BUDGET_CAP_USD)))
 
     today_spend = float(ledger.get("daily_spend", {}).get(today_key, 0.0))
     total_spend = float(ledger.get("total_spend_usd", 0.0))
@@ -167,7 +192,9 @@ def reserve_budget(
     root_dir: Path | None = None,
 ) -> tuple[bool, str | None]:
     """Atomically reserve estimated cost before queuing or starting paid work."""
-    if estimated_usd <= 0.0:
+    if not _is_valid_number(estimated_usd):
+        return False, f"Invalid estimated budget amount: {estimated_usd}"
+    if estimated_usd == 0.0:
         return True, None
 
     with _BUDGET_LOCK:
@@ -176,8 +203,10 @@ def reserve_budget(
             return False, "Budget ledger corrupted (fail-closed)"
 
         today_key = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        daily_cap = float(os.getenv("FYF_DAILY_BUDGET_CAP_USD", str(DEFAULT_DAILY_BUDGET_CAP_USD)))
-        total_cap = float(os.getenv("FYF_TOTAL_BUDGET_CAP_USD", str(DEFAULT_TOTAL_BUDGET_CAP_USD)))
+        daily_cap, daily_valid = _parse_cap_usd("FYF_DAILY_BUDGET_CAP_USD", DEFAULT_DAILY_BUDGET_CAP_USD)
+        total_cap, total_valid = _parse_cap_usd("FYF_TOTAL_BUDGET_CAP_USD", DEFAULT_TOTAL_BUDGET_CAP_USD)
+        if not daily_valid or not total_valid:
+            return False, "Invalid configured budget cap (fail-closed)"
 
         today_spend = float(ledger.get("daily_spend", {}).get(today_key, 0.0))
         total_spend = float(ledger.get("total_spend_usd", 0.0))
@@ -224,6 +253,11 @@ def reconcile_budget(
     root_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Atomically reconcile a budget reservation with actual measured provider spend."""
+    if not _is_valid_number(actual_usd):
+        logger.error("Invalid actual_usd in reconcile_budget: %s", actual_usd)
+        with _BUDGET_LOCK:
+            return _read_budget_ledger(root_dir)
+
     with _BUDGET_LOCK:
         ledger = _read_budget_ledger(root_dir)
         if ledger.get("corrupted"):
@@ -290,8 +324,9 @@ def release_reservation(
 
 def record_cost(cost_usd: float, root_dir: Path | None = None) -> dict[str, Any]:
     """Direct record helper for backward-compatible call points."""
-    if cost_usd <= 0:
-        return _read_budget_ledger(root_dir)
+    if not _is_valid_number(cost_usd) or cost_usd <= 0.0:
+        with _BUDGET_LOCK:
+            return _read_budget_ledger(root_dir)
 
     with _BUDGET_LOCK:
         ledger = _read_budget_ledger(root_dir)

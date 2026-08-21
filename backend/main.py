@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import sys
 import uuid
 from datetime import datetime
@@ -241,21 +242,29 @@ def list_video_styles():
 async def generate_script(req: ScriptRequest, request: Request, background_tasks: BackgroundTasks):
     """Queue persisted Vertex script production and return immediately."""
     job_id = uuid.uuid4().hex[:8]
-    acquire_guardrail_lease(
+    lease = acquire_guardrail_lease(
         operation_id=job_id,
         request=request,
         estimated_charge_usd=0.04,
         job_roots=(JOBS_ROOT, SCRIPT_JOBS_ROOT),
     )
     job_dir = SCRIPT_JOBS_ROOT / job_id
-    job_dir.mkdir(parents=True, exist_ok=True)
-    write_json_atomically(job_dir / "request.json", req.model_dump(mode="json"))
-    write_json_atomically(job_dir / "status.json", {
-        "job_id": job_id, "status": "queued", "stage": "queued", "progress": 0,
-        "batch": None, "batch_count": None, "lock_id": None, "error": None,
-        "retry_count": 0, "restart_resumable": True,
-    })
-    background_tasks.add_task(run_script_pipeline, job_id, SCRIPT_JOBS_ROOT, LOCKS_ROOT)
+    try:
+        job_dir.mkdir(parents=True, exist_ok=True)
+        write_json_atomically(job_dir / "request.json", req.model_dump(mode="json"))
+        write_json_atomically(job_dir / "status.json", {
+            "job_id": job_id, "status": "queued", "stage": "queued", "progress": 0,
+            "batch": None, "batch_count": None, "lock_id": None, "error": None,
+            "retry_count": 0, "restart_resumable": True,
+        })
+        background_tasks.add_task(run_script_pipeline, job_id, SCRIPT_JOBS_ROOT, LOCKS_ROOT)
+    except Exception:
+        lease.release()
+        if job_dir.exists():
+            shutil.rmtree(job_dir, ignore_errors=True)
+        logger.exception("Script generation initialization error:")
+        raise HTTPException(status_code=500, detail="Failed to initialize script job")
+
     return ScriptJobResponse(
         success=True, job_id=job_id,
         status_url=f"/api/script-jobs/{job_id}/status",
@@ -308,22 +317,37 @@ async def resume_script_job(job_id: str, request: Request, background_tasks: Bac
     if resume_count > 3:
         raise HTTPException(status_code=400, detail="Maximum script resume attempts (3) exceeded")
 
-    acquire_guardrail_lease(
+    lease = acquire_guardrail_lease(
         operation_id=job_id,
         request=request,
         estimated_charge_usd=0.04,
         job_roots=(JOBS_ROOT, SCRIPT_JOBS_ROOT),
     )
 
-    update_script_status(
-        job_dir,
-        status="queued",
-        stage="queued",
-        error=None,
-        resume_count=resume_count,
-        retry_count=0,
-    )
-    background_tasks.add_task(run_script_pipeline, job_id, SCRIPT_JOBS_ROOT, LOCKS_ROOT)
+    try:
+        update_script_status(
+            job_dir,
+            status="queued",
+            stage="queued",
+            error=None,
+            resume_count=resume_count,
+            retry_count=0,
+        )
+        background_tasks.add_task(run_script_pipeline, job_id, SCRIPT_JOBS_ROOT, LOCKS_ROOT)
+    except Exception:
+        lease.release()
+        try:
+            update_script_status(
+                job_dir,
+                status="needs_attention",
+                restart_resumable=True,
+                error="Failed to queue resume task",
+            )
+        except Exception:
+            pass
+        logger.exception("Failed to resume script job %s:", job_id)
+        raise HTTPException(status_code=500, detail="Failed to queue script resume")
+
     return ScriptJobResponse(
         success=True,
         job_id=job_id,
@@ -345,9 +369,23 @@ async def resume_interrupted_script_jobs():
             except (OSError, json.JSONDecodeError):
                 continue
             if _should_resume_script_job(data):
-                asyncio.create_task(asyncio.to_thread(
-                    run_script_pipeline, job_dir.name, SCRIPT_JOBS_ROOT, LOCKS_ROOT
-                ))
+                try:
+                    acquire_guardrail_lease(
+                        operation_id=job_dir.name,
+                        client_ip="127.0.0.1",
+                        estimated_charge_usd=0.04,
+                        job_roots=(JOBS_ROOT, SCRIPT_JOBS_ROOT),
+                    )
+                    asyncio.create_task(asyncio.to_thread(
+                        run_script_pipeline, job_dir.name, SCRIPT_JOBS_ROOT, LOCKS_ROOT
+                    ))
+                except HTTPException:
+                    update_script_status(
+                        job_dir,
+                        status="needs_attention",
+                        restart_resumable=True,
+                        error="Automatic restart delayed by guardrails (system busy or budget limit). Manual resume available.",
+                    )
 
     if not JOBS_ROOT.exists():
         return
@@ -389,15 +427,28 @@ async def resume_interrupted_script_jobs():
             continue
 
         if resumable and provider == "gemini":
-            update_job_status(job_dir, {
-                "status": "queued",
-                "error": None,
-                "resume_count": resume_count + 1,
-                "restart_resumable": True,
-            })
-            asyncio.create_task(run_pipeline(
-                job_dir.name, script_data, "gemini", JOBS_ROOT
-            ))
+            try:
+                acquire_guardrail_lease(
+                    operation_id=job_dir.name,
+                    client_ip="127.0.0.1",
+                    estimated_charge_usd=0.06,
+                    job_roots=(JOBS_ROOT, SCRIPT_JOBS_ROOT),
+                )
+                update_job_status(job_dir, {
+                    "status": "queued",
+                    "error": None,
+                    "resume_count": resume_count + 1,
+                    "restart_resumable": True,
+                })
+                asyncio.create_task(run_pipeline(
+                    job_dir.name, script_data, "gemini", JOBS_ROOT
+                ))
+            except HTTPException:
+                update_job_status(job_dir, {
+                    "status": "needs_attention",
+                    "error": "Automatic restart delayed by guardrails (system busy or budget limit). Manual resume available.",
+                    "restart_resumable": True,
+                })
 
 
 @app.post("/api/story-polish", response_model=StoryPolishResponse)
@@ -411,15 +462,19 @@ async def story_polish(req: StoryPolishRequest, request: Request):
         job_roots=(JOBS_ROOT, SCRIPT_JOBS_ROOT),
     )
     try:
-        from writer_agent_vertex import generate_story_modes
-        generated = generate_story_modes(req.topic_or_draft)
-        result = StoryModesResponse.model_validate({"variants": generated["variants"]})
-        lease.reconcile(actual_usd=0.015, outcome="completed")
-        return StoryPolishResponse(
-            success=True,
-            variants=[v.model_dump(mode="json") for v in result.variants],
-            model_used=generated.get("model_used"),
-        )
+        from backend.vertex_telemetry import telemetry_scope
+        with telemetry_scope(op_id, "story_polish", SCRIPT_JOBS_ROOT / op_id) as collector:
+            from writer_agent_vertex import generate_story_modes
+            generated = generate_story_modes(req.topic_or_draft)
+            result = StoryModesResponse.model_validate({"variants": generated["variants"]})
+            summary = collector.summary()
+            actual_cost = float(summary.get("estimated_cost_usd") or 0.0) if summary.get("cost_status") in ("exact", "partial") else 0.0
+            lease.reconcile(actual_usd=actual_cost, outcome="completed")
+            return StoryPolishResponse(
+                success=True,
+                variants=[v.model_dump(mode="json") for v in result.variants],
+                model_used=generated.get("model_used"),
+            )
     except HTTPException:
         lease.release()
         raise
@@ -442,13 +497,17 @@ async def story_lock(req: ExactLockRequest, request: Request):
         job_roots=(JOBS_ROOT, SCRIPT_JOBS_ROOT),
     )
     try:
-        from writer_agent_vertex import generate_exact_lock
-        data = VideoScript.model_validate(generate_exact_lock(req.model_dump(mode="json")))
-        directed = apply_director_pass(data.model_dump(mode="json"))
-        data = VideoScript.model_validate(directed)
-        lock_id = create_script_lock(LOCKS_ROOT, directed)
-        lease.reconcile(actual_usd=0.025, outcome="completed")
-        return StoryLockResponse(success=True, data=data.model_dump(mode="json"), lock_id=lock_id)
+        from backend.vertex_telemetry import telemetry_scope
+        with telemetry_scope(op_id, "story_lock", SCRIPT_JOBS_ROOT / op_id) as collector:
+            from writer_agent_vertex import generate_exact_lock
+            data = VideoScript.model_validate(generate_exact_lock(req.model_dump(mode="json")))
+            directed = apply_director_pass(data.model_dump(mode="json"))
+            data = VideoScript.model_validate(directed)
+            lock_id = create_script_lock(LOCKS_ROOT, directed)
+            summary = collector.summary()
+            actual_cost = float(summary.get("estimated_cost_usd") or 0.0) if summary.get("cost_status") in ("exact", "partial") else 0.0
+            lease.reconcile(actual_usd=actual_cost, outcome="completed")
+            return StoryLockResponse(success=True, data=data.model_dump(mode="json"), lock_id=lock_id)
     except HTTPException:
         lease.release()
         raise
@@ -464,42 +523,41 @@ async def story_lock(req: ExactLockRequest, request: Request):
 async def generate_video(req: VideoRequest, request: Request, background_tasks: BackgroundTasks):
     """Takes the approved script lock, acquires guardrail lease, creates job, and queues pipeline."""
     try:
-        try:
-            script_data = read_script_lock(LOCKS_ROOT, req.lock_id)
-        except FileNotFoundError as exc:
-            raise ValueError("Approved script lock not found") from exc
+        script_data = read_script_lock(LOCKS_ROOT, req.lock_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=422, detail="Approved script lock not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-        styled_script = apply_video_style(script_data, req.style)
-        job_id = uuid.uuid4().hex[:8]
+    styled_script = apply_video_style(script_data, req.style)
+    job_id = uuid.uuid4().hex[:8]
 
-        # Guardrail check happens BEFORE any disk creation!
-        acquire_guardrail_lease(
-            operation_id=job_id,
-            request=request,
-            estimated_charge_usd=0.06,
-            job_roots=(JOBS_ROOT, SCRIPT_JOBS_ROOT),
-        )
+    # Guardrail check happens BEFORE any disk creation!
+    lease = acquire_guardrail_lease(
+        operation_id=job_id,
+        request=request,
+        estimated_charge_usd=0.06,
+        job_roots=(JOBS_ROOT, SCRIPT_JOBS_ROOT),
+    )
 
-        job = _create_video_job(styled_script, "gemini", job_id=job_id)
-
+    job_dir = JOBS_ROOT / job_id
+    try:
+        job = _create_video_job(styled_script, req.voice_provider, job_id=job_id)
         background_tasks.add_task(
-            _run_video_pipeline_tracked, job.job_id, styled_script, "gemini", JOBS_ROOT
+            _run_video_pipeline_tracked, job.job_id, styled_script, req.voice_provider, JOBS_ROOT
         )
-
         return VideoResponse(
             success=True,
             job_id=job.job_id,
             status_url=job.status_url,
             restart_resumable=True
         )
-
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e))
-    except HTTPException:
-        raise
     except Exception:
+        lease.release()
+        if job_dir.exists():
+            shutil.rmtree(job_dir, ignore_errors=True)
         logger.exception("Video generation queueing error:")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        raise HTTPException(status_code=500, detail="Failed to initialize video job")
 
 
 def _safe_job_path(path: Path) -> Path | None:
@@ -637,23 +695,36 @@ async def resume_job(job_id: str, request: Request, background_tasks: Background
     if resume_count > 3:
         raise HTTPException(status_code=400, detail="Maximum resume attempts (3) exceeded")
 
-    acquire_guardrail_lease(
+    lease = acquire_guardrail_lease(
         operation_id=job_id,
         request=request,
         estimated_charge_usd=0.06,
         job_roots=(JOBS_ROOT, SCRIPT_JOBS_ROOT),
     )
 
-    update_job_status(job_dir, {
-        "status": "queued",
-        "error": None,
-        "resume_count": resume_count,
-        "restart_resumable": True,
-    })
+    try:
+        update_job_status(job_dir, {
+            "status": "queued",
+            "error": None,
+            "resume_count": resume_count,
+            "restart_resumable": True,
+        })
 
-    background_tasks.add_task(
-        _run_video_pipeline_tracked, job_id, script_data, "gemini", JOBS_ROOT
-    )
+        background_tasks.add_task(
+            _run_video_pipeline_tracked, job_id, script_data, "gemini", JOBS_ROOT
+        )
+    except Exception:
+        lease.release()
+        try:
+            update_job_status(job_dir, {
+                "status": "needs_attention",
+                "restart_resumable": True,
+                "error": "Failed to queue video resume task",
+            })
+        except Exception:
+            pass
+        logger.exception("Failed to resume video job %s:", job_id)
+        raise HTTPException(status_code=500, detail="Failed to queue video resume")
 
     return VideoResponse(
         success=True,

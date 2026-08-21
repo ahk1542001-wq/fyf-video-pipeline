@@ -21,6 +21,7 @@ from backend.agent.tools import (
     plan_visual_shots,
     research_topic,
 )
+from vertex_model_routing import model_for
 
 PRODUCER_INSTRUCTION = """
 You are the FYF Video Executive Producer Agent, responsible for creating high-impact,
@@ -36,22 +37,23 @@ Follow this production workflow strictly:
 
 
 def create_fyf_producer_agent(
-    model_name: str = "gemini-2.5-flash",
+    model_name: str | None = None,
     **kwargs: Any,
 ) -> Agent:
     """Create and return the FYF Google ADK Producer Agent.
 
     Args:
-        model_name: Gemini model name to use with ADK Agent.
+        model_name: Gemini model name to use with ADK Agent (defaults to model_for('script')).
         **kwargs: Additional parameters passed to ADK Agent constructor.
 
     Returns:
         Configured google.adk.Agent instance.
     """
+    resolved_model = model_name or model_for("script")
     return Agent(
         name="fyf_producer",
         description="Autonomous FYF Video Producer coordinating research, Burmese script writing, QA auditing, and visual storyboard planning.",
-        model=model_name,
+        model=resolved_model,
         instruction=PRODUCER_INSTRUCTION,
         tools=[
             research_topic,

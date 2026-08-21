@@ -202,7 +202,7 @@ class TestRenderVideo(unittest.TestCase):
                     main_module, "SCRIPT_JOBS_ROOT", Path(script_jobs)
                 ), patch.object(main_module, "LOCKS_ROOT", Path(locks)), patch.object(
                     main_module, "run_pipeline", new_callable=AsyncMock
-                ) as pipeline:
+                ) as pipeline, patch.dict("os.environ", {"FYF_MAX_CONCURRENT_JOBS": "5"}):
                     await main_module.resume_interrupted_script_jobs()
                     await __import__("asyncio").sleep(0)
                     return pipeline

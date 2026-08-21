@@ -38,14 +38,20 @@ def get_client_ip(request: Request | None) -> str:
 
     trust_proxies = os.getenv("FYF_TRUST_PROXY_HEADERS", "false").lower() in ("true", "1")
     if trust_proxies:
-        forwarded = request.headers.get("x-forwarded-for")
-        if forwarded:
-            return forwarded.split(",")[0].strip()
-        real_ip = request.headers.get("x-real-ip")
+        headers = getattr(request, "headers", {})
+        forwarded_for = headers.get("x-forwarded-for") or headers.get("X-Forwarded-For")
+        if forwarded_for:
+            # Take the leftmost untrusted client IP
+            client_ip = forwarded_for.split(",")[0].strip()
+            if client_ip:
+                return client_ip
+        real_ip = headers.get("x-real-ip") or headers.get("X-Real-IP")
         if real_ip:
-            return real_ip.strip()
+            client_ip = real_ip.strip()
+            if client_ip:
+                return client_ip
 
-    if request.client and request.client.host:
+    if getattr(request, "client", None) and getattr(request.client, "host", None):
         return request.client.host
     return "127.0.0.1"
 
@@ -65,7 +71,7 @@ def _get_rate_limit_per_minute() -> int:
 
 
 def check_rate_limit(client_ip: str) -> tuple[bool, str | None]:
-    """Check sliding window request count for an IP in the last 60 seconds with thread safety."""
+    """Check sliding window request count for an IP in the last 60 seconds."""
     now = time.time()
     limit = _get_rate_limit_per_minute()
 
@@ -114,16 +120,13 @@ def count_active_disk_jobs(job_roots: tuple[Path, ...] | None = None, excluding_
 
 
 def check_concurrency(job_roots: tuple[Path, ...] | None = None, excluding_job_id: str | None = None) -> tuple[bool, str | None]:
-    """Check whether total active jobs (memory + disk) exceed configured limit."""
+    """Check whether total active jobs in memory exceed configured limit."""
     max_concurrency = _get_max_concurrency()
     with _LOCK:
         mem_count = len(_ACTIVE_JOB_IDS)
-    disk_count = count_active_disk_jobs(job_roots, excluding_job_id=excluding_job_id)
-    total_active = max(mem_count, disk_count)
-
-    if total_active >= max_concurrency:
-        return False, f"System is currently busy ({total_active}/{max_concurrency} active jobs). Please retry shortly."
-    return True, None
+        if mem_count >= max_concurrency:
+            return False, f"System is currently busy ({mem_count}/{max_concurrency} active jobs). Please retry shortly."
+        return True, None
 
 
 def try_acquire_job_slot(job_id: str, job_roots: tuple[Path, ...] | None = None) -> tuple[bool, str | None]:
@@ -132,11 +135,9 @@ def try_acquire_job_slot(job_id: str, job_roots: tuple[Path, ...] | None = None)
     with _LOCK:
         if job_id in _ACTIVE_JOB_IDS:
             return True, None
-        disk_count = count_active_disk_jobs(job_roots, excluding_job_id=job_id)
         mem_count = len(_ACTIVE_JOB_IDS)
-        total_active = max(mem_count, disk_count)
-        if total_active >= max_concurrency:
-            return False, f"System is currently busy ({total_active}/{max_concurrency} active generation jobs). Please retry shortly."
+        if mem_count >= max_concurrency:
+            return False, f"System is currently busy ({mem_count}/{max_concurrency} active generation jobs). Please retry shortly."
         _ACTIVE_JOB_IDS.add(job_id)
         return True, None
 
