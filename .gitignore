@@ -11,6 +11,13 @@ gcp-key.json
 
 # Local build/runtime artifacts; keep release commits source-first.
 output/
+jobs/
+script-jobs/
+locks/
+visual-artifacts/
+telemetry/
+*.pem
+*.key
 frontend/node_modules/
 frontend/.next/
 frontend/tsconfig.tsbuildinfo
