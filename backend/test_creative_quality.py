@@ -1,7 +1,5 @@
 import copy
-import json
 import unittest
-from pathlib import Path
 
 from backend.creative_quality import (
     DirectorPolicy,
@@ -45,6 +43,28 @@ def _render_input(scenes, fps=30):
 
 def _codes(report):
     return set(report["failure_codes"])
+
+
+def _legacy_render_input():
+    """Build the old all-diagram shape without relying on private job output."""
+    return {
+        "fps": 30,
+        "segments": [
+            {
+                "id": f"S{index}",
+                "visual": {
+                    "evidence_shots": [{
+                        "media_type": "motion_graphic",
+                        "composition": "focal_center",
+                        "mascot_presence": "none",
+                        "transition": "cut",
+                        "motion_spec": {"layout": "relationship"},
+                    }],
+                },
+            }
+            for index in range(1, 13)
+        ],
+    }
 
 
 class TestCreativeQuality(unittest.TestCase):
@@ -144,10 +164,7 @@ class TestCreativeQuality(unittest.TestCase):
                                                                  {"scene_ids": ["S1", "S2"]}]}), ["S1", "S2", "S3"])
 
     def test_historical_render_input_fails_with_inferred_legacy_signatures(self):
-        path = Path(__file__).parents[1] / "output/jobs/89c69235/render_input.json"
-        with path.open(encoding="utf-8") as handle:
-            render_input = json.load(handle)
-        report = audit_creative_quality(render_input)
+        report = audit_creative_quality(_legacy_render_input())
         self.assertFalse(report["passed"])
         self.assertTrue(any(set(c["scene_ids"]) & {f"S{i}" for i in range(2, 8)}
                             for c in report["failed_clusters"]))

@@ -24,7 +24,10 @@ export type WorkflowStage = {
   state: WorkflowStageState;
 };
 
-export const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+// Use the hosted frontend origin by default; Next rewrites /api and /health to
+// the colocated FastAPI process. An explicit URL remains available for local
+// split-process development or a separately hosted API.
+export const API_URL = process.env.NEXT_PUBLIC_API_URL || "";
 
 const HACKATHON_MODE = process.env.NEXT_PUBLIC_FYF_RUNTIME_MODE === "hackathon";
 

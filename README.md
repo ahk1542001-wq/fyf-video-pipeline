@@ -28,7 +28,7 @@ FYF Video Pipeline turns a Burmese topic or draft into a reviewable vertical vid
 - **Flash-first:** Gemini 3.7 Flash is the default text/reasoning route; stage-specific thinking levels are measured in telemetry.
 - **Human-reviewable:** The UI exposes progress, QA state, Library output, and cost-confidence labels before an operator shares a video.
 - **Deterministic assembly:** Remotion renders a 1080x1920 composition with Burmese captions, mascot motion, visual treatments, and synced Gemini TTS.
-- **Partner-ready:** Replit is an optional public/demo path. ClickHouse/Grafana are optional sinks; the in-app `/telemetry` view is the canonical operator surface.
+- **Partner-ready:** Replit is the hackathon public/demo path. ClickHouse/Grafana are optional sinks; the in-app `/telemetry` view is the canonical operator surface. The post-hackathon local/private product can omit the Replit boundary.
 
 This repository is FYF-only. It does not add authentication, billing, subscriptions, tenant isolation, or automatic Facebook publishing.
 
@@ -102,7 +102,7 @@ Open:
 - Video Library: `http://localhost:3001/library`
 - Telemetry: `http://localhost:3001/telemetry`
 
-Replit runs the same public/demo surface through `run_replit.sh` and defaults to the Google voice route unless explicitly overridden.
+Replit runs the same public/demo surface through `run_replit.sh`, which uses the locked Python environment, builds/starts Next.js in production mode, and proxies `/api/*` and `/health` through the same hosted origin. It defaults to the Google voice route unless explicitly overridden.
 
 ## Verification evidence
 
