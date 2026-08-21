@@ -16,6 +16,14 @@ from backend.render_video import (
 client = TestClient(app)
 
 class TestRenderVideo(unittest.TestCase):
+    def setUp(self):
+        from backend.runtime_limits import clear_limits_state
+        clear_limits_state()
+
+    def tearDown(self):
+        from backend.runtime_limits import clear_limits_state
+        clear_limits_state()
+
     def test_local_cors_is_reserved_for_video_pipeline_port_3001(self):
         cors = next(
             middleware
