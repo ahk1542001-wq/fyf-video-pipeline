@@ -133,6 +133,43 @@ class PipelineUIAPITests(unittest.TestCase):
         self.assertEqual(recent[0]["video_url"], "/api/jobs/00000007/video")
         self.assertNotIn(temp_dir, json.dumps(recent))
 
+    def test_resume_job_endpoint_queues_resumable_job(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            jobs_root = Path(temp_dir) / "jobs"
+            job_id = "00000099"
+            self._write_job(
+                jobs_root,
+                job_id,
+                status="needs_attention",
+                video=False,
+            )
+            # Ensure status is restart_resumable
+            (jobs_root / job_id / "status.json").write_text(
+                json.dumps({
+                    "job_id": job_id,
+                    "status": "needs_attention",
+                    "voice_provider": "gemini",
+                    "restart_resumable": True,
+                    "resume_count": 1,
+                    "updated_at": "2026-08-20T00:00:00Z",
+                }),
+                encoding="utf-8",
+            )
+            with patch("backend.main.JOBS_ROOT", jobs_root), patch(
+                "backend.main.SCRIPT_JOBS_ROOT", Path(temp_dir) / "script-jobs"
+            ), patch("backend.main.run_pipeline", return_value=None):
+                with TestClient(app) as client:
+                    response = client.post(f"/api/jobs/{job_id}/resume")
+
+            self.assertEqual(response.status_code, 202)
+            data = response.json()
+            self.assertTrue(data["success"])
+            self.assertEqual(data["job_id"], job_id)
+
+            status = json.loads((jobs_root / job_id / "status.json").read_text())
+            self.assertEqual(status["status"], "queued")
+            self.assertEqual(status["resume_count"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -469,6 +469,55 @@ def get_job_status(job_id: str):
         raise HTTPException(status_code=500, detail="Job status corrupted")
 
 
+@app.post("/api/jobs/{job_id}/resume", status_code=status.HTTP_202_ACCEPTED, response_model=VideoResponse)
+async def resume_job(job_id: str, background_tasks: BackgroundTasks):
+    """Resume a failed or interrupted resumable video job."""
+    if not is_valid_job_id(job_id):
+        raise HTTPException(status_code=400, detail="Invalid job ID")
+
+    job_dir = JOBS_ROOT / job_id
+    if not job_dir.is_dir():
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    try:
+        status_data = read_job_status(job_dir)
+    except (FileNotFoundError, ValueError):
+        raise HTTPException(status_code=400, detail="Job status unreadable")
+
+    if not status_data.get("restart_resumable"):
+        raise HTTPException(status_code=400, detail="Job is not marked as resumable")
+
+    script_path = job_dir / "script.json"
+    if not script_path.exists():
+        raise HTTPException(status_code=400, detail="Job script missing")
+
+    try:
+        script_data = json.loads(script_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        raise HTTPException(status_code=400, detail="Job script corrupt")
+
+    enforce_generation_guardrails(root_dir=JOBS_ROOT)
+
+    resume_count = int(status_data.get("resume_count", 0)) + 1
+    update_job_status(job_dir, {
+        "status": "queued",
+        "error": None,
+        "resume_count": resume_count,
+        "restart_resumable": True,
+    })
+
+    background_tasks.add_task(
+        _run_video_pipeline_tracked, job_id, script_data, "gemini", JOBS_ROOT
+    )
+
+    return VideoResponse(
+        success=True,
+        job_id=job_id,
+        status_url=f"/api/jobs/{job_id}/status",
+        restart_resumable=True,
+    )
+
+
 @app.get("/api/jobs/{job_id}/video")
 def get_video(job_id: str):
     if not is_valid_job_id(job_id):
