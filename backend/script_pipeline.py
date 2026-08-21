@@ -1,37 +1,64 @@
-"""Persisted asynchronous script production with narration and batch checkpoints."""
+"""Long-running script job persistence and resume pipeline for Vertex AI."""
 
 from __future__ import annotations
 
 import logging
 import os
+import sys
 import time
 from pathlib import Path
+from typing import Any
+
+_repo_root = Path(__file__).resolve().parent.parent
+if str(_repo_root) not in sys.path:
+    sys.path.insert(0, str(_repo_root))
+_backend_root = _repo_root / "backend"
+if str(_backend_root) not in sys.path:
+    sys.path.insert(0, str(_backend_root))
 
 from backend.job_store import write_json_atomically
 from backend.lock_store import create_script_lock
-from backend.video_director import apply_director_pass
-from backend.vertex_telemetry import telemetry_job_attempt, telemetry_scope
+from backend.vertex_telemetry import (
+    telemetry_job_attempt,
+    telemetry_scope,
+)
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_SCRIPT_LOCK_BATCH_SIZE = 2
+DEFAULT_SCRIPT_MAX_RETRIES = 3
 DEFAULT_SCRIPT_RETRY_BASE_SECONDS = 30.0
 DEFAULT_SCRIPT_RETRY_MAX_SECONDS = 120.0
 DEFAULT_SCRIPT_QUOTA_RETRY_BASE_SECONDS = 60.0
 DEFAULT_SCRIPT_QUOTA_RETRY_MAX_SECONDS = 300.0
-DEFAULT_SCRIPT_MAX_RETRIES = 4
+DEFAULT_SCRIPT_LOCK_BATCH_SIZE = 2
+
+
+def _is_transient_error(error: BaseException) -> bool:
+    """Classify transient provider/network issues vs terminal validation/contract failures."""
+    code = getattr(error, "code", None) or getattr(error, "status_code", None)
+    if code in (429, 500, 502, 503, 504):
+        return True
+    if isinstance(error, (TimeoutError, ConnectionError, OSError)):
+        return True
+    text = str(error).upper()
+    transient_markers = (
+        "429", "500", "502", "503", "504",
+        "RESOURCE_EXHAUSTED", "DEADLINE_EXCEEDED", "UNAVAILABLE",
+        "TIMEOUT", "TIMED OUT", "CONNECTION RESET", "SERVICE UNAVAILABLE",
+    )
+    return any(marker in text for marker in transient_markers)
 
 
 def _provider_rate_limited(error: BaseException) -> bool:
     code = getattr(error, "code", None) or getattr(error, "status_code", None)
-    if code in {429, 500, 502, 503, 504}:
+    if code == 429:
         return True
     text = str(error).upper()
-    return any(marker in text for marker in ("429", "RESOURCE_EXHAUSTED", "DEADLINE_EXCEEDED"))
+    return any(marker in text for marker in ("429", "RESOURCE_EXHAUSTED"))
 
 
 def _script_max_retries() -> int:
-    """Keep persisted script retries bounded while allowing quota recovery."""
+    """Keep script retries bounded to 0-3 (never permit above 3)."""
     try:
         configured = int(os.getenv(
             "FYF_SCRIPT_MAX_RETRIES",
@@ -39,7 +66,7 @@ def _script_max_retries() -> int:
         ))
     except ValueError:
         configured = DEFAULT_SCRIPT_MAX_RETRIES
-    return max(0, min(6, configured))
+    return max(0, min(3, configured))
 
 
 def _sleep_before_script_retry(attempt: int, *, rate_limited: bool = False) -> None:
@@ -131,9 +158,15 @@ def run_script_pipeline(job_id: str, script_jobs_root: Path, locks_root: Path) -
         prior_retries = int(_read_json(job_dir / "status.json").get("retry_count", 0))
     except (OSError, TypeError, ValueError):
         prior_retries = 0
-    with telemetry_scope(job_id, "script", job_dir):
-        with telemetry_job_attempt(prior_retries + 1):
-            _run_script_pipeline(job_id, script_jobs_root, locks_root)
+
+    from backend.runtime_limits import register_active_job, release_active_job
+    register_active_job(job_id)
+    try:
+        with telemetry_scope(job_id, "script", job_dir):
+            with telemetry_job_attempt(prior_retries + 1):
+                _run_script_pipeline(job_id, script_jobs_root, locks_root)
+    finally:
+        release_active_job(job_id)
 
 
 def _run_script_pipeline(job_id: str, script_jobs_root: Path, locks_root: Path) -> None:
@@ -143,7 +176,7 @@ def _run_script_pipeline(job_id: str, script_jobs_root: Path, locks_root: Path) 
         from video_contract import StoryDraftScript, VideoScript
 
         request = _read_json(job_dir / "request.json")
-        use_adk = request.get("use_adk_agent") or os.getenv("FYF_USE_ADK_AGENT", "false").lower() in ("true", "1")
+        use_adk = request.get("use_adk_agent", True) and os.getenv("FYF_USE_ADK_AGENT", "true").lower() in ("true", "1")
         if use_adk:
             from backend.agent.runner import run_adk_pipeline
             update_script_status(job_dir, status="writing", stage="adk_producer", progress=15)
@@ -170,56 +203,102 @@ def _run_script_pipeline(job_id: str, script_jobs_root: Path, locks_root: Path) 
             ))
             write_json_atomically(narration_path, draft.model_dump(mode="json"))
 
+        segments = draft.segments
         batch_size = _script_lock_batch_size(job_dir)
-        batches = [draft.segments[i:i + batch_size] for i in range(0, len(draft.segments), batch_size)]
-        merged: list[dict] = []
-        for index, batch in enumerate(batches):
-            checkpoint = job_dir / f"locked-batch-{index:03d}.json"
-            if checkpoint.exists():
-                locked = _read_json(checkpoint)
-            else:
-                update_script_status(
-                    job_dir,
-                    status="writing",
-                    stage="storyboard",
-                    progress=20 + round(70 * index / max(1, len(batches))),
-                    batch=index + 1,
-                    batch_count=len(batches),
-                    batch_size=batch_size,
-                )
-                locked = generate_exact_lock({
-                    "title": draft.title,
-                    "approved_segments": [
-                        {"id": segment.id, "text": segment.text} for segment in batch
-                    ],
-                })
-                write_json_atomically(checkpoint, locked)
-            merged.extend(locked["segments"])
+        total_batches = max(1, (len(segments) + batch_size - 1) // batch_size)
+        locked_segments = []
 
-        result = VideoScript.model_validate({
-            "title": draft.title,
-            "language": "my-MM",
-            "segments": merged,
-        }).model_dump(mode="json")
-        result = apply_director_pass(result)
-        lock_id = create_script_lock(locks_root, result)
-        write_json_atomically(job_dir / "result.json", result)
-        update_script_status(
-            job_dir, status="completed", stage="locked", progress=100,
-            lock_id=lock_id, error=None, restart_resumable=True,
-        )
-    except Exception as exc:
-        logger.exception("Script job %s failed", job_id)
-        current = _read_json(job_dir / "status.json")
-        retry_count = int(current.get("retry_count", 0))
-        if retry_count < _script_max_retries():
+        for batch_index in range(total_batches):
+            checkpoint_path = job_dir / f"locked-batch-{batch_index:03d}.json"
+            if checkpoint_path.exists():
+                batch_data = VideoScript.model_validate(_read_json(checkpoint_path))
+                locked_segments.extend(batch_data.segments)
+                continue
+
+            start = batch_index * batch_size
+            batch_slice = segments[start:start + batch_size]
+            progress = 10 + int(85 * ((batch_index + 1) / total_batches))
             update_script_status(
-                job_dir, status="queued", stage="retrying",
-                retry_count=retry_count + 1, error=None, restart_resumable=True,
+                job_dir,
+                status="writing",
+                stage="visual_lock",
+                progress=progress,
+                batch=batch_index + 1,
+                batch_count=total_batches,
+                batch_size=batch_size,
+            )
+            batch_script = VideoScript.model_validate(generate_exact_lock({
+                "title": draft.title,
+                "approved_segments": [
+                    {"id": item.id, "text": item.text}
+                    for item in batch_slice
+                ],
+            }))
+            write_json_atomically(checkpoint_path, batch_script.model_dump(mode="json"))
+            locked_segments.extend(batch_script.segments)
+
+        final_script = VideoScript(
+            title=draft.title,
+            language=draft.language,
+            segments=locked_segments,
+        ).model_dump(mode="json")
+
+        lock_id = create_script_lock(locks_root, final_script)
+        write_json_atomically(job_dir / "result.json", final_script)
+        update_script_status(
+            job_dir,
+            status="completed",
+            stage="locked",
+            progress=100,
+            batch=total_batches,
+            batch_count=total_batches,
+            lock_id=lock_id,
+            error=None,
+            restart_resumable=True,
+        )
+
+    except Exception as exc:
+        status_info = _read_json(job_dir / "status.json")
+        retry_count = int(status_info.get("retry_count", 0))
+        max_retries = _script_max_retries()
+        is_transient = _is_transient_error(exc)
+
+        logger.warning(
+            "Script pipeline job %s attempt %s encountered %s error: %s",
+            job_id,
+            retry_count + 1,
+            "transient" if is_transient else "terminal non-transient",
+            exc,
+        )
+
+        if is_transient and retry_count < max_retries:
+            update_script_status(
+                job_dir,
+                status="retrying",
+                stage="retrying",
+                retry_count=retry_count + 1,
+                error="Script generation encountered a transient provider issue. Retrying...",
+                restart_resumable=True,
             )
             _sleep_before_script_retry(retry_count, rate_limited=_provider_rate_limited(exc))
-            return run_script_pipeline(job_id, script_jobs_root, locks_root)
-        update_script_status(
-            job_dir, status="failed", error="Script production failed",
-            restart_resumable=(job_dir / "narration.json").exists(),
-        )
+            _run_script_pipeline(job_id, script_jobs_root, locks_root)
+            return
+
+        if is_transient:
+            update_script_status(
+                job_dir,
+                status="needs_attention",
+                stage="needs_attention",
+                retry_count=retry_count,
+                error="Provider temporarily unavailable. Retries exhausted. Checkpoint preserved for manual resume.",
+                restart_resumable=True,
+            )
+        else:
+            update_script_status(
+                job_dir,
+                status="failed",
+                stage="failed",
+                retry_count=retry_count,
+                error="Script validation or contract failure.",
+                restart_resumable=False,
+            )

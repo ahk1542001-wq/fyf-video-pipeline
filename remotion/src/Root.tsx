@@ -46,6 +46,11 @@ const sampleInput: RenderInput = {
     { start: 1.0, end: 1.5, value: "C" },
     { start: 1.5, end: 3.0, value: "X" },
   ],
+  v3SceneAssets: [
+    ["fyf-v2/scene-a1.png"],
+    ["fyf-v2/scene-a1-system.png"],
+    ["fyf-v2/scene-a2.png"],
+  ],
 };
 
 export const RemotionRoot: React.FC = () => {

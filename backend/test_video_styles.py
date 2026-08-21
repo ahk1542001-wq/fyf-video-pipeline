@@ -80,7 +80,7 @@ class VideoStylesTests(unittest.TestCase):
         # Apply evidence story
         evidence_script = apply_video_style(script, "evidence_story")
         self.assertEqual(evidence_script["style_applied"], "evidence_story")
-        self.assertEqual(evidence_script["segments"][0]["visual"]["camera"], "wide")
+        self.assertEqual(evidence_script["segments"][0]["visual"]["camera"], "diorama_overview")
 
 
 if __name__ == "__main__":

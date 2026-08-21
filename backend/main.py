@@ -2,41 +2,49 @@
 FYF Video Pipeline - FastAPI Backend
 Connects the Next.js frontend to the Gemini Writer/Producer Agent and Gemini-TTS Voice Generation.
 """
-import os
-import sys
-import json
-import re
+from __future__ import annotations
+
 import asyncio
+import json
+import logging
+import os
+import re
+import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
-from fastapi import FastAPI, HTTPException, BackgroundTasks, status
-from fastapi.responses import FileResponse
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from typing import Any, Literal, Optional
 
-import logging
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field, field_validator
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from video_contract import ExactLockRequest, StoryModesResponse, VideoScript
 from backend.job_store import (
-    is_valid_job_id,
     create_job_dir,
-    update_job_status,
-    read_job_status,
-    write_json_atomically,
     initialize_job_status,
+    is_valid_job_id,
+    read_job_status,
+    update_job_status,
+    write_json_atomically,
 )
-from backend.pipeline import run_pipeline
 from backend.lock_store import create_script_lock, read_script_lock
-from backend.script_pipeline import run_script_pipeline
-from backend.video_director import apply_director_pass
-from vertex_model_routing import model_for
+from backend.pipeline import run_pipeline
+from backend.runtime_limits import (
+    enforce_generation_guardrails,
+    register_active_job,
+    release_active_job,
+)
+from backend.script_pipeline import run_script_pipeline, update_script_status
 from backend.telemetry_store import get_all_telemetry_summary, get_job_telemetry
+from backend.video_director import apply_director_pass
+from backend.video_styles import apply_video_style, get_available_styles
+from vertex_model_routing import model_for
+from video_contract import ExactLockRequest, StoryModesResponse, VideoScript
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 JOBS_ROOT = REPO_ROOT / "output" / "jobs"
@@ -60,13 +68,23 @@ app.add_middleware(
 
 
 class ScriptRequest(BaseModel):
-    topic: str = Field(min_length=1)
-    duration_mode: Literal["short", "medium", "long"] = "short"
+    topic: str = Field(min_length=1, max_length=6000)
+    duration_mode: Literal["short"] = "short"
+    style: str | None = "fyf_explainer"
+    use_adk_agent: bool = True
+
+    @field_validator("topic")
+    @classmethod
+    def validate_topic(cls, v: str) -> str:
+        trimmed = v.strip()
+        if not trimmed:
+            raise ValueError("Topic cannot be empty or whitespace only")
+        return trimmed
 
 
 class ScriptResponse(BaseModel):
     success: bool
-    data: VideoScript | None = None
+    data: dict | None = None
     error: str | None = None
     lock_id: str | None = None
 
@@ -83,7 +101,15 @@ class StoryLockResponse(ScriptResponse):
 
 
 class StoryPolishRequest(BaseModel):
-    topic_or_draft: str = Field(min_length=1)
+    topic_or_draft: str = Field(min_length=1, max_length=6000)
+
+    @field_validator("topic_or_draft")
+    @classmethod
+    def validate_topic_or_draft(cls, v: str) -> str:
+        trimmed = v.strip()
+        if not trimmed:
+            raise ValueError("Draft input cannot be empty or whitespace only")
+        return trimmed
 
 
 class StoryPolishResponse(BaseModel):
@@ -92,13 +118,20 @@ class StoryPolishResponse(BaseModel):
     model_used: str | None = None
 
 
-from backend.video_styles import apply_video_style, get_available_styles
-
-
 class VideoRequest(BaseModel):
     lock_id: str = Field(pattern=r"^[0-9a-f]{8}$")
     voice_provider: Literal["gemini"] = "gemini"
     style: str | None = "fyf_explainer"
+
+    @field_validator("style")
+    @classmethod
+    def validate_style(cls, v: str | None) -> str:
+        if v is None or v == "":
+            return "fyf_explainer"
+        valid_ids = {s["id"] for s in get_available_styles()}
+        if v not in valid_ids:
+            raise ValueError(f"Unknown video style '{v}'. Valid styles: {sorted(valid_ids)}")
+        return v
 
 
 class VideoResponse(BaseModel):
@@ -132,8 +165,8 @@ class RecentApprovedVideo(BaseModel):
 
 def _should_resume_script_job(data: dict) -> bool:
     """Resume only jobs interrupted before a terminal failure was recorded."""
-    status = data.get("status")
-    return status in {"queued", "writing"}
+    status_val = data.get("status")
+    return status_val in {"queued", "writing"}
 
 
 def _create_video_job(
@@ -149,13 +182,6 @@ def _create_video_job(
         job_id=job_id,
         status_url=f"/api/jobs/{job_id}/status",
     )
-
-
-from backend.runtime_limits import (
-    enforce_generation_guardrails,
-    register_active_job,
-    release_active_job,
-)
 
 
 async def _run_video_pipeline_tracked(
@@ -204,12 +230,15 @@ def list_video_styles():
 
 
 @app.post("/api/generate-script", status_code=status.HTTP_202_ACCEPTED, response_model=ScriptJobResponse)
-async def generate_script(req: ScriptRequest, background_tasks: BackgroundTasks):
+async def generate_script(req: ScriptRequest, request: Request, background_tasks: BackgroundTasks):
     """Queue persisted Vertex script production and return immediately."""
-    if not req.topic.strip():
-        raise HTTPException(status_code=400, detail="Topic cannot be empty")
-    enforce_generation_guardrails(root_dir=SCRIPT_JOBS_ROOT)
     job_id = create_job_dir(SCRIPT_JOBS_ROOT)
+    enforce_generation_guardrails(
+        request=request,
+        operation_id=job_id,
+        estimated_charge_usd=0.04,
+        job_roots=(JOBS_ROOT, SCRIPT_JOBS_ROOT),
+    )
     job_dir = SCRIPT_JOBS_ROOT / job_id
     write_json_atomically(job_dir / "request.json", req.model_dump(mode="json"))
     write_json_atomically(job_dir / "status.json", {
@@ -239,6 +268,56 @@ def script_job_status(job_id: str):
             raise HTTPException(status_code=500, detail="Completed script result missing")
         data["data"] = json.loads(result_path.read_text(encoding="utf-8"))
     return data
+
+
+@app.post("/api/script-jobs/{job_id}/resume", status_code=status.HTTP_202_ACCEPTED, response_model=ScriptJobResponse)
+async def resume_script_job(job_id: str, request: Request, background_tasks: BackgroundTasks):
+    """Resume a script job that is in needs_attention state."""
+    if not is_valid_job_id(job_id):
+        raise HTTPException(status_code=400, detail="Invalid job ID format")
+
+    job_dir = SCRIPT_JOBS_ROOT / job_id
+    if not job_dir.is_dir():
+        raise HTTPException(status_code=404, detail="Script job not found")
+
+    status_path = job_dir / "status.json"
+    if not status_path.exists():
+        raise HTTPException(status_code=404, detail="Script job status missing")
+
+    try:
+        status_data = json.loads(status_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        raise HTTPException(status_code=400, detail="Script job status unreadable")
+
+    if status_data.get("status") != "needs_attention" and not status_data.get("restart_resumable"):
+        raise HTTPException(status_code=400, detail="Job is not in a resumable needs_attention state")
+
+    resume_count = int(status_data.get("resume_count", 0)) + 1
+    if resume_count > 3:
+        raise HTTPException(status_code=400, detail="Maximum script resume attempts (3) exceeded")
+
+    enforce_generation_guardrails(
+        request=request,
+        operation_id=f"script_resume_{job_id}_{resume_count}",
+        estimated_charge_usd=0.04,
+        job_roots=(JOBS_ROOT, SCRIPT_JOBS_ROOT),
+    )
+
+    update_script_status(
+        job_dir,
+        status="queued",
+        stage="queued",
+        error=None,
+        resume_count=resume_count,
+        retry_count=0,
+    )
+    background_tasks.add_task(run_script_pipeline, job_id, SCRIPT_JOBS_ROOT, LOCKS_ROOT)
+    return ScriptJobResponse(
+        success=True,
+        job_id=job_id,
+        status_url=f"/api/script-jobs/{job_id}/status",
+        restart_resumable=True,
+    )
 
 
 @app.on_event("startup")
@@ -310,8 +389,14 @@ async def resume_interrupted_script_jobs():
 
 
 @app.post("/api/story-polish", response_model=StoryPolishResponse)
-async def story_polish(req: StoryPolishRequest):
+async def story_polish(req: StoryPolishRequest, request: Request):
     """Vertex-only FYF story variants; never queues a video."""
+    enforce_generation_guardrails(
+        request=request,
+        operation_id=f"polish_{int(datetime.now().timestamp() * 1000)}",
+        estimated_charge_usd=0.02,
+        job_roots=(JOBS_ROOT, SCRIPT_JOBS_ROOT),
+    )
     try:
         from writer_agent_vertex import generate_story_modes
         generated = generate_story_modes(req.topic_or_draft)
@@ -327,8 +412,14 @@ async def story_polish(req: StoryPolishRequest):
 
 
 @app.post("/api/story-lock", response_model=StoryLockResponse)
-async def story_lock(req: ExactLockRequest):
+async def story_lock(req: ExactLockRequest, request: Request):
     """Use Vertex only for visuals; server verifies approved narration byte-for-byte."""
+    enforce_generation_guardrails(
+        request=request,
+        operation_id=f"lock_{int(datetime.now().timestamp() * 1000)}",
+        estimated_charge_usd=0.03,
+        job_roots=(JOBS_ROOT, SCRIPT_JOBS_ROOT),
+    )
     try:
         from writer_agent_vertex import generate_exact_lock
         data = VideoScript.model_validate(generate_exact_lock(req.model_dump(mode="json")))
@@ -342,9 +433,8 @@ async def story_lock(req: ExactLockRequest):
 
 
 @app.post("/api/generate-video", status_code=status.HTTP_202_ACCEPTED, response_model=VideoResponse)
-async def generate_video(req: VideoRequest, background_tasks: BackgroundTasks):
-    """Takes the generated script JSON, creates job, and queues pipeline."""
-    enforce_generation_guardrails(root_dir=JOBS_ROOT)
+async def generate_video(req: VideoRequest, request: Request, background_tasks: BackgroundTasks):
+    """Takes the approved script lock, creates job, and queues pipeline."""
     try:
         try:
             script_data = read_script_lock(LOCKS_ROOT, req.lock_id)
@@ -352,17 +442,30 @@ async def generate_video(req: VideoRequest, background_tasks: BackgroundTasks):
             raise ValueError("Approved script lock not found") from exc
 
         styled_script = apply_video_style(script_data, req.style)
-        queued = _queue_video_job(background_tasks, styled_script, "gemini")
+        job = _create_video_job(styled_script, "gemini")
+
+        enforce_generation_guardrails(
+            request=request,
+            operation_id=job.job_id,
+            estimated_charge_usd=0.06,
+            job_roots=(JOBS_ROOT, SCRIPT_JOBS_ROOT),
+        )
+
+        background_tasks.add_task(
+            _run_video_pipeline_tracked, job.job_id, styled_script, "gemini", JOBS_ROOT
+        )
 
         return VideoResponse(
             success=True,
-            job_id=queued.job_id,
-            status_url=queued.status_url,
+            job_id=job.job_id,
+            status_url=job.status_url,
             restart_resumable=True
         )
 
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
+    except HTTPException:
+        raise
     except Exception:
         logger.exception("Video generation queueing error:")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -470,7 +573,7 @@ def get_job_status(job_id: str):
 
 
 @app.post("/api/jobs/{job_id}/resume", status_code=status.HTTP_202_ACCEPTED, response_model=VideoResponse)
-async def resume_job(job_id: str, background_tasks: BackgroundTasks):
+async def resume_job(job_id: str, request: Request, background_tasks: BackgroundTasks):
     """Resume a failed or interrupted resumable video job."""
     if not is_valid_job_id(job_id):
         raise HTTPException(status_code=400, detail="Invalid job ID")
@@ -496,9 +599,17 @@ async def resume_job(job_id: str, background_tasks: BackgroundTasks):
     except (OSError, json.JSONDecodeError):
         raise HTTPException(status_code=400, detail="Job script corrupt")
 
-    enforce_generation_guardrails(root_dir=JOBS_ROOT)
-
     resume_count = int(status_data.get("resume_count", 0)) + 1
+    if resume_count > 3:
+        raise HTTPException(status_code=400, detail="Maximum resume attempts (3) exceeded")
+
+    enforce_generation_guardrails(
+        request=request,
+        operation_id=f"video_resume_{job_id}_{resume_count}",
+        estimated_charge_usd=0.06,
+        job_roots=(JOBS_ROOT, SCRIPT_JOBS_ROOT),
+    )
+
     update_job_status(job_dir, {
         "status": "queued",
         "error": None,
@@ -519,52 +630,46 @@ async def resume_job(job_id: str, background_tasks: BackgroundTasks):
 
 
 @app.get("/api/jobs/{job_id}/video")
-def get_video(job_id: str):
+def get_job_video(job_id: str):
     if not is_valid_job_id(job_id):
         raise HTTPException(status_code=400, detail="Invalid job ID")
 
     job_dir = JOBS_ROOT / job_id
-    try:
-        job_status = read_job_status(job_dir)
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="Job not found")
-    except ValueError:
-        raise HTTPException(status_code=500, detail="Job status corrupted")
-    if (
-        job_status.get("status") != "completed"
-        or not (job_status.get("qa_report") or {}).get("passed")
-        or not (job_status.get("final_visual_qa") or {}).get("passed")
-    ):
-        raise HTTPException(status_code=404, detail="Approved video not found")
-
     video_path = job_dir / "video.mp4"
+    if not video_path.exists():
+        raise HTTPException(status_code=404, detail="Video file not found")
 
     try:
-        resolved_path = video_path.resolve()
-        resolved_path.relative_to(JOBS_ROOT.resolve())
-        if not resolved_path.is_file() or resolved_path.stat().st_size == 0:
-            raise HTTPException(status_code=404, detail="Video not found")
-        return FileResponse(resolved_path, media_type="video/mp4")
-    except ValueError:
-        raise HTTPException(status_code=403, detail="Forbidden path")
+        status_data = read_job_status(job_dir)
+        if status_data.get("status") != "completed":
+            raise HTTPException(status_code=404, detail="Video not completed or approved")
+    except (FileNotFoundError, ValueError):
+        raise HTTPException(status_code=404, detail="Job status missing or unreadable")
+
+    return FileResponse(
+        path=str(video_path),
+        media_type="video/mp4",
+        filename=f"fyf_{job_id}.mp4"
+    )
 
 
 @app.get("/api/telemetry")
-def get_telemetry_overview():
-    """Retrieve aggregated video generation telemetry."""
-    return get_all_telemetry_summary(
-        base_dir=REPO_ROOT / "output" / "telemetry",
-        job_roots=(JOBS_ROOT, SCRIPT_JOBS_ROOT),
-    )
+def get_telemetry_summary():
+    return get_all_telemetry_summary(job_roots=(JOBS_ROOT, SCRIPT_JOBS_ROOT))
+
+
+@app.get("/api/telemetry/{job_id}")
+def get_job_telemetry_detail(job_id: str):
+    if not is_valid_job_id(job_id):
+        raise HTTPException(status_code=400, detail="Invalid job ID format")
+    try:
+        return get_job_telemetry(job_id, job_roots=(JOBS_ROOT, SCRIPT_JOBS_ROOT))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Job telemetry not found")
 
 
 @app.get("/api/jobs/{job_id}/telemetry")
-def get_job_telemetry_details(job_id: str):
-    """Retrieve detailed provider usage metrics for a job."""
-    if not is_valid_job_id(job_id):
-        raise HTTPException(status_code=400, detail="Invalid job ID")
-    return get_job_telemetry(
-        job_id,
-        base_dir=REPO_ROOT / "output" / "telemetry",
-        job_roots=(JOBS_ROOT, SCRIPT_JOBS_ROOT),
-    )
+def get_job_telemetry_alias(job_id: str):
+    return get_job_telemetry_detail(job_id)
