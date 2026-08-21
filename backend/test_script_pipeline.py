@@ -171,6 +171,43 @@ class ScriptPipelineTests(unittest.TestCase):
             result = json.loads((job / "result.json").read_text(encoding="utf-8"))
             self.assertEqual(len(result["segments"]), 12)
 
+    def test_script_pipeline_routes_through_adk_agent_when_configured(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            jobs, locks = self.make_job(root)
+            job = jobs / "abcd1234"
+            (job / "request.json").write_text(
+                json.dumps({"topic": "စိုက်ပျိုးရေး", "duration_mode": "short", "use_adk_agent": True}),
+                encoding="utf-8",
+            )
+            mock_video_script = {
+                "title": "လယ်ယာကဏ္ဍ",
+                "language": "my-MM",
+                "segments": [
+                    {
+                        "id": f"s{i}",
+                        "text": f"စာသား {i}",
+                        "visual_action": "explain",
+                        "scene_type": "whiteboard",
+                        "mascot_action": "explain",
+                        "emotion": "focused",
+                        "emphasis": [],
+                    }
+                    for i in range(1, 6)
+                ],
+            }
+            with patch(
+                "backend.agent.runner.run_adk_pipeline",
+                return_value={"script": mock_video_script, "draft": {}, "audit": {"passed": True}},
+            ) as mock_adk:
+                run_script_pipeline("abcd1234", jobs, locks)
+
+            mock_adk.assert_called_once_with("စိုက်ပျိုးရေး", "short", job_dir=job)
+            status = json.loads((job / "status.json").read_text(encoding="utf-8"))
+            self.assertEqual(status["status"], "completed")
+            self.assertEqual(status["stage"], "locked")
+            self.assertIsNotNone(status.get("lock_id"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -127,14 +127,18 @@ def rebalance_creative_rhythm(
             mascot_run = 0
 
         transition = shot.get("transition")
-        if transition == previous_transition:
-            transition_run += 1
+        if transition is not None:
+            if transition == previous_transition:
+                transition_run += 1
+            else:
+                previous_transition, transition_run = transition, 1
+            if transition_run > policy.max_transition_run and editable_scene and shot is not scene:
+                replacement = next(value for value in transitions if value != previous_transition)
+                shot["transition"] = replacement
+                previous_transition, transition_run = replacement, 1
         else:
-            previous_transition, transition_run = transition, 1
-        if transition_run > policy.max_transition_run and editable_scene:
-            replacement = next(value for value in transitions if value != previous_transition)
-            shot["transition"] = replacement
-            previous_transition, transition_run = replacement, 1
+            previous_transition = None
+            transition_run = 0
 
     return result
 

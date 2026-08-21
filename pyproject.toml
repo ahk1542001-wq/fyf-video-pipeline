@@ -21,7 +21,7 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-pythonpath = ["."]
+pythonpath = [".", "backend"]
 testpaths = ["backend", "voice_service"]
 
 

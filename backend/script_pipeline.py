@@ -143,6 +143,23 @@ def _run_script_pipeline(job_id: str, script_jobs_root: Path, locks_root: Path) 
         from video_contract import StoryDraftScript, VideoScript
 
         request = _read_json(job_dir / "request.json")
+        use_adk = request.get("use_adk_agent") or os.getenv("FYF_USE_ADK_AGENT", "false").lower() in ("true", "1")
+        if use_adk:
+            from backend.agent.runner import run_adk_pipeline
+            update_script_status(job_dir, status="writing", stage="adk_producer", progress=15)
+            adk_result = run_adk_pipeline(
+                request["topic"],
+                request.get("duration_mode", "short"),
+                job_dir=job_dir,
+            )
+            result = adk_result["script"]
+            lock_id = create_script_lock(locks_root, result)
+            update_script_status(
+                job_dir, status="completed", stage="locked", progress=100,
+                lock_id=lock_id, error=None, restart_resumable=True,
+            )
+            return
+
         narration_path = job_dir / "narration.json"
         if narration_path.exists():
             draft = StoryDraftScript.model_validate(_read_json(narration_path))

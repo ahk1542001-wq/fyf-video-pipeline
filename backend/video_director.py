@@ -87,7 +87,7 @@ def _drop_partial_treatment_metadata(script_data: dict[str, Any]) -> None:
     shots = [
         shot
         for segment in script_data.get("segments", [])
-        for shot in segment.get("visual", {}).get("evidence_shots", [])
+        for shot in (segment.get("visual") or {}).get("evidence_shots", [])
     ]
     treated = [shot for shot in shots if shot.get("treatment") is not None]
     if treated and len(treated) != len(shots):
@@ -105,8 +105,9 @@ def apply_director_pass(script_data: dict[str, Any]) -> dict[str, Any]:
     _drop_partial_treatment_metadata(script)
     consecutive_mascot_segments = 0
     for segment in script["segments"]:
-        shots = segment["visual"]["evidence_shots"]
-        has_mascot = any(shot["mascot_presence"] != "none" for shot in shots)
+        visual = segment.get("visual") or {}
+        shots = visual.get("evidence_shots", [])
+        has_mascot = any(shot.get("mascot_presence") != "none" for shot in shots)
         consecutive_mascot_segments = consecutive_mascot_segments + 1 if has_mascot else 0
         if consecutive_mascot_segments >= 4:
             for shot in shots:
