@@ -28,7 +28,7 @@ FYF Video Pipeline turns a Burmese topic or draft into a reviewable vertical vid
 - **Flash-first:** Gemini 3.7 Flash is the default text/reasoning route; stage-specific thinking levels are measured in telemetry.
 - **Human-reviewable:** The UI exposes progress, QA state, Library output, and cost-confidence labels before an operator shares a video.
 - **Deterministic assembly:** Remotion renders a 1080x1920 composition with Burmese captions, mascot motion, visual treatments, and synced Gemini TTS.
-- **Partner-ready:** Replit is the hackathon public/demo path. ClickHouse/Grafana are optional sinks; the in-app `/telemetry` view is the canonical operator surface. The post-hackathon local/private product can omit the Replit boundary.
+- **Partner-ready:** Replit is the hackathon public/demo path; the in-app `/telemetry` view is the canonical operator surface. The post-hackathon local/private product can omit the Replit boundary.
 
 This repository is FYF-only. It does not add authentication, billing, subscriptions, tenant isolation, or automatic Facebook publishing.
 
@@ -48,8 +48,8 @@ This repository is FYF-only. It does not add authentication, billing, subscripti
 | Runtime | Local FastAPI + Next.js + Remotion; Replit demo boundary | Hosted runtime after auth, rate limits, access controls, and storage are separately approved |
 | AI | Vertex/Gemini with Gemini 3.7 Flash text and Gemini TTS | Measured quotas, pricing catalog, and operational alerting |
 | Storage | Local ignored job folders and privacy-safe telemetry ledger | Approved durable storage with retention and access policy |
-| Voice | Gemini mascot voice by default in hackathon mode; optional partner adapter | Explicitly reviewed partner route and reference handling |
-| Observability | Native in-app `/telemetry`; optional ClickHouse sink | Reviewed durable telemetry and Grafana dashboards if needed |
+| Voice | Gemini mascot voice in hackathon release | Explicitly reviewed partner route and reference handling |
+| Observability | Native in-app `/telemetry` dashboard | Reviewed durable telemetry if needed |
 | Publishing | Operator downloads a completed video | Separate approval required for any external publishing integration |
 
 ## Architecture graph
@@ -73,8 +73,8 @@ flowchart TD
 - **Backend:** FastAPI, Pydantic, Google Gen AI SDK, Vertex/Gemini
 - **Frontend:** Next.js App Router, React, TypeScript, Tailwind
 - **Video:** Remotion, React, TypeScript, FFmpeg
-- **Voice:** Gemini-TTS with optional Kaggle partner adapter
-- **Observability:** Local privacy-safe ledger, optional ClickHouse sink, in-app telemetry UI
+- **Voice:** Gemini-TTS
+- **Observability:** Local privacy-safe ledger, in-app telemetry UI
 - **Deployment boundary:** Replit configuration is included for the public/demo runtime boundary
 
 ## Local setup

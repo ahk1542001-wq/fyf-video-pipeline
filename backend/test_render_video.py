@@ -165,75 +165,6 @@ class TestRenderVideo(unittest.TestCase):
             self.assertIn("fyf-v2/scene-a1.png", captures[0]["public"])
             self.assertIn("job-visuals/verified.png", captures[0]["public"])
 
-    def test_startup_resumes_paired_jobs_through_coordinator_once(self):
-        import backend.main as main_module
-        from backend.job_store import initialize_job_status, update_job_status
-
-        with tempfile.TemporaryDirectory() as jobs_dir, tempfile.TemporaryDirectory() as script_jobs, tempfile.TemporaryDirectory() as locks:
-            root = Path(jobs_dir)
-            source = root / "1234abcd"
-            target = root / "5678abcd"
-            source.mkdir()
-            target.mkdir()
-            script = {"title": "Locked", "language": "my-MM", "segments": [{"id": "S1", "text": "စာသား"}]}
-            for job_dir, provider in ((source, "kaggle"), (target, "gemini")):
-                initialize_job_status(job_dir, job_dir.name, provider)
-                (job_dir / "script.json").write_text(json.dumps(script, ensure_ascii=False))
-            update_job_status(source, {"status": "voice"})
-            update_job_status(target, {
-                "status": "queued", "paired_source_job_id": source.name,
-            })
-
-            async def exercise():
-                with patch.object(main_module, "JOBS_ROOT", root), patch.object(
-                    main_module, "SCRIPT_JOBS_ROOT", Path(script_jobs)
-                ), patch.object(main_module, "LOCKS_ROOT", Path(locks)), patch.object(
-                    main_module, "run_pipeline", new_callable=AsyncMock
-                ) as standalone, patch.object(
-                    main_module, "run_paired_pipeline", new_callable=AsyncMock
-                ) as paired:
-                    await main_module.resume_interrupted_script_jobs()
-                    await __import__("asyncio").sleep(0)
-                    return standalone, paired
-
-            standalone, paired = __import__("asyncio").run(exercise())
-            standalone.assert_not_awaited()
-            paired.assert_awaited_once()
-            self.assertEqual(paired.await_args.args[0:2], (source.name, target.name))
-
-    def test_startup_does_not_queue_target_when_paired_source_is_unresumable(self):
-        import backend.main as main_module
-        from backend.job_store import initialize_job_status, update_job_status, read_job_status
-
-        with tempfile.TemporaryDirectory() as jobs_dir, tempfile.TemporaryDirectory() as script_jobs, tempfile.TemporaryDirectory() as locks:
-            root = Path(jobs_dir)
-            source = root / "1234abcd"
-            target = root / "5678abcd"
-            source.mkdir()
-            target.mkdir()
-            script = {"language": "my-MM", "segments": [{"id": "S1", "text": "စာသား"}]}
-            for job_dir, provider in ((source, "kaggle"), (target, "gemini")):
-                initialize_job_status(job_dir, job_dir.name, provider)
-                (job_dir / "script.json").write_text(json.dumps(script, ensure_ascii=False))
-            update_job_status(source, {"status": "failed", "restart_resumable": False})
-            update_job_status(target, {"status": "queued", "paired_source_job_id": source.name})
-
-            async def exercise():
-                with patch.object(main_module, "JOBS_ROOT", root), patch.object(
-                    main_module, "SCRIPT_JOBS_ROOT", Path(script_jobs)
-                ), patch.object(main_module, "LOCKS_ROOT", Path(locks)), patch.object(
-                    main_module, "run_paired_pipeline", new_callable=AsyncMock
-                ) as paired:
-                    await main_module.resume_interrupted_script_jobs()
-                    await __import__("asyncio").sleep(0)
-                    return paired
-
-            paired = __import__("asyncio").run(exercise())
-            paired.assert_not_awaited()
-            status = read_job_status(target)
-            self.assertEqual(status["status"], "failed")
-            self.assertFalse(status["restart_resumable"])
-
     def test_startup_resume_counts_active_job_and_enforces_limit(self):
         import backend.main as main_module
         from backend.job_store import initialize_job_status, update_job_status, read_job_status
@@ -463,81 +394,39 @@ class TestRenderVideo(unittest.TestCase):
             with patch("backend.main.JOBS_ROOT", __import__("pathlib").Path(temp_dir)), patch("backend.main.LOCKS_ROOT", __import__("pathlib").Path(locks_dir)):
                 req_data = {
                     "lock_id": lock_id,
-                    "voice_provider": "kaggle"
+                    "voice_provider": "gemini"
                 }
 
-                for provider in ["kaggle", "gemini"]:
-                    with self.subTest(provider=provider):
-                        req_data["voice_provider"] = provider
-                        response = client.post("/api/generate-video", json=req_data)
-                        self.assertEqual(response.status_code, 202)
+                response = client.post("/api/generate-video", json=req_data)
+                self.assertEqual(response.status_code, 202)
 
-                        data = response.json()
-                        self.assertTrue(data["success"])
-                        job_id = data.get("job_id")
-                        self.assertIsNotNone(job_id)
-                        self.assertEqual(data.get("status_url"), f"/api/jobs/{job_id}/status")
-                        self.assertTrue(data.get("restart_resumable"))
+                data = response.json()
+                self.assertTrue(data["success"])
+                job_id = data.get("job_id")
+                self.assertIsNotNone(job_id)
+                self.assertEqual(data.get("status_url"), f"/api/jobs/{job_id}/status")
+                self.assertTrue(data.get("restart_resumable"))
 
-                        # Check status was initialized
-                        status_file = os.path.join(temp_dir, job_id, "status.json")
-                        self.assertTrue(os.path.exists(status_file))
-                        with open(status_file, "r") as f:
-                            status_data = json.load(f)
-                            self.assertEqual(status_data["status"], "queued")
-                            self.assertEqual(status_data["voice_provider"], provider)
-                            self.assertTrue(status_data["restart_resumable"])
+                # Check status was initialized
+                status_file = os.path.join(temp_dir, job_id, "status.json")
+                self.assertTrue(os.path.exists(status_file))
+                with open(status_file, "r") as f:
+                    status_data = json.load(f)
+                    self.assertEqual(status_data["status"], "queued")
+                    self.assertEqual(status_data["voice_provider"], "gemini")
+                    self.assertTrue(status_data["restart_resumable"])
 
-                        # Check script was saved
-                        script_file = os.path.join(temp_dir, job_id, "script.json")
-                        self.assertTrue(os.path.exists(script_file))
-                        with open(script_file, "r") as f:
-                            script_data = json.load(f)
-                            self.assertEqual(script_data["title"], "Test Video")
+                # Check script was saved
+                script_file = os.path.join(temp_dir, job_id, "script.json")
+                self.assertTrue(os.path.exists(script_file))
+                with open(script_file, "r") as f:
+                    script_data = json.load(f)
+                    self.assertEqual(script_data["title"], "Test Video")
 
                 # Check unknown provider rejected
                 req_data["voice_provider"] = "unknown"
                 response = client.post("/api/generate-video", json=req_data)
                 self.assertEqual(response.status_code, 422)
-
-                # Hackathon judging runtime is Google-AI-only.
-                req_data["voice_provider"] = "kaggle"
-                with patch.dict("os.environ", {"FYF_RUNTIME_MODE": "hackathon"}):
-                    response = client.post("/api/generate-video", json=req_data)
-                self.assertEqual(response.status_code, 422)
-                self.assertIn("Google AI voice", response.json()["detail"])
-
-    @patch("backend.main.run_paired_pipeline", new_callable=AsyncMock)
-    def test_generate_dual_video_endpoint_queues_both_product_voices(self, mock_paired_pipeline):
-        with tempfile.TemporaryDirectory() as temp_dir, tempfile.TemporaryDirectory() as locks_dir:
-            lock_id = "abc12345"
-            lock_path = __import__("pathlib").Path(locks_dir) / lock_id
-            lock_path.mkdir()
-            (lock_path / "script.json").write_text(json.dumps({
-                "title": "Test", "language": "my-MM", "segments": [{
-                    "id": "s1", "text": "Burmese", "visual_action": "explain",
-                    "scene_type": "whiteboard", "mascot_action": "explain",
-                    "emotion": "focused", "emphasis": []
-                }]
-            }))
-            with patch("backend.main.JOBS_ROOT", __import__("pathlib").Path(temp_dir)), patch("backend.main.LOCKS_ROOT", __import__("pathlib").Path(locks_dir)):
-                response = client.post("/api/generate-dual-video", json={"lock_id": lock_id})
-                self.assertEqual(response.status_code, 202)
-                jobs = response.json()["jobs"]
-                self.assertEqual([job["voice_provider"] for job in jobs], ["kaggle", "gemini"])
-                self.assertEqual(len({job["job_id"] for job in jobs}), 2)
-                for job in jobs:
-                    self.assertTrue(os.path.isfile(os.path.join(temp_dir, job["job_id"], "script.json")))
-                source_id, target_id = [job["job_id"] for job in jobs]
-                with open(os.path.join(temp_dir, target_id, "status.json")) as status_file:
-                    self.assertEqual(json.load(status_file)["paired_source_job_id"], source_id)
-                mock_paired_pipeline.assert_awaited_once()
-                args = mock_paired_pipeline.await_args.args
-                self.assertEqual(args[0:2], (source_id, target_id))
-
-                with patch.dict("os.environ", {"FYF_RUNTIME_MODE": "hackathon"}):
-                    rejected = client.post("/api/generate-dual-video", json={"lock_id": lock_id})
-                self.assertEqual(rejected.status_code, 422)
 
     def test_get_status_endpoints(self):
         with tempfile.TemporaryDirectory() as temp_dir:

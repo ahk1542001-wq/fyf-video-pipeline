@@ -70,7 +70,7 @@ class PipelineUIAPITests(unittest.TestCase):
             (job_dir / "video.mp4").write_bytes(b"approved-video")
         return job_dir
 
-    def test_runtime_hackathon_exposes_only_gemini_and_routed_models(self):
+    def test_runtime_exposes_only_gemini_and_routed_models(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
@@ -92,25 +92,6 @@ class PipelineUIAPITests(unittest.TestCase):
                 "fallback_model": "fallback-override",
             },
         )
-
-    def test_runtime_product_exposes_all_voice_modes_and_model_overrides(self):
-        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
-            os.environ,
-            {
-                "FYF_RUNTIME_MODE": "product",
-                "FYF_VERTEX_SCRIPT_MODEL": "product-script",
-                "FYF_VERTEX_STORY_FALLBACK_MODEL": "product-fallback",
-            },
-        ), patch("backend.main.SCRIPT_JOBS_ROOT", Path(temp_dir) / "script-jobs"):
-            with TestClient(app) as client:
-                response = client.get("/api/runtime")
-
-        self.assertEqual(response.status_code, 200)
-        data = response.json()
-        self.assertEqual(data["runtime_mode"], "product")
-        self.assertEqual(data["allowed_voice_providers"], ["kaggle", "gemini", "dual"])
-        self.assertEqual(data["script_model"], "product-script")
-        self.assertEqual(data["fallback_model"], "product-fallback")
 
     def test_recent_returns_only_newest_six_completed_approved_jobs_with_safe_fields(self):
         with tempfile.TemporaryDirectory() as temp_dir:

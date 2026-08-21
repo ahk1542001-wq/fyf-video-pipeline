@@ -43,8 +43,6 @@ type VisualProgress = {
   current_failed_ids?: string[];
 };
 
-const HACKATHON_MODE = process.env.NEXT_PUBLIC_FYF_RUNTIME_MODE === "hackathon";
-// The page owns create-job state. Shared runtime/data and workflow presentation live in small modules.
 export default function Home() {
   const [topic, setTopic] = useState("");
   const [durationMode, setDurationMode] = useState<"short" | "medium" | "long">("short");
@@ -55,21 +53,17 @@ export default function Home() {
   const [scriptLockId, setScriptLockId] = useState<string | null>(null);
   const [storyModel, setStoryModel] = useState<string | null>(null);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
-  const [pairedVideos, setPairedVideos] = useState<Array<{voice: "kaggle" | "gemini"; url: string}>>([]);
   const [writingStatus, setWritingStatus] = useState<"idle" | "writing" | "done" | "error">("idle");
   const [scriptProgress, setScriptProgress] = useState("Waiting for the script worker…");
   const [renderStatus, setRenderStatus] = useState<JobStatus>("idle");
   const [visualProgress, setVisualProgress] = useState<VisualProgress | null>(null);
   const [renderProgress, setRenderProgress] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [voiceProvider, setVoiceProvider] = useState<VoiceProvider>(HACKATHON_MODE ? "gemini" : "kaggle");
   const [runtime, setRuntime] = useState<RuntimeInfo>(STATIC_RUNTIME_FALLBACK);
   const [runtimeSource, setRuntimeSource] = useState<"api" | "fallback">("fallback");
 
   const activeVideoControllerRef = useRef<AbortController | null>(null);
-  const effectiveVoiceProvider: VoiceProvider = runtime.allowed_voice_providers.includes(voiceProvider)
-    ? voiceProvider
-    : runtime.allowed_voice_providers[0] || "gemini";
+  const effectiveVoiceProvider: VoiceProvider = "gemini";
 
   useEffect(() => {
     return () => {
@@ -125,7 +119,7 @@ export default function Home() {
     );
   }
 
-  const hasCompletedVideo = renderStatus === "completed" && Boolean(videoUrl || pairedVideos.length > 0);
+  const hasCompletedVideo = renderStatus === "completed" && Boolean(videoUrl);
   const workflowStages = deriveWorkflowStages({
     hasSource: topic.trim().length > 0,
     hasStory: Boolean(script || variants.length > 0),
@@ -149,7 +143,6 @@ export default function Home() {
     setScriptLocked(false);
     setScriptLockId(null);
     setVideoUrl(null);
-    setPairedVideos([]);
     setError(null);
     try {
       const res = await fetch(`${API_URL}/api/generate-script`, {
@@ -268,15 +261,14 @@ export default function Home() {
     setVideoUrl(null);
 
     try {
-      const dual = effectiveVoiceProvider === "dual";
-      const res = await fetch(`${API_URL}${dual ? "/api/generate-dual-video" : "/api/generate-video"}`, {
+      const res = await fetch(`${API_URL}/api/generate-video`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(dual ? {lock_id: scriptLockId} : {
+        body: JSON.stringify({
           lock_id: scriptLockId,
-          voice_provider: effectiveVoiceProvider
+          voice_provider: "gemini",
         }),
-        signal
+        signal,
       });
 
       if (res.status !== 202) {
@@ -292,16 +284,6 @@ export default function Home() {
 
       if (!isRecord(data) || data.success !== true) {
         throw new Error("Invalid response: success must be true");
-      }
-
-      if (dual) {
-        if (!Array.isArray(data.jobs) || data.jobs.length !== 2) throw new Error("Invalid paired video jobs");
-        const jobs = data.jobs.map((job) => {
-          if (!isRecord(job) || (job.voice_provider !== "kaggle" && job.voice_provider !== "gemini") || typeof job.job_id !== "string" || !/^[0-9a-f]{8}$/.test(job.job_id) || job.status_url !== `/api/jobs/${job.job_id}/status`) throw new Error("Invalid paired video job");
-          return {voice: job.voice_provider as "kaggle" | "gemini", jobId: job.job_id, statusUrl: job.status_url as string};
-        });
-        await Promise.all(jobs.map(job => pollJobStatus(job.statusUrl, job.jobId, signal, job.voice)));
-        return;
       }
 
       if (typeof data.job_id !== "string" || !/^[0-9a-f]{8}$/.test(data.job_id)) {
@@ -350,7 +332,7 @@ export default function Home() {
     });
   }
 
-  async function pollJobStatus(statusUrl: string, jobId: string, signal: AbortSignal, pairedVoice?: "kaggle" | "gemini") {
+  async function pollJobStatus(statusUrl: string, jobId: string, signal: AbortSignal) {
     const startTime = Date.now();
     const MAX_TIME = 45 * 60 * 1000; // 45 minutes
 
@@ -398,12 +380,7 @@ export default function Home() {
                return;
             }
             const videoPath = data.video_url as string;
-            const readyUrl = `${API_URL}${videoPath}`;
-            if (pairedVoice) {
-              setPairedVideos(current => [...current.filter(item => item.voice !== pairedVoice), {voice: pairedVoice, url: readyUrl}]);
-            } else {
-              setVideoUrl(readyUrl);
-            }
+            setVideoUrl(`${API_URL}${videoPath}`);
             setRenderStatus("completed");
             return;
           }
@@ -448,7 +425,7 @@ export default function Home() {
                    setRenderProgress(`Verifying visual evidence… ${safeProgress.passed}/${safeProgress.total} shots`);
                  }
                } else if (status === "voice") {
-                 setRenderProgress("Generating the selected voice…");
+                 setRenderProgress("Generating the Gemini mascot voice…");
                } else if (status === "rendering") {
                  setRenderProgress("Rendering the audio-driven video…");
                } else if (status === "qa") {
@@ -470,7 +447,6 @@ export default function Home() {
 
       } catch (err) {
          if ((err as Error).name === 'AbortError') return;
-         // Transient network error, just wait and retry
       }
 
       await abortableDelay(5000, signal);
@@ -524,14 +500,9 @@ export default function Home() {
                   id="voice-provider"
                   className="field-control"
                   value={effectiveVoiceProvider}
-                  onChange={(event) => {
-                    const value = event.target.value;
-                    if (value === "kaggle" || value === "gemini" || value === "dual") setVoiceProvider(value);
-                  }}
+                  disabled
                 >
-                  {runtime.allowed_voice_providers.map(provider => (
-                    <option key={provider} value={provider}>{voiceProviderLabel(provider)}</option>
-                  ))}
+                  <option value="gemini">{voiceProviderLabel("gemini")}</option>
                 </select>
               </div>
               <div className="field-group">
@@ -653,25 +624,13 @@ export default function Home() {
                     {visualProgress && (visualProgress.fallbacks ?? 0) > 0 && <p className="preview-status__detail">Verified fallbacks: {visualProgress.fallbacks}</p>}
                   </div>
                 ) : renderStatus === "voice" ? (
-                  <p className="preview-status preview-status--active">{renderProgress || (effectiveVoiceProvider === "kaggle" ? "Synthesizing partner narration…" : "Synthesizing AI mascot voice…")}</p>
+                  <p className="preview-status preview-status--active">{renderProgress || "Synthesizing AI mascot voice…"}</p>
                 ) : renderStatus === "rendering" ? (
                   <p className="preview-status preview-status--active">{renderProgress || "Rendering video…"}</p>
                 ) : renderStatus === "qa" ? (
                   <p className="preview-status preview-status--active">{renderProgress || "Checking video, audio, narration, and mouth cues…"}</p>
                 ) : renderStatus === "failed" ? (
                   <p className="preview-status">Render stopped. Review the message beside the source controls.</p>
-                ) : pairedVideos.length > 0 ? (
-                  <div className="paired-preview">
-                    {pairedVideos.map(item => (
-                      <div key={item.voice} className="paired-preview__item">
-                        <div className="paired-preview__heading">
-                          <p>{voiceProviderLabel(item.voice)}</p>
-                          <a href={item.url} download className="text-action text-action--inverse">Download MP4</a>
-                        </div>
-                        <video controls playsInline className="paired-preview__video" src={item.url} aria-label={`${voiceProviderLabel(item.voice)} preview`} />
-                      </div>
-                    ))}
-                  </div>
                 ) : videoUrl ? (
                   <video controls playsInline className="preview-window__video" src={videoUrl} aria-label="Rendered FYF video preview" />
                 ) : (

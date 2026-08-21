@@ -154,7 +154,7 @@ export const AgentNetwork: React.FC = () => {
 };
 
 export const TerminalDemo: React.FC<{ codeText?: string }> = ({
-  codeText = "import { Agent } from '@fyf/core';\n\nconst brain = new Agent({\n  model: 'claude-3-opus',\n  tools: ['search']\n});\n\nawait brain.execute('Build video pipeline');\n// >> Pipeline connected. All systems go."
+  codeText = "import { Agent } from '@fyf/core';\n\nconst brain = new Agent({\n  model: 'gemini-3.7-flash',\n  tools: ['search']\n});\n\nawait brain.execute('Build video pipeline');\n// >> Pipeline connected. All systems go."
 }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();

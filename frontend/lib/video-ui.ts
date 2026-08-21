@@ -1,4 +1,4 @@
-export type VoiceProvider = "kaggle" | "gemini" | "dual";
+export type VoiceProvider = "gemini";
 
 export type RuntimeInfo = {
   runtime_mode: "hackathon" | "product";
@@ -10,7 +10,7 @@ export type RuntimeInfo = {
 export type RecentApprovedVideo = {
   job_id: string;
   title: string;
-  voice_provider: "kaggle" | "gemini";
+  voice_provider: "gemini";
   updated_at: string;
   video_url: string;
 };
@@ -29,13 +29,11 @@ export type WorkflowStage = {
 // split-process development or a separately hosted API.
 export const API_URL = process.env.NEXT_PUBLIC_API_URL || "";
 
-const HACKATHON_MODE = process.env.NEXT_PUBLIC_FYF_RUNTIME_MODE === "hackathon";
-
 export const STATIC_RUNTIME_FALLBACK: RuntimeInfo = {
-  runtime_mode: HACKATHON_MODE ? "hackathon" : "product",
-  allowed_voice_providers: HACKATHON_MODE ? ["gemini"] : ["kaggle", "gemini", "dual"],
-  script_model: process.env.NEXT_PUBLIC_FYF_SCRIPT_MODEL || "Unavailable until the runtime API responds",
-  fallback_model: process.env.NEXT_PUBLIC_FYF_FALLBACK_MODEL || "Unavailable until the runtime API responds",
+  runtime_mode: "hackathon",
+  allowed_voice_providers: ["gemini"],
+  script_model: process.env.NEXT_PUBLIC_FYF_SCRIPT_MODEL || "Gemini 3.7 Flash",
+  fallback_model: process.env.NEXT_PUBLIC_FYF_FALLBACK_MODEL || "Gemini 2.5 Flash",
 };
 
 function isRecordValue(value: unknown): value is Record<string, unknown> {
@@ -49,7 +47,7 @@ export function isRuntimeInfo(value: unknown): value is RuntimeInfo {
     (value.runtime_mode === "hackathon" || value.runtime_mode === "product") &&
     Array.isArray(providers) &&
     providers.length > 0 &&
-    providers.every(provider => provider === "kaggle" || provider === "gemini" || provider === "dual") &&
+    providers.every(provider => provider === "gemini") &&
     typeof value.script_model === "string" &&
     typeof value.fallback_model === "string"
   );
@@ -61,7 +59,7 @@ export function isRecentApprovedVideo(value: unknown): value is RecentApprovedVi
   return (
     typeof value.title === "string" &&
     value.title.trim().length > 0 &&
-    (value.voice_provider === "kaggle" || value.voice_provider === "gemini") &&
+    value.voice_provider === "gemini" &&
     typeof value.updated_at === "string" &&
     value.updated_at.trim().length > 0 &&
     value.video_url === `/api/jobs/${value.job_id}/video`
@@ -79,10 +77,9 @@ export function mergeRecentVideos(
     .slice(0, 6);
 }
 
-export function voiceProviderLabel(provider: VoiceProvider): string {
-  if (provider === "kaggle") return "Partner voice";
-  if (provider === "dual") return "Partner + AI";
-  return "AI voice";
+export function voiceProviderLabel(_provider?: VoiceProvider): string {
+  void _provider;
+  return "Gemini Mascot Voice";
 }
 
 type WorkflowStateInput = {
@@ -209,5 +206,5 @@ export type TelemetrySummary = {
   avg_render_time_sec: number;
   total_vertex_calls?: number;
   jobs: JobTelemetry[];
-  clickhouse_status: string;
+  budget_status: string;
 };

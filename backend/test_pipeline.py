@@ -340,39 +340,6 @@ class TestPipeline(unittest.TestCase):
             self.assertEqual(checkpoint["audio_master_version"], 1)
             self.assertEqual(checkpoint["audio_peak_dbfs"], -1.5)
 
-    def test_audio_change_reuses_approved_local_visual_repair_not_paired_base(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            job_id = "1234abcd"
-            job_dir = root / job_id
-            job_dir.mkdir()
-            incoming = {"language": "my-MM", "segments": [{"id": "s1", "text": "same", "visual": "base"}]}
-            repaired = {"language": "my-MM", "segments": [{"id": "s1", "text": "same", "visual": "timing-repair"}]}
-            from backend.job_store import initialize_job_status, write_json_atomically
-            initialize_job_status(job_dir, job_id, "gemini")
-            write_json_atomically(job_dir / "script.json", repaired)
-            for name in ("qa_report.json", "creative_qa.json", "final_visual_qa.json"):
-                write_json_atomically(job_dir / name, {"passed": True})
-
-            def voice(*_args, **kwargs):
-                Path(kwargs["output_path"]).write_text("audio")
-
-            def render(job_dir_value):
-                output = Path(job_dir_value) / "video.mp4"
-                output.write_text("video")
-                return str(output)
-
-            with patch("backend.pipeline.load_adopted_visual_plan", side_effect=AssertionError("paired base must not replace local repair")), patch(
-                "backend.pipeline.generate_voice", side_effect=voice
-            ), patch("backend.pipeline.build_render_input", return_value={"mouthCues": [], "audioSrc": "voice.wav", "script": repaired}) as build, patch(
-                "backend.pipeline.render_video_remotion", side_effect=render
-            ), patch("backend.pipeline.qa_job_directory", return_value={"passed": True, "checks": [], "failure_codes": [], "metrics": {}}), patch(
-                "backend.pipeline.audit_creative_quality", return_value={"passed": True}
-            ):
-                asyncio.run(run_pipeline(job_id, incoming, "gemini", root))
-
-            self.assertEqual(build.call_args.args[0], repaired)
-
     @patch("backend.pipeline.qa_job_directory")
     @patch("backend.pipeline.render_video_remotion")
     @patch("backend.pipeline.generate_voice")
@@ -385,20 +352,20 @@ class TestPipeline(unittest.TestCase):
                 "segments": [{"id": "1", "text": "test"}]
             }
 
-            for provider in ["kaggle", "gemini"]:
+            for provider in ["gemini"]:
                 with self.subTest(provider=provider):
                     mock_generate_voice.reset_mock()
                     mock_render_video.reset_mock()
                     mock_qa.reset_mock()
                     mock_qa.return_value = {"passed": True, "checks": [], "failure_codes": [], "metrics": {}}
 
-                    job_id = {"kaggle": "1234abcd", "gemini": "5678abcd"}[provider]
+                    job_id = "5678abcd"
                     job_dir = temp_path / job_id
                     job_dir.mkdir()
 
                     # Initialize status
                     from backend.job_store import initialize_job_status
-                    initialize_job_status(job_dir, job_id)
+                    initialize_job_status(job_dir, job_id, "gemini")
 
                     # Setup mocks to create expected output files
                     def mock_voice(*args, **kwargs):
@@ -417,11 +384,11 @@ class TestPipeline(unittest.TestCase):
                     with patch("backend.pipeline.build_render_input") as mock_build_cues:
                         mock_build_cues.return_value = {"mouthCues": [], "audioSrc": "voice.wav", "script": script_dict}
 
-                        asyncio.run(run_pipeline(job_id, script_dict, provider, temp_path))
+                        asyncio.run(run_pipeline(job_id, script_dict, "gemini", temp_path))
 
                         mock_generate_voice.assert_called_with(
                             script_json=script_dict,
-                            provider=provider,
+                            provider="gemini",
                             output_path=str(job_dir / "voice.wav")
                         )
 
@@ -444,104 +411,6 @@ class TestPipeline(unittest.TestCase):
                             self.assertEqual(render_input["audioSrc"], "voice.wav")
                             self.assertEqual(render_input["mouthCues"], [])
                             self.assertEqual(render_input["script"]["title"], "Test")
-
-    def test_paired_jobs_share_one_approved_visual_artifact(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            script = {"title": "Shared", "language": "my-MM", "segments": [{"id": "s1", "text": "same"}]}
-            providers = [("1234abcd", "kaggle"), ("5678abcd", "gemini")]
-            from backend.job_store import initialize_job_status
-            for job_id, provider in providers:
-                job_dir = root / job_id
-                job_dir.mkdir()
-                initialize_job_status(job_dir, job_id, provider)
-
-            def voice(*_args, **kwargs):
-                Path(kwargs["output_path"]).write_text(kwargs["provider"])
-
-            def render(job_dir_value):
-                job_dir = Path(job_dir_value)
-                (job_dir / "video.mp4").write_text("video")
-                return str(job_dir / "video.mp4")
-
-            with patch("backend.pipeline.generate_voice", side_effect=voice) as voice_mock, patch(
-                "backend.pipeline.build_render_input",
-                side_effect=lambda value, _audio: {"mouthCues": [], "audioSrc": "voice.wav", "script": value},
-            ), patch("backend.pipeline.render_video_remotion", side_effect=render), patch(
-                "backend.pipeline.qa_job_directory",
-                return_value={"passed": True, "checks": [], "failure_codes": [], "metrics": {}},
-            ), patch("backend.pipeline.audit_creative_quality", return_value={"passed": True}):
-                for job_id, provider in providers:
-                    asyncio.run(run_pipeline(job_id, script, provider, root))
-
-            self.assertEqual(self.plan_mock.call_count, 1)
-            self.assertEqual(self.relation_mock.call_count, 1)
-            self.assertEqual(self.visual_mock.call_count, 1)
-            self.assertEqual(voice_mock.call_count, 2)
-            first_script = (root / "1234abcd" / "script.json").read_bytes()
-            second_script = (root / "5678abcd" / "script.json").read_bytes()
-            self.assertEqual(first_script, second_script)
-
-    def test_adopted_paired_visual_plan_skips_stale_shared_artifact(self):
-        from backend.job_store import initialize_job_status, update_job_status
-        from backend.paired_visuals import adopt_completed_visual_plan
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            source = root / "1234abcd"
-            target = root / "5678abcd"
-            source.mkdir()
-            target.mkdir()
-            locked = {
-                "title": "Shared",
-                "language": "my-MM",
-                "segments": [{"id": "S1", "text": "တူညီသော စာသား"}],
-            }
-            approved = json.loads(json.dumps(locked))
-            approved["segments"][0]["visual"] = {
-                "screen_text": ["အတည်ပြုပြီး"],
-                "evidence_shots": [],
-            }
-            initialize_job_status(source, source.name, "kaggle")
-            initialize_job_status(target, target.name, "gemini")
-            (source / "script.json").write_text(json.dumps(approved, ensure_ascii=False))
-            (target / "script.json").write_text(json.dumps(locked, ensure_ascii=False))
-            reports = {
-                "qa_report": {"passed": True},
-                "creative_qa": {"passed": True},
-                "final_visual_qa": {
-                    "passed": True,
-                    "segments": [{"segment_id": "S1", "passed": True}],
-                },
-            }
-            update_job_status(source, {"status": "completed", **reports})
-            adopt_completed_visual_plan(source, target)
-
-            def voice(*_args, **kwargs):
-                Path(kwargs["output_path"]).write_text("gemini")
-
-            def render(job_dir_value):
-                output = Path(job_dir_value) / "video.mp4"
-                output.write_text("video")
-                return str(output)
-
-            with patch("backend.pipeline._prepare_visual_artifact") as prepare, patch(
-                "backend.pipeline.generate_voice", side_effect=voice
-            ), patch(
-                "backend.pipeline.build_render_input",
-                side_effect=lambda value, _audio: {
-                    "mouthCues": [], "audioSrc": "voice.wav", "script": value,
-                },
-            ), patch("backend.pipeline.render_video_remotion", side_effect=render), patch(
-                "backend.pipeline.qa_job_directory",
-                return_value={"passed": True, "checks": [], "failure_codes": [], "metrics": {}},
-            ), patch("backend.pipeline.audit_creative_quality", return_value={"passed": True}):
-                asyncio.run(run_pipeline(target.name, locked, "gemini", root))
-
-            prepare.assert_not_called()
-            self.assertEqual(
-                json.loads((target / "script.json").read_text()), approved
-            )
 
     def test_retry_with_materialized_script_reuses_persisted_approved_artifact_key(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -606,7 +475,7 @@ class TestPipeline(unittest.TestCase):
             sibling_dir.mkdir()
             from backend.job_store import initialize_job_status
             initialize_job_status(producer_dir, producer_id, "gemini")
-            initialize_job_status(sibling_dir, sibling_id, "kaggle")
+            initialize_job_status(sibling_dir, sibling_id, "gemini")
 
             def checkpoint(completed):
                 return {
@@ -651,7 +520,7 @@ class TestPipeline(unittest.TestCase):
             sibling_dir.mkdir()
             from backend.job_store import initialize_job_status
             initialize_job_status(producer_dir, producer_id, "gemini")
-            initialize_job_status(sibling_dir, sibling_id, "kaggle")
+            initialize_job_status(sibling_dir, sibling_id, "gemini")
 
             def legacy_checkpoint(completed):
                 shots = [
@@ -949,33 +818,17 @@ class TestPipeline(unittest.TestCase):
             job_dir.mkdir()
 
             from backend.job_store import initialize_job_status, read_job_status
-            initialize_job_status(job_dir, job_id)
+            initialize_job_status(job_dir, job_id, "gemini")
 
             # Setup mock to NOT create the audio file
             mock_generate_voice.side_effect = lambda *args, **kwargs: None
 
-            asyncio.run(run_pipeline(job_id, {}, "kaggle", temp_path))
+            asyncio.run(run_pipeline(job_id, {}, "gemini", temp_path))
 
             status = read_job_status(job_dir)
             self.assertEqual(status["status"], "failed")
             self.assertTrue(status["restart_resumable"])
             self.assertIsNotNone(status["error"])
-
-    @patch("backend.pipeline.generate_voice")
-    def test_hackathon_runtime_rejects_kaggle_even_when_pipeline_called_directly(self, mock_generate_voice):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_path = Path(temp_dir)
-            job_id = "1234abcd"
-            job_dir = temp_path / job_id
-            job_dir.mkdir()
-            from backend.job_store import initialize_job_status, read_job_status
-            initialize_job_status(job_dir, job_id)
-            with patch.dict("os.environ", {"FYF_RUNTIME_MODE": "hackathon"}):
-                asyncio.run(run_pipeline(job_id, {}, "kaggle", temp_path))
-            status = read_job_status(job_dir)
-            self.assertEqual(status["status"], "failed")
-            self.assertFalse(status["restart_resumable"])
-            mock_generate_voice.assert_not_called()
 
     @patch("backend.pipeline.qa_job_directory", return_value={"passed": True, "checks": [], "failure_codes": [], "metrics": {}})
     @patch("backend.pipeline.render_video_remotion")

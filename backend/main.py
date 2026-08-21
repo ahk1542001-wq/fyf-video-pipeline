@@ -1,6 +1,6 @@
 """
 FYF Video Pipeline - FastAPI Backend
-Connects the Next.js frontend to the Gemini Writer Agent (Stage 1) and Voice Generation (Stage 2).
+Connects the Next.js frontend to the Gemini Writer/Producer Agent and Gemini-TTS Voice Generation.
 """
 import os
 import sys
@@ -23,16 +23,20 @@ logger = logging.getLogger(__name__)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from video_contract import ExactLockRequest, StoryModesResponse, VideoScript
-from backend.job_store import is_valid_job_id, create_job_dir, update_job_status, read_job_status, write_json_atomically, initialize_job_status
+from backend.job_store import (
+    is_valid_job_id,
+    create_job_dir,
+    update_job_status,
+    read_job_status,
+    write_json_atomically,
+    initialize_job_status,
+)
 from backend.pipeline import run_pipeline
-from backend.paired_pipeline import run_paired_pipeline
 from backend.lock_store import create_script_lock, read_script_lock
 from backend.script_pipeline import run_script_pipeline
 from backend.video_director import apply_director_pass
 from vertex_model_routing import model_for
-
-# Do not import writer agent at module level to avoid Google Vertex AI dependency for testing
-# We will import it locally in generate_script
+from backend.telemetry_store import get_all_telemetry_summary, get_job_telemetry
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 JOBS_ROOT = REPO_ROOT / "output" / "jobs"
@@ -54,9 +58,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 class ScriptRequest(BaseModel):
     topic: str = Field(min_length=1)
     duration_mode: Literal["short", "medium", "long"] = "short"
+
 
 class ScriptResponse(BaseModel):
     success: bool
@@ -64,33 +70,32 @@ class ScriptResponse(BaseModel):
     error: str | None = None
     lock_id: str | None = None
 
+
 class ScriptJobResponse(BaseModel):
     success: bool
     job_id: str
     status_url: str
     restart_resumable: bool = True
 
+
 class StoryLockResponse(ScriptResponse):
     lock_id: str | None = None
 
+
 class StoryPolishRequest(BaseModel):
     topic_or_draft: str = Field(min_length=1)
+
 
 class StoryPolishResponse(BaseModel):
     success: bool
     variants: list[dict] | None = None
     model_used: str | None = None
 
+
 class VideoRequest(BaseModel):
     lock_id: str = Field(pattern=r"^[0-9a-f]{8}$")
-    voice_provider: Literal["kaggle", "gemini"] = "kaggle"
+    voice_provider: Literal["gemini"] = "gemini"
 
-    def enforce_runtime_mode(self) -> None:
-        if (
-            os.getenv("FYF_RUNTIME_MODE", "product").strip().lower() == "hackathon"
-            and self.voice_provider != "gemini"
-        ):
-            raise ValueError("Hackathon runtime permits only the Google AI voice route")
 
 class VideoResponse(BaseModel):
     success: bool
@@ -99,23 +104,16 @@ class VideoResponse(BaseModel):
     restart_resumable: bool = True
     error: str | None = None
 
-class DualVideoRequest(BaseModel):
-    lock_id: str = Field(pattern=r"^[0-9a-f]{8}$")
 
-class PairedVideoJob(BaseModel):
-    voice_provider: Literal["kaggle", "gemini"]
+class VideoJobItem(BaseModel):
+    voice_provider: Literal["gemini"] = "gemini"
     job_id: str
     status_url: str
-
-class DualVideoResponse(BaseModel):
-    success: bool
-    jobs: list[PairedVideoJob]
-    restart_resumable: bool = True
 
 
 class RuntimeResponse(BaseModel):
     runtime_mode: Literal["hackathon", "product"]
-    allowed_voice_providers: list[Literal["kaggle", "gemini", "dual"]]
+    allowed_voice_providers: list[Literal["gemini"]]
     script_model: str
     fallback_model: str
 
@@ -123,7 +121,7 @@ class RuntimeResponse(BaseModel):
 class RecentApprovedVideo(BaseModel):
     job_id: str = Field(pattern=r"^[0-9a-f]{8}$")
     title: str = Field(min_length=1)
-    voice_provider: Literal["kaggle", "gemini"]
+    voice_provider: Literal["gemini"]
     updated_at: str = Field(min_length=1)
     video_url: str
 
@@ -133,15 +131,16 @@ def _should_resume_script_job(data: dict) -> bool:
     status = data.get("status")
     return status in {"queued", "writing"}
 
+
 def _create_video_job(
     script_data: dict,
-    voice_provider: Literal["kaggle", "gemini"],
-) -> PairedVideoJob:
+    voice_provider: Literal["gemini"] = "gemini",
+) -> VideoJobItem:
     job_id = create_job_dir(JOBS_ROOT)
     output_dir = JOBS_ROOT / job_id
     initialize_job_status(output_dir, job_id, voice_provider)
     write_json_atomically(output_dir / "script.json", script_data)
-    return PairedVideoJob(
+    return VideoJobItem(
         voice_provider=voice_provider,
         job_id=job_id,
         status_url=f"/api/jobs/{job_id}/status",
@@ -151,13 +150,14 @@ def _create_video_job(
 def _queue_video_job(
     background_tasks: BackgroundTasks,
     script_data: dict,
-    voice_provider: Literal["kaggle", "gemini"],
-) -> PairedVideoJob:
+    voice_provider: Literal["gemini"] = "gemini",
+) -> VideoJobItem:
     job = _create_video_job(script_data, voice_provider)
     background_tasks.add_task(
         run_pipeline, job.job_id, script_data, voice_provider, JOBS_ROOT
     )
     return job
+
 
 @app.get("/health")
 def health():
@@ -166,22 +166,13 @@ def health():
 
 @app.get("/api/runtime", response_model=RuntimeResponse)
 def get_runtime():
-    runtime_mode = (
-        "hackathon"
-        if os.getenv("FYF_RUNTIME_MODE", "product").strip().lower() == "hackathon"
-        else "product"
-    )
-    allowed_voice_providers = (
-        ["gemini"]
-        if runtime_mode == "hackathon"
-        else ["kaggle", "gemini", "dual"]
-    )
     return RuntimeResponse(
-        runtime_mode=runtime_mode,
-        allowed_voice_providers=allowed_voice_providers,
+        runtime_mode="hackathon",
+        allowed_voice_providers=["gemini"],
         script_model=model_for("script"),
         fallback_model=model_for("story_fallback"),
     )
+
 
 @app.post("/api/generate-script", status_code=status.HTTP_202_ACCEPTED, response_model=ScriptJobResponse)
 async def generate_script(req: ScriptRequest, background_tasks: BackgroundTasks):
@@ -239,7 +230,15 @@ async def resume_interrupted_script_jobs():
 
     if not JOBS_ROOT.exists():
         return
-    resumable_records: dict[str, tuple[Path, dict, dict]] = {}
+
+    def needs_resume(data: dict) -> bool:
+        return data.get("status") in {
+            "queued", "visuals", "voice", "rendering", "qa", "creative_qa"
+        } or (
+            data.get("status") == "failed"
+            and bool(data.get("restart_resumable"))
+        )
+
     for job_dir in JOBS_ROOT.iterdir():
         status_path = job_dir / "status.json"
         script_path = job_dir / "script.json"
@@ -255,89 +254,11 @@ async def resume_interrupted_script_jobs():
             script_data = json.loads(script_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        resumable_records[job_dir.name] = (job_dir, data, script_data)
 
-    def needs_resume(data: dict) -> bool:
-        return data.get("status") in {
-            "queued", "visuals", "voice", "rendering", "qa", "creative_qa"
-        } or (
-            data.get("status") == "failed"
-            and bool(data.get("restart_resumable"))
-        )
-
-    handled: set[str] = set()
-    for target_id, (target_dir, target_data, _target_script) in resumable_records.items():
-        source_id = target_data.get("paired_source_job_id")
-        if not isinstance(source_id, str) or not is_valid_job_id(source_id):
-            continue
-        source_record = resumable_records.get(source_id)
-        if source_record is None or not needs_resume(target_data):
-            continue
-        source_dir, source_data, source_script = source_record
-        source_provider = source_data.get("voice_provider")
-        target_provider = target_data.get("voice_provider")
-        if source_provider not in {"kaggle", "gemini"} or target_provider not in {"kaggle", "gemini"}:
-            continue
-        source_resume_count = int(source_data.get("resume_count", 0))
-        target_resume_count = int(target_data.get("resume_count", 0))
-        if source_data.get("status") != "completed" and not needs_resume(source_data):
-            update_job_status(target_dir, {
-                "status": "failed",
-                "error": "Paired source cannot be resumed automatically; manual retry is required.",
-                "restart_resumable": False,
-            })
-            handled.update({source_id, target_id})
-            continue
-        if needs_resume(source_data) and source_resume_count >= 3:
-            update_job_status(source_dir, {
-                "status": "failed",
-                "error": "Automatic resume limit reached; manual retry is required.",
-                "restart_resumable": False,
-            })
-            update_job_status(target_dir, {
-                "status": "failed",
-                "error": "Paired source automatic resume limit reached; manual retry is required.",
-                "restart_resumable": False,
-            })
-            handled.update({source_id, target_id})
-            continue
-        if target_resume_count >= 3:
-            update_job_status(target_dir, {
-                "status": "failed",
-                "error": "Automatic resume limit reached; manual retry is required.",
-                "restart_resumable": False,
-            })
-            handled.add(target_id)
-            continue
-        if needs_resume(source_data):
-            update_job_status(source_dir, {
-                "status": "queued",
-                "error": None,
-                "resume_count": source_resume_count + 1,
-                "restart_resumable": True,
-            })
-        update_job_status(target_dir, {
-            "status": "queued",
-            "error": None,
-            "resume_count": target_resume_count + 1,
-            "restart_resumable": True,
-        })
-        asyncio.create_task(run_paired_pipeline(
-            source_id,
-            target_id,
-            source_script,
-            JOBS_ROOT,
-            source_provider=source_provider,
-            target_provider=target_provider,
-        ))
-        handled.update({source_id, target_id})
-
-    for job_id, (job_dir, data, script_data) in resumable_records.items():
-        if job_id in handled:
-            continue
-        provider = data.get("voice_provider")
+        provider = data.get("voice_provider") or "gemini"
         resume_count = int(data.get("resume_count", 0))
         resumable = needs_resume(data)
+
         if resumable and resume_count >= 3:
             update_job_status(job_dir, {
                 "status": "failed",
@@ -345,7 +266,8 @@ async def resume_interrupted_script_jobs():
                 "restart_resumable": False,
             })
             continue
-        if resumable and provider in {"kaggle", "gemini"}:
+
+        if resumable and provider == "gemini":
             update_job_status(job_dir, {
                 "status": "queued",
                 "error": None,
@@ -353,8 +275,9 @@ async def resume_interrupted_script_jobs():
                 "restart_resumable": True,
             })
             asyncio.create_task(run_pipeline(
-                job_dir.name, script_data, provider, JOBS_ROOT
+                job_dir.name, script_data, "gemini", JOBS_ROOT
             ))
+
 
 @app.post("/api/story-polish", response_model=StoryPolishResponse)
 async def story_polish(req: StoryPolishRequest):
@@ -372,6 +295,7 @@ async def story_polish(req: StoryPolishRequest):
         logger.exception("Story polish failed")
         raise HTTPException(status_code=500, detail="Story polish failed")
 
+
 @app.post("/api/story-lock", response_model=StoryLockResponse)
 async def story_lock(req: ExactLockRequest):
     """Use Vertex only for visuals; server verifies approved narration byte-for-byte."""
@@ -386,16 +310,17 @@ async def story_lock(req: ExactLockRequest):
         logger.exception("Story lock failed")
         raise HTTPException(status_code=500, detail="Story lock failed")
 
+
 @app.post("/api/generate-video", status_code=status.HTTP_202_ACCEPTED, response_model=VideoResponse)
 async def generate_video(req: VideoRequest, background_tasks: BackgroundTasks):
     """Takes the generated script JSON, creates job, and queues pipeline."""
     try:
-        req.enforce_runtime_mode()
         try:
             script_data = read_script_lock(LOCKS_ROOT, req.lock_id)
         except FileNotFoundError as exc:
             raise ValueError("Approved script lock not found") from exc
-        queued = _queue_video_job(background_tasks, script_data, req.voice_provider)
+
+        queued = _queue_video_job(background_tasks, script_data, "gemini")
 
         return VideoResponse(
             success=True,
@@ -406,38 +331,8 @@ async def generate_video(req: VideoRequest, background_tasks: BackgroundTasks):
 
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
-    except Exception as e:
-        logger.exception("Video generation queueing error:")
-        raise HTTPException(status_code=500, detail="Internal server error")
-
-@app.post("/api/generate-dual-video", status_code=status.HTTP_202_ACCEPTED, response_model=DualVideoResponse)
-async def generate_dual_video(req: DualVideoRequest, background_tasks: BackgroundTasks):
-    """Queue the same immutable lock as paired partner and Google AI outputs."""
-    if os.getenv("FYF_RUNTIME_MODE", "product").strip().lower() == "hackathon":
-        raise HTTPException(status_code=422, detail="Hackathon runtime permits only the Google AI voice route")
-    try:
-        script_data = read_script_lock(LOCKS_ROOT, req.lock_id)
-        source = _create_video_job(script_data, "kaggle")
-        target = _create_video_job(script_data, "gemini")
-        update_job_status(
-            JOBS_ROOT / target.job_id,
-            {"paired_source_job_id": source.job_id},
-        )
-        background_tasks.add_task(
-            run_paired_pipeline,
-            source.job_id,
-            target.job_id,
-            script_data,
-            JOBS_ROOT,
-            source_provider="kaggle",
-            target_provider="gemini",
-        )
-        jobs = [source, target]
-        return DualVideoResponse(success=True, jobs=jobs)
-    except FileNotFoundError:
-        raise HTTPException(status_code=422, detail="Approved script lock not found")
     except Exception:
-        logger.exception("Dual video generation queueing error:")
+        logger.exception("Video generation queueing error:")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -482,9 +377,9 @@ def get_recent_approved_videos():
             ):
                 continue
 
-            provider = status_data.get("voice_provider")
+            provider = status_data.get("voice_provider") or "gemini"
             updated_at = status_data.get("updated_at")
-            if provider not in {"kaggle", "gemini"} or not isinstance(updated_at, str) or not updated_at.strip():
+            if provider != "gemini" or not isinstance(updated_at, str) or not updated_at.strip():
                 continue
             try:
                 sort_timestamp = datetime.fromisoformat(
@@ -508,7 +403,7 @@ def get_recent_approved_videos():
             item = RecentApprovedVideo(
                 job_id=job_entry.name,
                 title=title.strip(),
-                voice_provider=provider,
+                voice_provider="gemini",
                 updated_at=updated_at,
                 video_url=f"/api/jobs/{job_entry.name}/video",
             )
@@ -518,6 +413,7 @@ def get_recent_approved_videos():
 
     recent.sort(key=lambda item: item[0], reverse=True)
     return [item for _, item in recent[:6]]
+
 
 @app.get("/api/jobs/{job_id}/status")
 def get_job_status(job_id: str):
@@ -538,8 +434,8 @@ def get_job_status(job_id: str):
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Job not found")
     except ValueError:
-        # Corrupt file
         raise HTTPException(status_code=500, detail="Job status corrupted")
+
 
 @app.get("/api/jobs/{job_id}/video")
 def get_video(job_id: str):
@@ -562,7 +458,6 @@ def get_video(job_id: str):
 
     video_path = job_dir / "video.mp4"
 
-    # Check for directory traversal / path isolation
     try:
         resolved_path = video_path.resolve()
         resolved_path.relative_to(JOBS_ROOT.resolve())
@@ -572,19 +467,19 @@ def get_video(job_id: str):
     except ValueError:
         raise HTTPException(status_code=403, detail="Forbidden path")
 
-from backend.clickhouse_telemetry import get_all_telemetry_summary, get_job_telemetry
 
 @app.get("/api/telemetry")
 def get_telemetry_overview():
-    """Retrieve aggregated ClickHouse video generation telemetry."""
+    """Retrieve aggregated video generation telemetry."""
     return get_all_telemetry_summary(
         base_dir=REPO_ROOT / "output" / "telemetry",
         job_roots=(JOBS_ROOT, SCRIPT_JOBS_ROOT),
     )
 
+
 @app.get("/api/jobs/{job_id}/telemetry")
 def get_job_telemetry_details(job_id: str):
-    """Retrieve detailed provider usage and legacy scene metrics for a job."""
+    """Retrieve detailed provider usage metrics for a job."""
     if not is_valid_job_id(job_id):
         raise HTTPException(status_code=400, detail="Invalid job ID")
     return get_job_telemetry(

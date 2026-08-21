@@ -50,9 +50,8 @@ quality gates explicit so a human can inspect the result before sharing it.
 
 ## Partner-track scope decision
 
-The selected partner track is **Replit only**. The local `/telemetry` page and
-optional ClickHouse adapter are operator features; they are not being claimed
-as a second partner track or as a Grafana/ClickHouse submission.
+The selected partner track is **Replit only**. The local `/telemetry` page is an
+operator feature; it is not being claimed as a second partner track.
 
 ## Demo and source gates
 

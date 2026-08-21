@@ -249,7 +249,7 @@ def read_job_status(job_dir: Path) -> Dict[str, Any]:
 def initialize_job_status(
     job_dir: Path,
     job_id: str,
-    voice_provider: Literal["kaggle", "gemini"] | None = None,
+    voice_provider: Literal["gemini"] | None = "gemini",
 ) -> Dict[str, Any]:
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     status_data = {
