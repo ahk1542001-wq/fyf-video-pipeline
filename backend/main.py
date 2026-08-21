@@ -28,6 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from backend.job_store import (
     create_job_dir,
+    generate_job_id,
     initialize_job_status,
     is_valid_job_id,
     read_job_status,
@@ -369,8 +370,9 @@ async def resume_interrupted_script_jobs():
             except (OSError, json.JSONDecodeError):
                 continue
             if _should_resume_script_job(data):
+                lease = None
                 try:
-                    acquire_guardrail_lease(
+                    lease = acquire_guardrail_lease(
                         operation_id=job_dir.name,
                         client_ip="127.0.0.1",
                         estimated_charge_usd=0.04,
@@ -379,13 +381,18 @@ async def resume_interrupted_script_jobs():
                     asyncio.create_task(asyncio.to_thread(
                         run_script_pipeline, job_dir.name, SCRIPT_JOBS_ROOT, LOCKS_ROOT
                     ))
-                except HTTPException:
-                    update_script_status(
-                        job_dir,
-                        status="needs_attention",
-                        restart_resumable=True,
-                        error="Automatic restart delayed by guardrails (system busy or budget limit). Manual resume available.",
-                    )
+                except Exception:
+                    if lease is not None:
+                        lease.release()
+                    try:
+                        update_script_status(
+                            job_dir,
+                            status="needs_attention",
+                            restart_resumable=True,
+                            error="Automatic restart delayed by guardrails or queue initialization. Manual resume available.",
+                        )
+                    except Exception:
+                        logger.exception("Could not mark script job %s as needs_attention", job_dir.name)
 
     if not JOBS_ROOT.exists():
         return
@@ -427,8 +434,9 @@ async def resume_interrupted_script_jobs():
             continue
 
         if resumable and provider == "gemini":
+            lease = None
             try:
-                acquire_guardrail_lease(
+                lease = acquire_guardrail_lease(
                     operation_id=job_dir.name,
                     client_ip="127.0.0.1",
                     estimated_charge_usd=0.06,
@@ -440,21 +448,26 @@ async def resume_interrupted_script_jobs():
                     "resume_count": resume_count + 1,
                     "restart_resumable": True,
                 })
-                asyncio.create_task(run_pipeline(
+                asyncio.create_task(_run_video_pipeline_tracked(
                     job_dir.name, script_data, "gemini", JOBS_ROOT
                 ))
-            except HTTPException:
-                update_job_status(job_dir, {
-                    "status": "needs_attention",
-                    "error": "Automatic restart delayed by guardrails (system busy or budget limit). Manual resume available.",
-                    "restart_resumable": True,
-                })
+            except Exception:
+                if lease is not None:
+                    lease.release()
+                try:
+                    update_job_status(job_dir, {
+                        "status": "needs_attention",
+                        "error": "Automatic restart delayed by guardrails or queue initialization. Manual resume available.",
+                        "restart_resumable": True,
+                    })
+                except Exception:
+                    logger.exception("Could not mark video job %s as needs_attention", job_dir.name)
 
 
 @app.post("/api/story-polish", response_model=StoryPolishResponse)
 async def story_polish(req: StoryPolishRequest, request: Request):
     """Vertex-only FYF story variants; never queues a video."""
-    op_id = f"polish_{uuid.uuid4().hex[:8]}"
+    op_id = generate_job_id()
     lease = acquire_guardrail_lease(
         operation_id=op_id,
         request=request,
@@ -489,7 +502,7 @@ async def story_polish(req: StoryPolishRequest, request: Request):
 @app.post("/api/story-lock", response_model=StoryLockResponse)
 async def story_lock(req: ExactLockRequest, request: Request):
     """Use Vertex only for visuals; server verifies approved narration byte-for-byte."""
-    op_id = f"lock_{uuid.uuid4().hex[:8]}"
+    op_id = generate_job_id()
     lease = acquire_guardrail_lease(
         operation_id=op_id,
         request=request,

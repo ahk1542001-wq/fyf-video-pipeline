@@ -259,6 +259,47 @@ class VertexTelemetryCollector:
         self.calls.append(record)
         return response
 
+    def record_observed_call(
+        self,
+        *,
+        stage: str,
+        operation: str,
+        model: str | None,
+        response: Any,
+        succeeded: bool = True,
+        error_code: int | str | None = None,
+        default_attempt: int = 1,
+    ) -> bool:
+        """Record a provider call already performed by an external orchestrator."""
+        usage = _usage_metadata(response)
+        if succeeded and not any(value is not None for value in usage.values()):
+            return False
+
+        retry_context = _current_retry_attempt.get()
+        retry_group, retry_attempt = retry_context or (None, default_attempt)
+        record: dict[str, Any] = {
+            "call_id": f"{self.job_id}-{len(self.calls) + 1:04d}",
+            "stage": stage,
+            "model": str(model) if model is not None else None,
+            "operation": operation,
+            "attempt": max(1, int(retry_attempt)),
+            "job_attempt": _current_job_attempt.get(),
+            "billable": operation in _BILLABLE_OPERATIONS,
+            "status": "succeeded" if succeeded else "failed",
+            "duration_ms": 0.0,
+            "usage": usage,
+        }
+        if retry_group:
+            record["retry_group"] = retry_group
+        if not succeeded:
+            record["error_type"] = "ADKEventError"
+            if isinstance(error_code, (int, str)) and not isinstance(error_code, bool):
+                safe_code = _status_code(type("ObservedError", (), {"code": error_code})())
+                if safe_code is not None:
+                    record["http_status"] = safe_code
+        self.calls.append(record)
+        return True
+
     def _job_status(self) -> dict[str, Any]:
         candidates = [self.job_dir / "status.json", self.job_dir / "qa_report.json"]
         for path in candidates:

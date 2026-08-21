@@ -167,6 +167,8 @@ def run_script_pipeline(job_id: str, script_jobs_root: Path, locks_root: Path) -
                 _run_script_pipeline(job_id, script_jobs_root, locks_root)
     finally:
         release_active_job(job_id)
+        from backend.budget_store import release_reservation
+        release_reservation(job_id)
 
 
 def _run_script_pipeline(job_id: str, script_jobs_root: Path, locks_root: Path) -> None:

@@ -1,5 +1,6 @@
 """Adversarial regression tests for independent review blockers."""
 
+import asyncio
 import json
 import math
 import os
@@ -7,6 +8,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi import HTTPException
@@ -229,6 +231,165 @@ class TestIndependentReviewBlockers(unittest.TestCase):
                 self.assertEqual(status_data["status"], "needs_attention")
                 self.assertTrue(status_data["restart_resumable"])
                 self.assertIn("guardrail", status_data["error"].lower())
+
+    def test_startup_video_completion_releases_slot_and_reservation(self):
+        """A successfully completed startup video task must release its exact lease."""
+        import backend.main as main_module
+        from backend.job_store import initialize_job_status, update_job_status
+
+        with tempfile.TemporaryDirectory() as jobs_dir, \
+             tempfile.TemporaryDirectory() as script_jobs_dir, \
+             tempfile.TemporaryDirectory() as locks_dir, \
+             tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            job_id = "1234abcd"
+            job_dir = Path(jobs_dir) / job_id
+            job_dir.mkdir()
+            initialize_job_status(job_dir, job_id, "gemini")
+            update_job_status(job_dir, {"status": "visuals", "resume_count": 0})
+            (job_dir / "script.json").write_text(json.dumps({"segments": []}))
+
+            async def exercise():
+                with patch.dict("os.environ", {
+                    "FYF_BUDGET_LEDGER_PATH": str(root / ".budget_ledger.json"),
+                    "FYF_MAX_CONCURRENT_JOBS": "1",
+                }), patch.object(main_module, "JOBS_ROOT", Path(jobs_dir)), \
+                     patch.object(main_module, "SCRIPT_JOBS_ROOT", Path(script_jobs_dir)), \
+                     patch.object(main_module, "LOCKS_ROOT", Path(locks_dir)), \
+                     patch.object(main_module, "run_pipeline", new_callable=AsyncMock) as pipeline:
+                    await main_module.resume_interrupted_script_jobs()
+                    await asyncio.sleep(0)
+                    await asyncio.sleep(0)
+                    return pipeline.await_count
+
+            self.assertEqual(asyncio.run(exercise()), 1)
+            self.assertEqual(get_active_job_count(), 0)
+            self.assertEqual(get_budget_status(root)["active_reserved_usd"], 0.0)
+
+    def test_startup_video_status_failure_releases_lease_and_marks_attention(self):
+        """A startup status-write failure must not leak paid-work resources."""
+        import backend.main as main_module
+        from backend.job_store import initialize_job_status, update_job_status as real_update_job_status
+
+        with tempfile.TemporaryDirectory() as jobs_dir, \
+             tempfile.TemporaryDirectory() as script_jobs_dir, \
+             tempfile.TemporaryDirectory() as locks_dir, \
+             tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            job_id = "5678abcd"
+            job_dir = Path(jobs_dir) / job_id
+            job_dir.mkdir()
+            initialize_job_status(job_dir, job_id, "gemini")
+            real_update_job_status(job_dir, {"status": "visuals", "resume_count": 0})
+            (job_dir / "script.json").write_text(json.dumps({"segments": []}))
+            call_count = 0
+
+            def flaky_update(target_dir, updates):
+                nonlocal call_count
+                call_count += 1
+                if call_count == 1:
+                    raise OSError("disk full")
+                return real_update_job_status(target_dir, updates)
+
+            async def exercise():
+                with patch.dict("os.environ", {
+                    "FYF_BUDGET_LEDGER_PATH": str(root / ".budget_ledger.json"),
+                    "FYF_MAX_CONCURRENT_JOBS": "1",
+                }), patch.object(main_module, "JOBS_ROOT", Path(jobs_dir)), \
+                     patch.object(main_module, "SCRIPT_JOBS_ROOT", Path(script_jobs_dir)), \
+                     patch.object(main_module, "LOCKS_ROOT", Path(locks_dir)), \
+                     patch.object(main_module, "update_job_status", side_effect=flaky_update), \
+                     patch.object(main_module, "run_pipeline", new_callable=AsyncMock):
+                    await main_module.resume_interrupted_script_jobs()
+
+            asyncio.run(exercise())
+            status_data = json.loads((job_dir / "status.json").read_text(encoding="utf-8"))
+            self.assertEqual(status_data["status"], "needs_attention")
+            self.assertTrue(status_data["restart_resumable"])
+            self.assertEqual(get_active_job_count(), 0)
+            self.assertEqual(get_budget_status(root)["active_reserved_usd"], 0.0)
+
+    def test_disk_active_job_blocks_second_slot_without_double_counting(self):
+        """Persisted active jobs remain part of the concurrency boundary after restart."""
+        from backend.runtime_limits import try_acquire_job_slot
+
+        with tempfile.TemporaryDirectory() as jobs_dir, tempfile.TemporaryDirectory() as script_jobs_dir:
+            existing = Path(jobs_dir) / "aaaabbbb"
+            existing.mkdir()
+            (existing / "status.json").write_text(json.dumps({"status": "queued"}))
+            with patch.dict("os.environ", {"FYF_MAX_CONCURRENT_JOBS": "1"}):
+                accepted, reason = try_acquire_job_slot(
+                    "ccccdddd",
+                    job_roots=(Path(jobs_dir), Path(script_jobs_dir)),
+                )
+            self.assertFalse(accepted)
+            self.assertIn("busy", reason or "")
+
+    def test_adk_event_usage_is_recorded_in_current_job_telemetry(self):
+        """ADK orchestration usage must be recorded in addition to wrapped tool calls."""
+        from backend.agent.runner import run_adk_pipeline
+        from backend.vertex_telemetry import telemetry_scope
+
+        event = SimpleNamespace(
+            id="adk-event-1",
+            model_version="gemini-3.7-flash",
+            error_code=None,
+            error_message=None,
+            usage_metadata=SimpleNamespace(
+                prompt_token_count=111,
+                candidates_token_count=22,
+                total_token_count=133,
+                cached_content_token_count=0,
+                thoughts_token_count=0,
+            ),
+            get_function_responses=lambda: [
+                SimpleNamespace(response=_valid_video_script_data())
+            ],
+        )
+
+        async def fake_events(*args, **kwargs):
+            yield event
+            yield event  # Repeated delivery of the same ADK event must not double count.
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict("os.environ", {
+            "FYF_BUDGET_LEDGER_PATH": str(Path(temp_dir) / ".budget_ledger.json"),
+        }):
+            with telemetry_scope("abcd1234", "script", Path(temp_dir)) as collector, \
+                 patch("google.adk.Runner.run_async", side_effect=fake_events):
+                run_adk_pipeline("diagnostic")
+                summary = collector.summary()
+                self.assertEqual(summary["total_calls"], 1)
+                self.assertEqual(summary["total_input_tokens"], 111)
+                self.assertEqual(summary["total_output_tokens"], 22)
+                self.assertEqual(summary["total_tokens"], 133)
+                self.assertEqual(collector.calls[0]["stage"], "adk_orchestration")
+                self.assertEqual(collector.calls[0]["model"], "gemini-3.7-flash")
+
+    def test_story_operation_telemetry_is_visible_with_valid_job_id(self):
+        """Story operation telemetry must be discoverable by the dashboard collector."""
+        from backend.job_store import is_valid_job_id
+
+        with tempfile.TemporaryDirectory() as jobs_dir, \
+             tempfile.TemporaryDirectory() as script_jobs_dir, \
+             tempfile.TemporaryDirectory() as locks_dir, \
+             tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            with patch.dict("os.environ", {
+                "FYF_BUDGET_LEDGER_PATH": str(root / ".budget_ledger.json"),
+            }), patch("backend.main.JOBS_ROOT", Path(jobs_dir)), \
+                 patch("backend.main.SCRIPT_JOBS_ROOT", Path(script_jobs_dir)), \
+                 patch("backend.main.LOCKS_ROOT", Path(locks_dir)), \
+                 patch("writer_agent_vertex.generate_story_modes", return_value=_valid_story_modes_data()):
+                response = client.post("/api/story-polish", json={"topic_or_draft": "Topic"})
+                self.assertEqual(response.status_code, 200)
+
+            summary = get_all_telemetry_summary(
+                job_roots=(Path(jobs_dir), Path(script_jobs_dir)),
+                budget_root=root,
+            )
+            self.assertEqual(summary["total_jobs"], 1)
+            self.assertEqual(summary["jobs"][0]["job_kind"], "story_polish")
+            self.assertTrue(is_valid_job_id(summary["jobs"][0]["job_id"]))
 
     # BLOCKER 3: Real cost telemetry only (no hardcoded spend)
     def test_story_polish_and_lock_use_real_telemetry_without_hardcoded_costs(self):

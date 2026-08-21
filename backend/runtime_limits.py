@@ -88,15 +88,18 @@ def check_rate_limit(client_ip: str) -> tuple[bool, str | None]:
         return True, None
 
 
-def count_active_disk_jobs(job_roots: tuple[Path, ...] | None = None, excluding_job_id: str | None = None) -> int:
-    """Count active uncompleted jobs across script and video job roots."""
+def active_disk_job_ids(
+    job_roots: tuple[Path, ...] | None = None,
+    excluding_job_id: str | None = None,
+) -> set[str]:
+    """Return persisted active job IDs across script and video job roots."""
     import json
     if job_roots is None:
         jobs_root = Path(os.getenv("FYF_JOBS_ROOT", "jobs"))
         script_jobs_root = Path(os.getenv("FYF_SCRIPT_JOBS_ROOT", "script-jobs"))
         job_roots = (jobs_root, script_jobs_root)
 
-    active_count = 0
+    active_ids: set[str] = set()
     active_statuses = {
         "queued", "writing", "adk_producer", "retrying",
         "visuals", "voice", "rendering", "qa", "creative_qa",
@@ -113,19 +116,26 @@ def count_active_disk_jobs(job_roots: tuple[Path, ...] | None = None, excluding_
             try:
                 data = json.loads(status_file.read_text(encoding="utf-8"))
                 if data.get("status") in active_statuses:
-                    active_count += 1
+                    active_ids.add(job_dir.name)
             except (OSError, json.JSONDecodeError):
                 continue
-    return active_count
+    return active_ids
+
+
+def count_active_disk_jobs(job_roots: tuple[Path, ...] | None = None, excluding_job_id: str | None = None) -> int:
+    """Count active uncompleted jobs across script and video job roots."""
+    return len(active_disk_job_ids(job_roots, excluding_job_id=excluding_job_id))
 
 
 def check_concurrency(job_roots: tuple[Path, ...] | None = None, excluding_job_id: str | None = None) -> tuple[bool, str | None]:
-    """Check whether total active jobs in memory exceed configured limit."""
+    """Check the union of in-memory and persisted active jobs."""
     max_concurrency = _get_max_concurrency()
     with _LOCK:
-        mem_count = len(_ACTIVE_JOB_IDS)
-        if mem_count >= max_concurrency:
-            return False, f"System is currently busy ({mem_count}/{max_concurrency} active jobs). Please retry shortly."
+        active_ids = set(_ACTIVE_JOB_IDS)
+        active_ids.update(active_disk_job_ids(job_roots, excluding_job_id=excluding_job_id))
+        active_count = len(active_ids)
+        if active_count >= max_concurrency:
+            return False, f"System is currently busy ({active_count}/{max_concurrency} active jobs). Please retry shortly."
         return True, None
 
 
@@ -135,9 +145,11 @@ def try_acquire_job_slot(job_id: str, job_roots: tuple[Path, ...] | None = None)
     with _LOCK:
         if job_id in _ACTIVE_JOB_IDS:
             return True, None
-        mem_count = len(_ACTIVE_JOB_IDS)
-        if mem_count >= max_concurrency:
-            return False, f"System is currently busy ({mem_count}/{max_concurrency} active generation jobs). Please retry shortly."
+        active_ids = set(_ACTIVE_JOB_IDS)
+        active_ids.update(active_disk_job_ids(job_roots, excluding_job_id=job_id))
+        active_count = len(active_ids)
+        if active_count >= max_concurrency:
+            return False, f"System is currently busy ({active_count}/{max_concurrency} active generation jobs). Please retry shortly."
         _ACTIVE_JOB_IDS.add(job_id)
         return True, None
 

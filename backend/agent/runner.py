@@ -77,6 +77,46 @@ def run_adk_pipeline(
         "audit": None,
         "script": None,
     }
+    seen_usage_event_ids: set[str] = set()
+
+    def _record_adk_usage(event: Any, event_index: int) -> None:
+        usage = getattr(event, "usage_metadata", None)
+        if usage is None:
+            return
+        usage_fields = (
+            "prompt_token_count",
+            "candidates_token_count",
+            "total_token_count",
+            "cached_content_token_count",
+            "thoughts_token_count",
+        )
+        if not any(
+            isinstance(getattr(usage, field, None), (int, float))
+            and not isinstance(getattr(usage, field, None), bool)
+            for field in usage_fields
+        ):
+            return
+
+        event_id = str(getattr(event, "id", "") or f"event-{event_index}")
+        if event_id in seen_usage_event_ids:
+            return
+        seen_usage_event_ids.add(event_id)
+
+        from backend.vertex_telemetry import current_collector
+
+        collector = current_collector()
+        if collector is None:
+            return
+        error_code = getattr(event, "error_code", None)
+        error_message = getattr(event, "error_message", None)
+        collector.record_observed_call(
+            stage="adk_orchestration",
+            operation="generate_content",
+            model=getattr(event, "model_version", None) or str(producer_agent.model),
+            response=event,
+            succeeded=not bool(error_code or error_message),
+            error_code=error_code,
+        )
 
     async def _execute_adk_runner() -> list[Any]:
         events = []
@@ -86,6 +126,7 @@ def run_adk_pipeline(
             new_message=user_message,
         ):
             events.append(event)
+            _record_adk_usage(event, len(events))
             try:
                 fn_responses = event.get_function_responses()
                 if fn_responses:
