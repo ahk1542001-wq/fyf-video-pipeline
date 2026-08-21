@@ -35,8 +35,12 @@ This repository is FYF-only. It does not add authentication, billing, subscripti
 ## What this product is built to operate
 
 - Topic or draft intake in the Create Studio.
-- Gemini script generation with immutable story locks and bounded retries.
+- Google ADK Agent (`fyf_producer`) with tools for topic research, story segment drafting, quality audit, and visual shot planning.
+- Gemini 3.7 Flash writer with immutable story locks and bounded retries.
+- Controlled dynamic video styles (`fyf_explainer`, `cinematic_continuity`, `evidence_story`).
 - Visual evidence planning, deterministic fallback, and final rendered-meaning verification.
+- Public generation budget protection, rate limiting, and concurrency guardrails.
+- Resumable job architecture with `/api/jobs/{job_id}/resume` for recoverable interruptions.
 - Gemini-TTS Burmese narration with audio QA and mouth-cue generation.
 - Remotion video rendering with deterministic output QA and creative QA.
 - Library playback/download and privacy-safe per-job Vertex/TTS telemetry.
@@ -70,7 +74,7 @@ flowchart TD
 
 ## Tech stack
 
-- **Backend:** FastAPI, Pydantic, Google Gen AI SDK, Vertex/Gemini
+- **Backend:** FastAPI, Pydantic, Google Gen AI SDK, Google ADK (`google-adk`), Vertex/Gemini
 - **Frontend:** Next.js App Router, React, TypeScript, Tailwind
 - **Video:** Remotion, React, TypeScript, FFmpeg
 - **Voice:** Gemini-TTS
@@ -106,7 +110,7 @@ Replit runs the same public/demo surface through `run_replit.sh`, which uses the
 
 ## Verification evidence
 
-- Backend regression suite: **320 tests passed**.
+- Backend regression & ADK agent suite: **353 tests passed**.
 - Voice adapter/audio QA suite: **23 tests passed**.
 - Remotion suite: **27 tests passed**.
 - Frontend ESLint, TypeScript, and production build passed.

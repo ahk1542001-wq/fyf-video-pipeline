@@ -16,20 +16,19 @@ quality gates explicit so a human can inspect the result before sharing it.
 ## What the working product does
 
 1. Accepts a topic or draft in the Create Studio.
-2. Uses Gemini on Google Cloud Vertex AI to produce a structured Burmese script
-   and immutable story lock.
-3. Plans and verifies visual evidence for each scene, with deterministic
-   fallbacks when a transient provider response cannot be trusted.
-4. Generates Burmese narration with Gemini TTS in hackathon mode.
-5. Renders a 1080x1920 vertical MP4 with Remotion and runs deterministic,
-   creative, and final rendered-meaning QA.
-6. Shows approved results in Library and exposes a privacy-safe in-app
-   telemetry ledger for calls, retries, tokens, TTS, latency, and cost
-   confidence.
+2. Employs a Google ADK Agent (`fyf_producer`) with specialized tools for topic research, segment drafting, quality audit, and shot planning.
+3. Uses Gemini on Google Cloud Vertex AI to produce a structured Burmese script and immutable story lock.
+4. Provides controlled dynamic video styles (`fyf_explainer`, `cinematic_continuity`, `evidence_story`).
+5. Plans and verifies visual evidence for each scene, with deterministic fallbacks when a transient provider response cannot be trusted.
+6. Enforces rate limits, concurrency guardrails, and daily budget caps to protect against quota exhaustion.
+7. Supports automatic and operator-driven resumable recovery (`/api/jobs/{job_id}/resume`).
+8. Generates Burmese narration with Gemini TTS in hackathon mode.
+9. Renders a 1080x1920 vertical MP4 with Remotion and runs deterministic, creative, and final rendered-meaning QA.
+10. Shows approved results in Library and exposes a privacy-safe in-app telemetry ledger for calls, retries, tokens, TTS, latency, and cost confidence.
 
 ## Google Cloud / Gemini runtime evidence
 
-- Python runtime uses the `google-genai` SDK and Vertex/Gemini configuration.
+- Python runtime uses the official `google-genai` SDK and Google ADK (`google-adk`).
 - Hackathon mode routes text/storyboard work through Gemini 3.7 Flash and
   narration through Gemini TTS.
 - The local verified job ledger records real provider calls and QA results;
@@ -64,7 +63,7 @@ operator feature; it is not being claimed as a second partner track.
 
 ## Verification snapshot
 
-- Backend regression suite: 320 tests passed.
+- Backend regression & ADK agent suite: 353 tests passed.
 - Voice adapter/audio QA suite: 23 tests passed.
 - Remotion suite: 27 tests passed; Remotion TypeScript check passed.
 - Frontend ESLint, TypeScript, and production build passed.
