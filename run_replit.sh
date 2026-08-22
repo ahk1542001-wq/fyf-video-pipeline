@@ -28,6 +28,12 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 cd frontend
+if [[ -f .next/standalone/server.js ]]; then
+  export PORT=3001
+  export HOSTNAME=0.0.0.0
+  exec node .next/standalone/server.js
+fi
+
 if [[ ! -x node_modules/.bin/next ]]; then
   npm ci --no-audit --no-fund
 fi
