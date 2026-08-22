@@ -5,6 +5,7 @@ Connects the Next.js frontend to the Gemini Writer/Producer Agent and Gemini-TTS
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import logging
 import os
@@ -20,6 +21,7 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator
+from dotenv import load_dotenv
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -157,6 +159,13 @@ class RuntimeResponse(BaseModel):
     allowed_voice_providers: list[Literal["gemini"]]
     script_model: str
     fallback_model: str
+    generation_available: bool
+    generation_access_required: bool
+    generation_status: Literal[
+        "ready", "credential_required", "disabled", "access_token_required",
+        "private_access_required",
+    ]
+    generation_message: str
 
 
 class RecentApprovedVideo(BaseModel):
@@ -165,6 +174,88 @@ class RecentApprovedVideo(BaseModel):
     voice_provider: Literal["gemini"]
     updated_at: str = Field(min_length=1)
     video_url: str
+
+
+def _truthy_env(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_public_deployment() -> bool:
+    """Require an explicit host flag before applying public-generation restrictions."""
+    return _truthy_env("FYF_PUBLIC_DEPLOYMENT")
+
+
+def _vertex_credentials_configured() -> bool:
+    """Check configuration shape only; never expose or validate credential values."""
+    try:
+        load_dotenv(REPO_ROOT / ".env", override=False)
+    except OSError:
+        pass
+
+    if os.getenv("FYF_VERTEX_API_KEY") or os.getenv("GOOGLE_API_KEY"):
+        return True
+
+    configured_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
+    if configured_path and Path(configured_path).is_file():
+        return True
+    return (REPO_ROOT / "gcp-key.json").is_file()
+
+
+def _generation_runtime_state() -> dict[str, bool | str]:
+    """Return safe public runtime state without leaking any provider configuration."""
+    if not _is_public_deployment():
+        return {
+            "generation_available": True,
+            "generation_access_required": False,
+            "generation_status": "ready",
+            "generation_message": "Local generation controls are available.",
+        }
+
+    if not _vertex_credentials_configured():
+        return {
+            "generation_available": False,
+            "generation_access_required": False,
+            "generation_status": "credential_required",
+            "generation_message": "Generation is unavailable until the operator configures Vertex in the host secret store.",
+        }
+
+    if not _truthy_env("FYF_PUBLIC_GENERATION_ENABLED"):
+        return {
+            "generation_available": False,
+            "generation_access_required": False,
+            "generation_status": "disabled",
+            "generation_message": "Public generation is intentionally disabled by the operator.",
+        }
+
+    if not os.getenv("FYF_GENERATION_ACCESS_TOKEN"):
+        return {
+            "generation_available": False,
+            "generation_access_required": False,
+            "generation_status": "access_token_required",
+            "generation_message": "Generation is disabled until the operator configures a private access token.",
+        }
+
+    return {
+        "generation_available": True,
+        "generation_access_required": True,
+        "generation_status": "private_access_required",
+        "generation_message": "Private generation access is required before a provider request can be queued.",
+    }
+
+
+def _enforce_public_generation_access(request: Request) -> None:
+    """Fail closed before quota reservation or provider work on the public deployment."""
+    if not _is_public_deployment():
+        return
+
+    runtime = _generation_runtime_state()
+    if not runtime["generation_available"]:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=runtime["generation_message"])
+
+    expected_token = os.getenv("FYF_GENERATION_ACCESS_TOKEN", "")
+    submitted_token = request.headers.get("x-fyf-access-token", "")
+    if not submitted_token or not hmac.compare_digest(submitted_token, expected_token):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Private generation access is required.")
 
 
 def _should_resume_script_job(data: dict) -> bool:
@@ -226,11 +317,13 @@ def health():
 
 @app.get("/api/runtime", response_model=RuntimeResponse)
 def get_runtime():
+    generation_state = _generation_runtime_state()
     return RuntimeResponse(
         runtime_mode="hackathon",
         allowed_voice_providers=["gemini"],
         script_model=model_for("script"),
         fallback_model=model_for("story_fallback"),
+        **generation_state,
     )
 
 
@@ -242,6 +335,7 @@ def list_video_styles():
 @app.post("/api/generate-script", status_code=status.HTTP_202_ACCEPTED, response_model=ScriptJobResponse)
 async def generate_script(req: ScriptRequest, request: Request, background_tasks: BackgroundTasks):
     """Queue persisted Vertex script production and return immediately."""
+    _enforce_public_generation_access(request)
     job_id = uuid.uuid4().hex[:8]
     lease = acquire_guardrail_lease(
         operation_id=job_id,
@@ -292,6 +386,7 @@ def script_job_status(job_id: str):
 @app.post("/api/script-jobs/{job_id}/resume", status_code=status.HTTP_202_ACCEPTED, response_model=ScriptJobResponse)
 async def resume_script_job(job_id: str, request: Request, background_tasks: BackgroundTasks):
     """Resume a script job that is in needs_attention state."""
+    _enforce_public_generation_access(request)
     if not is_valid_job_id(job_id):
         raise HTTPException(status_code=400, detail="Invalid job ID format")
 
@@ -360,6 +455,10 @@ async def resume_script_job(job_id: str, request: Request, background_tasks: Bac
 @app.on_event("startup")
 async def resume_interrupted_script_jobs():
     """Resume persisted script and video jobs after a backend restart."""
+    if _is_public_deployment():
+        logger.info("Public deployment startup does not auto-resume paid generation jobs.")
+        return
+
     if SCRIPT_JOBS_ROOT.exists():
         for job_dir in SCRIPT_JOBS_ROOT.iterdir():
             status_path = job_dir / "status.json"
@@ -467,6 +566,7 @@ async def resume_interrupted_script_jobs():
 @app.post("/api/story-polish", response_model=StoryPolishResponse)
 async def story_polish(req: StoryPolishRequest, request: Request):
     """Vertex-only FYF story variants; never queues a video."""
+    _enforce_public_generation_access(request)
     op_id = generate_job_id()
     lease = acquire_guardrail_lease(
         operation_id=op_id,
@@ -489,10 +589,8 @@ async def story_polish(req: StoryPolishRequest, request: Request):
                 model_used=generated.get("model_used"),
             )
     except HTTPException:
-        lease.release()
         raise
     except Exception:
-        lease.release()
         logger.exception("Story polish failed")
         raise HTTPException(status_code=500, detail="Story polish failed")
     finally:
@@ -502,6 +600,7 @@ async def story_polish(req: StoryPolishRequest, request: Request):
 @app.post("/api/story-lock", response_model=StoryLockResponse)
 async def story_lock(req: ExactLockRequest, request: Request):
     """Use Vertex only for visuals; server verifies approved narration byte-for-byte."""
+    _enforce_public_generation_access(request)
     op_id = generate_job_id()
     lease = acquire_guardrail_lease(
         operation_id=op_id,
@@ -522,10 +621,8 @@ async def story_lock(req: ExactLockRequest, request: Request):
             lease.reconcile(actual_usd=actual_cost, outcome="completed")
             return StoryLockResponse(success=True, data=data.model_dump(mode="json"), lock_id=lock_id)
     except HTTPException:
-        lease.release()
         raise
     except Exception:
-        lease.release()
         logger.exception("Story lock failed")
         raise HTTPException(status_code=500, detail="Story lock failed")
     finally:
@@ -535,6 +632,7 @@ async def story_lock(req: ExactLockRequest, request: Request):
 @app.post("/api/generate-video", status_code=status.HTTP_202_ACCEPTED, response_model=VideoResponse)
 async def generate_video(req: VideoRequest, request: Request, background_tasks: BackgroundTasks):
     """Takes the approved script lock, acquires guardrail lease, creates job, and queues pipeline."""
+    _enforce_public_generation_access(request)
     try:
         script_data = read_script_lock(LOCKS_ROOT, req.lock_id)
     except FileNotFoundError as exc:
@@ -677,6 +775,7 @@ def get_job_status(job_id: str):
 @app.post("/api/jobs/{job_id}/resume", status_code=status.HTTP_202_ACCEPTED, response_model=VideoResponse)
 async def resume_job(job_id: str, request: Request, background_tasks: BackgroundTasks):
     """Resume a failed or interrupted resumable video job."""
+    _enforce_public_generation_access(request)
     if not is_valid_job_id(job_id):
         raise HTTPException(status_code=400, detail="Invalid job ID")
 

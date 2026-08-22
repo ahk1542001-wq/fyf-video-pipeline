@@ -13,6 +13,12 @@ export default function RuntimeDisclosure({ runtime, runtimeSource }: RuntimeDis
   const disclosureId = useId();
   const titleId = `${disclosureId}-title`;
   const panelId = `${disclosureId}-panel`;
+  const generationReady = runtimeSource === "api" && runtime.generation_available;
+  const statusLabel = runtimeSource !== "api"
+    ? "Runtime unavailable"
+    : generationReady
+      ? runtime.generation_access_required ? "Private generation" : "Vertex ready"
+      : "Generation unavailable";
 
   return (
     <div className="runtime-disclosure">
@@ -24,8 +30,8 @@ export default function RuntimeDisclosure({ runtime, runtimeSource }: RuntimeDis
         aria-labelledby={titleId}
         onClick={() => setOpen(current => !current)}
       >
-        <span className="runtime-disclosure__status" aria-hidden="true" />
-        <span id={titleId}>Vertex ready</span>
+        <span className={`runtime-disclosure__status${generationReady ? "" : " runtime-disclosure__status--inactive"}`} aria-hidden="true" />
+        <span id={titleId}>{statusLabel}</span>
         <span className="runtime-disclosure__chevron" aria-hidden="true">{open ? "−" : "+"}</span>
       </button>
 
@@ -34,6 +40,7 @@ export default function RuntimeDisclosure({ runtime, runtimeSource }: RuntimeDis
           <p className="runtime-disclosure__source">
             {runtimeSource === "api" ? "Live data from the video backend." : "Using local fallback until the runtime API responds."}
           </p>
+          <p className="runtime-disclosure__source">{runtime.generation_message}</p>
           <dl className="runtime-disclosure__details">
             <div>
               <dt>Primary model</dt>

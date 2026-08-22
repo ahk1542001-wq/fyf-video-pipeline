@@ -57,6 +57,15 @@ def _provider_rate_limited(error: BaseException) -> bool:
     return any(marker in text for marker in ("429", "RESOURCE_EXHAUSTED"))
 
 
+def _terminal_error_message(error: BaseException) -> str:
+    """Expose a safe, actionable terminal state without returning raw provider errors."""
+    code = getattr(error, "code", None) or getattr(error, "status_code", None)
+    message = str(error).upper()
+    if code in (401, 403) or "401" in message or "403" in message or "PERMISSION_DENIED" in message:
+        return "Vertex authorization was rejected. The operator must configure approved provider credentials."
+    return "Script validation or contract failure."
+
+
 def _script_max_retries() -> int:
     """Keep script retries bounded to 0-3 (never permit above 3)."""
     try:
@@ -187,8 +196,11 @@ def _run_script_pipeline(job_id: str, script_jobs_root: Path, locks_root: Path) 
                 request.get("duration_mode", "short"),
                 job_dir=job_dir,
             )
-            result = adk_result["script"]
+            result = VideoScript.model_validate(adk_result["script"]).model_dump(
+                mode="json", exclude_none=True
+            )
             lock_id = create_script_lock(locks_root, result)
+            write_json_atomically(job_dir / "result.json", result)
             update_script_status(
                 job_dir, status="completed", stage="locked", progress=100,
                 lock_id=lock_id, error=None, restart_resumable=True,
@@ -301,6 +313,6 @@ def _run_script_pipeline(job_id: str, script_jobs_root: Path, locks_root: Path) 
                 status="failed",
                 stage="failed",
                 retry_count=retry_count,
-                error="Script validation or contract failure.",
+                error=_terminal_error_message(exc),
                 restart_resumable=False,
             )

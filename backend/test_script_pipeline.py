@@ -7,6 +7,7 @@ from unittest.mock import patch
 from backend.script_pipeline import (
     _script_max_retries,
     _sleep_before_script_retry,
+    _terminal_error_message,
     run_script_pipeline,
 )
 
@@ -180,6 +181,12 @@ class ScriptPipelineTests(unittest.TestCase):
             self.assertEqual(status["status"], "failed")
             self.assertFalse(status["restart_resumable"])
 
+    def test_authorization_failure_has_safe_operator_action(self):
+        self.assertEqual(
+            _terminal_error_message(RuntimeError("Vertex returned 403 PERMISSION_DENIED")),
+            "Vertex authorization was rejected. The operator must configure approved provider credentials.",
+        )
+
     def test_restart_uses_existing_narration_and_batch_checkpoint(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -244,6 +251,10 @@ class ScriptPipelineTests(unittest.TestCase):
             self.assertEqual(status["status"], "completed")
             self.assertEqual(status["stage"], "locked")
             self.assertIsNotNone(status.get("lock_id"))
+            self.assertEqual(
+                json.loads((job / "result.json").read_text(encoding="utf-8")),
+                mock_video_script,
+            )
 
 
 if __name__ == "__main__":

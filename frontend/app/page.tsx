@@ -55,6 +55,33 @@ type VisualProgress = {
   current_failed_ids?: string[];
 };
 
+async function fetchWithDeadline(
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+  timeoutMs = 15_000,
+): Promise<Response> {
+  const controller = new AbortController();
+  let timedOut = false;
+  const relayAbort = () => controller.abort();
+  init.signal?.addEventListener("abort", relayAbort, { once: true });
+  const timer = window.setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (timedOut) {
+      throw new Error("The service did not respond in time. No additional job was queued.");
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timer);
+    init.signal?.removeEventListener("abort", relayAbort);
+  }
+}
+
 export default function Home() {
   const [topic, setTopic] = useState("");
   const durationMode = "short";
@@ -76,8 +103,12 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [runtime, setRuntime] = useState<RuntimeInfo>(STATIC_RUNTIME_FALLBACK);
   const [runtimeSource, setRuntimeSource] = useState<"api" | "fallback">("fallback");
+  const [generationAccessToken, setGenerationAccessToken] = useState(() => (
+    typeof window === "undefined" ? "" : window.sessionStorage.getItem("fyf-generation-access") || ""
+  ));
 
   const activeVideoControllerRef = useRef<AbortController | null>(null);
+  const activeStoryActionRef = useRef(false);
   const effectiveVoiceProvider: VoiceProvider = "gemini";
 
   useEffect(() => {
@@ -93,7 +124,7 @@ export default function Home() {
     let mounted = true;
     async function loadRuntime() {
       try {
-        const response = await fetch(`${API_URL}/api/runtime`);
+        const response = await fetchWithDeadline(`${API_URL}/api/runtime`);
         const data: unknown = await response.json();
         if (!response.ok || !isRuntimeInfo(data)) throw new Error("Runtime API unavailable");
         if (mounted) {
@@ -110,7 +141,7 @@ export default function Home() {
 
     async function loadStyles() {
       try {
-        const res = await fetch(`${API_URL}/api/video-styles`);
+        const res = await fetchWithDeadline(`${API_URL}/api/video-styles`);
         if (res.ok) {
           const data: unknown = await res.json();
           if (mounted && isRecord(data) && Array.isArray(data.styles) && data.styles.length > 0) {
@@ -151,6 +182,9 @@ export default function Home() {
   }
 
   const hasCompletedVideo = renderStatus === "completed" && Boolean(videoUrl);
+  const generationReady = runtimeSource === "api"
+    && runtime.generation_available
+    && (!runtime.generation_access_required || Boolean(generationAccessToken.trim()));
   const workflowStages = deriveWorkflowStages({
     hasSource: topic.trim().length > 0,
     hasStory: Boolean(script || variants.length > 0),
@@ -159,10 +193,27 @@ export default function Home() {
   });
   const renderBusy = ["queued", "visuals", "voice", "rendering", "qa"].includes(renderStatus);
 
+  function generationRequestHeaders(): HeadersInit {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (generationAccessToken.trim()) {
+      headers["X-FYF-Access-Token"] = generationAccessToken.trim();
+    }
+    return headers;
+  }
+
+  function updateGenerationAccessToken(value: string) {
+    setGenerationAccessToken(value);
+    if (value.trim()) {
+      window.sessionStorage.setItem("fyf-generation-access", value);
+    } else {
+      window.sessionStorage.removeItem("fyf-generation-access");
+    }
+  }
+
   async function pollScriptJob(jobId: string) {
     const startTime = Date.now();
     while (Date.now() - startTime < 45 * 60 * 1000) {
-      const statusRes = await fetch(`${API_URL}/api/script-jobs/${jobId}/status`);
+      const statusRes = await fetchWithDeadline(`${API_URL}/api/script-jobs/${jobId}/status`);
       if (!statusRes.ok) throw new Error("Could not check script job status");
       const job: unknown = await statusRes.json();
       if (!isRecord(job) || typeof job.status !== "string") throw new Error("Malformed script job payload");
@@ -213,7 +264,8 @@ export default function Home() {
   }
 
   async function generateScript() {
-    if (!topic.trim()) return;
+    if (!topic.trim() || !generationReady || activeStoryActionRef.current) return;
+    activeStoryActionRef.current = true;
 
     if (activeVideoControllerRef.current) {
       activeVideoControllerRef.current.abort();
@@ -231,11 +283,11 @@ export default function Home() {
     setResumableScriptJobId(null);
 
     try {
-      const res = await fetch(`${API_URL}/api/generate-script`, {
+      const res = await fetchWithDeadline(`${API_URL}/api/generate-script`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: generationRequestHeaders(),
         body: JSON.stringify({ topic, duration_mode: durationMode, style: selectedStyle }),
-      });
+      }, 20_000);
       let data: unknown;
       try {
         data = await res.json();
@@ -259,18 +311,22 @@ export default function Home() {
       const e = err as Error;
       setError(e.message || "Cannot reach backend. Is FastAPI running?");
       setWritingStatus("error");
+    } finally {
+      activeStoryActionRef.current = false;
     }
   }
 
   async function resumeScriptJob(jobId: string) {
+    if (!generationReady || activeStoryActionRef.current) return;
+    activeStoryActionRef.current = true;
     setWritingStatus("writing");
     setScriptProgress("Resuming script job from preserved checkpoint…");
     setError(null);
     try {
-      const res = await fetch(`${API_URL}/api/script-jobs/${jobId}/resume`, {
+      const res = await fetchWithDeadline(`${API_URL}/api/script-jobs/${jobId}/resume`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-      });
+        headers: generationRequestHeaders(),
+      }, 20_000);
       const data: unknown = await res.json();
       if (!res.ok) {
         const detail = isRecord(data) && typeof data.detail === "string" ? data.detail : "Failed to resume script job";
@@ -280,11 +336,14 @@ export default function Home() {
     } catch (err) {
       setError((err as Error).message);
       setWritingStatus("error");
+    } finally {
+      activeStoryActionRef.current = false;
     }
   }
 
   async function polishStory() {
-    if (!topic.trim()) return;
+    if (!topic.trim() || !generationReady || activeStoryActionRef.current) return;
+    activeStoryActionRef.current = true;
     setWritingStatus("writing");
     setError(null);
     setScript(null);
@@ -296,11 +355,11 @@ export default function Home() {
     setResumableScriptJobId(null);
 
     try {
-      const res = await fetch(`${API_URL}/api/story-polish`, {
+      const res = await fetchWithDeadline(`${API_URL}/api/story-polish`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: generationRequestHeaders(),
         body: JSON.stringify({ topic_or_draft: topic }),
-      });
+      }, 150_000);
       const data: unknown = await res.json();
       if (!res.ok) {
         const detail = isRecord(data) && typeof data.detail === "string" ? data.detail : "Story polish failed";
@@ -316,23 +375,26 @@ export default function Home() {
     } catch (err) {
       setError((err as Error).message || "Story polish failed");
       setWritingStatus("error");
+    } finally {
+      activeStoryActionRef.current = false;
     }
   }
 
   async function approveAndLock() {
-    if (selectedVariant === null || !variants[selectedVariant]) return;
+    if (selectedVariant === null || !variants[selectedVariant] || !generationReady || activeStoryActionRef.current) return;
+    activeStoryActionRef.current = true;
     const chosen = variants[selectedVariant].script;
     setWritingStatus("writing");
     setError(null);
     try {
-      const res = await fetch(`${API_URL}/api/story-lock`, {
+      const res = await fetchWithDeadline(`${API_URL}/api/story-lock`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: generationRequestHeaders(),
         body: JSON.stringify({
           title: chosen.title,
           approved_segments: chosen.segments.map(({ id, text }) => ({ id, text })),
         }),
-      });
+      }, 150_000);
       const data: unknown = await res.json();
       if (!res.ok || !isRecord(data) || data.success !== true || !isVideoScript(data.data) || typeof data.lock_id !== "string" || !/^[0-9a-f]{8}$/.test(data.lock_id)) {
         throw new Error("Approved narration could not be locked");
@@ -344,6 +406,8 @@ export default function Home() {
     } catch (err) {
       setError((err as Error).message || "Story lock failed");
       setWritingStatus("error");
+    } finally {
+      activeStoryActionRef.current = false;
     }
   }
 
@@ -366,7 +430,7 @@ export default function Home() {
   }
 
   async function generateVideo() {
-    if (!script || !scriptLocked || !scriptLockId) return;
+    if (!script || !scriptLocked || !scriptLockId || !generationReady) return;
     if (renderStatus === "queued" || renderStatus === "visuals" || renderStatus === "voice" || renderStatus === "rendering" || renderStatus === "qa") return;
 
     if (activeVideoControllerRef.current) {
@@ -402,16 +466,16 @@ export default function Home() {
 
     let data: unknown;
     try {
-      const res = await fetch(`${API_URL}/api/generate-video`, {
+      const res = await fetchWithDeadline(`${API_URL}/api/generate-video`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: generationRequestHeaders(),
         body: JSON.stringify({
           lock_id: scriptLockId,
           voice_provider: effectiveVoiceProvider,
           style: selectedStyle,
         }),
         signal,
-      });
+      }, 20_000);
       data = await res.json();
       if (!res.ok) {
         const errorMsg = isRecord(data) ? (data.detail || data.error) : undefined;
@@ -437,7 +501,7 @@ export default function Home() {
       if (signal.aborted) return;
 
       try {
-        const statusRes = await fetch(`${API_URL}/api/jobs/${jobId}/status`, { signal });
+        const statusRes = await fetchWithDeadline(`${API_URL}/api/jobs/${jobId}/status`, { signal });
         const data: unknown = await statusRes.json();
 
         if (statusRes.status === 404) {
@@ -611,11 +675,30 @@ export default function Home() {
               </div>
             </div>
 
+            {!generationReady && (
+              <div className="notice-banner notice-banner--warning" role="status">
+                <p><strong>Generation unavailable:</strong> {runtime.generation_message}</p>
+                {runtimeSource === "api" && runtime.generation_access_required && (
+                  <label className="field-group">
+                    <span className="field-label">Private generation access</span>
+                    <input
+                      type="password"
+                      value={generationAccessToken}
+                      onChange={(event) => updateGenerationAccessToken(event.target.value)}
+                      className="field-control field-control--input"
+                      autoComplete="off"
+                      placeholder="Enter the operator access code"
+                    />
+                  </label>
+                )}
+              </div>
+            )}
+
             <div className="action-stack">
               <button
                 type="button"
                 onClick={generateScript}
-                disabled={writingStatus === "writing" || !topic.trim()}
+                disabled={writingStatus === "writing" || !topic.trim() || !generationReady}
                 className="button button--primary"
               >
                 {writingStatus === "writing" ? "Generating script…" : "Generate script"}
@@ -623,7 +706,7 @@ export default function Home() {
               <button
                 type="button"
                 onClick={polishStory}
-                disabled={writingStatus === "writing" || !topic.trim()}
+                disabled={writingStatus === "writing" || !topic.trim() || !generationReady}
                 className="button button--secondary"
               >
                 {writingStatus === "writing" ? "Creating FYF story options…" : "FYF Polish — create 3 story options"}
@@ -689,7 +772,7 @@ export default function Home() {
                 <button
                   type="button"
                   onClick={approveAndLock}
-                  disabled={selectedVariant === null || writingStatus === "writing"}
+                  disabled={selectedVariant === null || writingStatus === "writing" || !generationReady}
                   className="button button--dark"
                 >
                   Approve selected story &amp; lock narration
@@ -702,7 +785,7 @@ export default function Home() {
                 <button
                   type="button"
                   onClick={generateVideo}
-                  disabled={!scriptLocked || !scriptLockId || renderBusy}
+                  disabled={!scriptLocked || !scriptLockId || renderBusy || !generationReady}
                   className="button button--accent"
                 >
                   {renderStatus === "queued" ? "Job queued…"

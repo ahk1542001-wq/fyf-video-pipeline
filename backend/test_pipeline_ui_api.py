@@ -2,12 +2,13 @@ import json
 import os
 import tempfile
 import unittest
+import asyncio
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 
-from backend.main import _should_resume_script_job, app
+from backend.main import _should_resume_script_job, app, resume_interrupted_script_jobs
 
 
 class PipelineUIAPITests(unittest.TestCase):
@@ -90,8 +91,53 @@ class PipelineUIAPITests(unittest.TestCase):
                 "allowed_voice_providers": ["gemini"],
                 "script_model": "script-override",
                 "fallback_model": "fallback-override",
+                "generation_available": True,
+                "generation_access_required": False,
+                "generation_status": "ready",
+                "generation_message": "Local generation controls are available.",
             },
         )
+
+    def test_public_runtime_fails_closed_without_vertex_credential(self):
+        with patch.dict(os.environ, {"FYF_PUBLIC_DEPLOYMENT": "true"}, clear=True), patch(
+            "backend.main._vertex_credentials_configured", return_value=False
+        ):
+            with TestClient(app) as client:
+                response = client.get("/api/runtime")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertFalse(payload["generation_available"])
+        self.assertFalse(payload["generation_access_required"])
+        self.assertEqual(payload["generation_status"], "credential_required")
+
+    def test_public_generation_rejects_missing_access_token_before_job_initialization(self):
+        lease_factory = MagicMock()
+        with patch.dict(
+            os.environ,
+            {
+                "FYF_PUBLIC_DEPLOYMENT": "true",
+                "FYF_PUBLIC_GENERATION_ENABLED": "true",
+                "FYF_GENERATION_ACCESS_TOKEN": "operator-only",
+                "FYF_VERTEX_API_KEY": "configured-but-never-used-in-test",
+            },
+            clear=True,
+        ), patch("backend.main.acquire_guardrail_lease", lease_factory):
+            with TestClient(app) as client:
+                response = client.post("/api/generate-script", json={"topic": "Test topic"})
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()["detail"], "Private generation access is required.")
+        lease_factory.assert_not_called()
+
+    def test_public_startup_never_auto_resumes_paid_jobs(self):
+        with patch.dict(os.environ, {"FYF_PUBLIC_DEPLOYMENT": "true"}, clear=True), patch(
+            "backend.main.run_script_pipeline"
+        ) as script_pipeline, patch("backend.main._run_video_pipeline_tracked") as video_pipeline:
+            asyncio.run(resume_interrupted_script_jobs())
+
+        script_pipeline.assert_not_called()
+        video_pipeline.assert_not_called()
 
     def test_recent_returns_only_newest_six_completed_approved_jobs_with_safe_fields(self):
         with tempfile.TemporaryDirectory() as temp_dir:

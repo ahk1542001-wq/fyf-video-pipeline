@@ -158,6 +158,11 @@ a {
   box-shadow: 0 0 0 3px rgba(22, 133, 107, 0.12);
 }
 
+.runtime-disclosure__status--inactive {
+  background: #a54545;
+  box-shadow: 0 0 0 3px rgba(165, 69, 69, 0.12);
+}
+
 .runtime-disclosure__chevron {
   color: var(--muted);
   font-size: 1rem;

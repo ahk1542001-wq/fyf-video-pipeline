@@ -5,6 +5,10 @@ export type RuntimeInfo = {
   allowed_voice_providers: VoiceProvider[];
   script_model: string;
   fallback_model: string;
+  generation_available: boolean;
+  generation_access_required: boolean;
+  generation_status: "ready" | "credential_required" | "disabled" | "access_token_required" | "private_access_required";
+  generation_message: string;
 };
 
 export type RecentApprovedVideo = {
@@ -34,6 +38,10 @@ export const STATIC_RUNTIME_FALLBACK: RuntimeInfo = {
   allowed_voice_providers: ["gemini"],
   script_model: process.env.NEXT_PUBLIC_FYF_SCRIPT_MODEL || "Gemini 3.7 Flash",
   fallback_model: process.env.NEXT_PUBLIC_FYF_FALLBACK_MODEL || "Gemini 2.5 Flash",
+  generation_available: false,
+  generation_access_required: false,
+  generation_status: "credential_required",
+  generation_message: "Generation status is unavailable until the video backend responds.",
 };
 
 function isRecordValue(value: unknown): value is Record<string, unknown> {
@@ -49,7 +57,11 @@ export function isRuntimeInfo(value: unknown): value is RuntimeInfo {
     providers.length > 0 &&
     providers.every(provider => provider === "gemini") &&
     typeof value.script_model === "string" &&
-    typeof value.fallback_model === "string"
+    typeof value.fallback_model === "string" &&
+    typeof value.generation_available === "boolean" &&
+    typeof value.generation_access_required === "boolean" &&
+    ["ready", "credential_required", "disabled", "access_token_required", "private_access_required"].includes(value.generation_status as string) &&
+    typeof value.generation_message === "string"
   );
 }
 

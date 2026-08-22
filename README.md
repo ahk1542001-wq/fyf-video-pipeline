@@ -3,11 +3,11 @@
 Evidence-led Burmese AI video generation with Gemini, native telemetry, and deterministic Remotion rendering.
 
 > [!NOTE]
-> **Current Status:** Verified local-first production path — real browser UI, Vertex/Gemini generation, Gemini TTS, Remotion rendering, deterministic QA, creative QA, final visual QA, Library playback, and in-app Telemetry are working. Replit is a public/demo deployment boundary.
+> **Current Status:** Verified local-first production path — real browser UI, Vertex/Gemini generation, Gemini TTS, Remotion rendering, deterministic QA, creative QA, final visual QA, Library playback, and in-app Telemetry are working. Replit is a public/demo boundary: hosted generation fails closed until an operator configures a secret-store credential and private access gate.
 
 > [!WARNING]
 > **Release boundary**
-> This public snapshot excludes credentials, local job output, non-public voice assets, raw provider payloads, internal agent instructions, and one-off recording/operator scripts. Hosted auth, billing, tenant isolation, and automatic external publishing are not enabled.
+> This public snapshot excludes credentials, local job output, non-public voice assets, raw provider payloads, internal agent instructions, and one-off recording/operator scripts. It has an owner-only access pass for an explicitly enabled public demo, not end-user authentication, billing, or tenant isolation.
 
 ## Repository boundary
 
@@ -30,7 +30,7 @@ FYF Video Pipeline turns a Burmese topic or draft into a reviewable vertical vid
 - **Deterministic assembly:** Remotion renders a 1080x1920 composition with Burmese captions, mascot motion, visual treatments, and synced Gemini TTS.
 - **Partner-ready:** Replit is the hackathon public/demo path; the in-app `/telemetry` view is the canonical operator surface. The post-hackathon local/private product can omit the Replit boundary.
 
-This repository is FYF-only. It does not add authentication, billing, subscriptions, tenant isolation, or automatic Facebook publishing.
+This repository is FYF-only. It does not add end-user authentication, billing, subscriptions, tenant isolation, or automatic Facebook publishing.
 
 ## What this product is built to operate
 
@@ -108,9 +108,22 @@ Open:
 
 Replit runs the same public/demo surface through `run_replit.sh`, which uses the locked Python environment, builds/starts Next.js in production mode, and proxies `/api/*` and `/health` through the same hosted origin. It defaults to the Google voice route unless explicitly overridden.
 
+### Public demo host safety
+
+Set `FYF_PUBLIC_DEPLOYMENT=true` in the host deployment configuration. This makes every paid generation endpoint fail closed by default; the UI will show **Generation unavailable** rather than a misleading readiness signal.
+
+Only for a deliberately capped, owner-operated demonstration, configure these values in the host **secret store**, never in Git or client-side variables:
+
+- `FYF_VERTEX_API_KEY` — the approved Vertex Express credential.
+- `FYF_GENERATION_ACCESS_TOKEN` — an operator-controlled access pass. The browser keeps it in session storage and sends it only as `X-FYF-Access-Token` to same-origin generation requests.
+- `FYF_PUBLIC_GENERATION_ENABLED=true` — explicit operator enablement.
+- `FYF_DAILY_BUDGET_CAP_USD`, `FYF_TOTAL_BUDGET_CAP_USD`, `FYF_RATE_LIMIT_PER_MINUTE`, and `FYF_MAX_CONCURRENT_JOBS=1` — set a small reviewed cap before a test.
+
+Public restarts never auto-resume paid jobs. A restart leaves work for an authenticated operator to resume deliberately, preventing a disabled host from unexpectedly spending provider credits.
+
 ## Verification evidence
 
-- Backend regression & ADK agent suite: **353 tests passed**.
+- Backend regression & ADK agent suite: **358 tests passed**.
 - Voice adapter/audio QA suite: **23 tests passed**.
 - Remotion suite: **27 tests passed**.
 - Frontend ESLint, TypeScript, and production build passed.
