@@ -73,7 +73,7 @@ async function fetchWithDeadline(
     return await fetch(input, { ...init, signal: controller.signal });
   } catch (error) {
     if (timedOut) {
-      throw new Error("The service did not respond in time. No additional job was queued.");
+      throw new Error("The service did not respond in time. Check the telemetry ledger before retrying.");
     }
     throw error;
   } finally {
