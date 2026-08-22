@@ -228,7 +228,7 @@ export default function Home() {
         const count = typeof job.batch_count === "number" ? job.batch_count : "?";
         setScriptProgress(`Building visual story batch ${batch}/${count}…${progress}`);
       } else if (job.stage === "retrying") {
-        setScriptProgress("Retrying from the latest saved checkpoint…");
+        setScriptProgress("Recovering the saved script checkpoint…");
       } else {
         setScriptProgress(`Preparing the script job…${progress}`);
       }
@@ -713,6 +713,16 @@ export default function Home() {
               </button>
             </div>
 
+            {writingStatus === "writing" && (
+              <div className="script-status-card" role="status" aria-live="polite" aria-atomic="true">
+                <span className="script-status-card__marker" aria-hidden="true" />
+                <div>
+                  <p className="script-status-card__label">Script workspace</p>
+                  <p className="script-status-card__message">{scriptProgress}</p>
+                </div>
+              </div>
+            )}
+
             {writingStatus === "needs_attention" && resumableScriptJobId && (
               <div className="notice-banner notice-banner--warning" role="alert">
                 <p><strong>Generation Paused:</strong> Provider encountered a temporary rate limit or timeout. Checkpoint is safely preserved.</p>
@@ -823,8 +833,8 @@ export default function Home() {
                 <span />
               </div>
               <div className="preview-window__stage" aria-live="polite" aria-atomic="true">
-                {writingStatus === "writing" ? (
-                  <p className="preview-status preview-status--active">{scriptProgress}</p>
+                {videoUrl ? (
+                  <video controls playsInline className="preview-window__video" src={videoUrl} aria-label="Rendered FYF video preview" />
                 ) : renderStatus === "queued" ? (
                   <p className="preview-status preview-status--active">Queued… waiting for the available worker.</p>
                 ) : renderStatus === "visuals" ? (
@@ -839,11 +849,9 @@ export default function Home() {
                 ) : renderStatus === "qa" ? (
                   <p className="preview-status preview-status--active">{renderProgress || "Checking video, audio, narration, and mouth cues…"}</p>
                 ) : renderStatus === "failed" ? (
-                  <p className="preview-status">Render stopped. Review the message beside the source controls.</p>
-                ) : videoUrl ? (
-                  <video controls playsInline className="preview-window__video" src={videoUrl} aria-label="Rendered FYF video preview" />
+                  <p className="preview-status">No playable video was produced. Review the message beside the source controls.</p>
                 ) : (
-                  <p className="preview-empty">Rendered video appears here.</p>
+                  <p className="preview-empty">A playable MP4 appears here only after render and quality checks pass.</p>
                 )}
               </div>
             </div>

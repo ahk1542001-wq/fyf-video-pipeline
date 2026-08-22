@@ -682,6 +682,47 @@ a {
   object-fit: contain;
 }
 
+.script-status-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  border: 1px solid #BBD4BF;
+  border-left: 3px solid var(--focus);
+  border-radius: var(--radius);
+  background: #EDF3EC;
+  padding: 12px 13px;
+}
+
+.script-status-card__marker {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--focus);
+  box-shadow: 0 0 0 4px rgba(22, 133, 107, 0.13);
+  margin-top: 5px;
+}
+
+.script-status-card__label,
+.script-status-card__message {
+  margin: 0;
+}
+
+.script-status-card__label {
+  color: var(--status);
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.script-status-card__message {
+  margin-top: 3px;
+  color: var(--foreground);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
 .preview-status {
   max-width: 270px;
   margin: 0;
