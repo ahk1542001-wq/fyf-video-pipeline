@@ -141,6 +141,39 @@ VALID_STORYBOARD_RESPONSE = {
 
 
 class StoryModesTests(unittest.TestCase):
+    def test_storyboard_reconciles_ordered_segment_ids_when_claim_ids_repeat(self):
+        first_plan = json.loads(json.dumps(VALID_EXACT_LOCK_RESPONSE["segments"][0]))
+        second_plan = json.loads(json.dumps(first_plan))
+        second_plan["id"] = "s2"
+        visual_plan = writer_agent_vertex.CompactVisualPlanResponse.model_validate({
+            "segments": [first_plan, second_plan],
+        })
+        storyboard = writer_agent_vertex.StoryboardResponse.model_validate({
+            "segments": [
+                {
+                    "id": "segment_1",
+                    "evidence_shots": first_plan["evidence_shots"],
+                },
+                {
+                    "id": "segment_2",
+                    "evidence_shots": second_plan["evidence_shots"],
+                },
+            ],
+        })
+
+        try:
+            reconciled = writer_agent_vertex._reconcile_storyboard_segment_ids(
+                storyboard,
+                visual_plan,
+            )
+        except ValueError as exc:
+            self.fail(f"ordered storyboard ID drift should be repairable: {exc}")
+
+        self.assertEqual(
+            [segment.id for segment in reconciled.segments],
+            ["s1", "s2"],
+        )
+
     def test_storyboard_requires_mixed_media_for_long_form_story(self):
         source = inspect.getsource(writer_agent_vertex._direct_storyboard)
         self.assertIn("at least two generated story-scene shots", source)

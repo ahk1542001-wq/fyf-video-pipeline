@@ -405,9 +405,27 @@ def _reconcile_storyboard_segment_ids(
             if covered_claim_ids and covered_claim_ids.issubset(claim_ids)
         ]
         if len(candidates) != 1 or candidates[0] in used_plan_ids:
-            raise ValueError("Storyboard segment IDs do not match visual plan")
+            assignments = {}
+            break
         assignments[storyboard_segment.id] = candidates[0]
         used_plan_ids.add(candidates[0])
+
+    if not assignments:
+        positional_assignments: dict[str, str] = {}
+        for storyboard_segment, plan_segment in zip(
+            storyboard.segments,
+            visual_plan.segments,
+            strict=True,
+        ):
+            covered_claim_ids = {
+                claim_id
+                for shot in storyboard_segment.evidence_shots
+                for claim_id in shot.proves_claim_ids
+            }
+            if covered_claim_ids != plan_claim_ids[plan_segment.id]:
+                raise ValueError("Storyboard segment IDs do not match visual plan")
+            positional_assignments[storyboard_segment.id] = plan_segment.id
+        assignments = positional_assignments
 
     logger.warning(
         "Storyboard returned non-canonical segment IDs; reconciled by immutable claim ownership: %s",
