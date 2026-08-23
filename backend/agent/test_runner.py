@@ -162,6 +162,22 @@ class ADKAgentTests(unittest.TestCase):
         self.assertEqual(agent.name, "fyf_producer")
         self.assertEqual(len(agent.tools), 4)
 
+    def test_create_fyf_producer_agent_uses_shared_vertex_client_configuration(self):
+        client_kwargs = {
+            "vertexai": True,
+            "project": "test-project",
+            "location": "global",
+        }
+        with patch(
+            "backend.agent.fyf_producer.vertex_client_kwargs",
+            return_value=client_kwargs,
+        ):
+            agent = create_fyf_producer_agent(model_name="gemini-test-model")
+
+        self.assertTrue(agent.model.api_client.vertexai)
+        self.assertEqual(agent.model.api_client._api_client.project, "test-project")
+        self.assertEqual(agent.model.api_client._api_client.location, "global")
+
     def test_run_adk_pipeline_end_to_end_with_checkpoints(self):
         from unittest.mock import MagicMock
         with patch(

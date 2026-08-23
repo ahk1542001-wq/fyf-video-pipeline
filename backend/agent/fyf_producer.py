@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from typing import Any
 
 from google.adk import Agent
+from google.adk.models import Gemini
 
 _repo_root = Path(__file__).resolve().parent.parent.parent
 if str(_repo_root) not in sys.path:
@@ -21,6 +23,7 @@ from backend.agent.tools import (
     plan_visual_shots,
     research_topic,
 )
+from backend.vertex_client import vertex_client_kwargs
 from vertex_model_routing import model_for
 
 PRODUCER_INSTRUCTION = """
@@ -50,10 +53,16 @@ def create_fyf_producer_agent(
         Configured google.adk.Agent instance.
     """
     resolved_model = model_name or model_for("script")
+    vertex_model = Gemini(
+        model=resolved_model,
+        client_kwargs=vertex_client_kwargs(
+            location=os.getenv("GOOGLE_CLOUD_LOCATION", "global"),
+        ),
+    )
     return Agent(
         name="fyf_producer",
         description="Autonomous FYF Video Producer coordinating research, Burmese script writing, QA auditing, and visual storyboard planning.",
-        model=resolved_model,
+        model=vertex_model,
         instruction=PRODUCER_INSTRUCTION,
         tools=[
             research_topic,

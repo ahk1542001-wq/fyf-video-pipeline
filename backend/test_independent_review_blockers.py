@@ -421,7 +421,7 @@ class TestIndependentReviewBlockers(unittest.TestCase):
         from backend.agent.fyf_producer import create_fyf_producer_agent
         agent = create_fyf_producer_agent()
         expected_model = model_for("script")
-        self.assertEqual(agent.model, expected_model, f"Expected {expected_model} but got {agent.model}")
+        self.assertEqual(agent.model.model, expected_model, f"Expected {expected_model} but got {agent.model}")
 
     # BLOCKER 5: Budget fail-closed validation
     def test_budget_fail_closed_on_nan_inf_negative_or_malformed_reservations(self):
