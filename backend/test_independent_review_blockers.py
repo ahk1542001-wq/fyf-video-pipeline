@@ -384,6 +384,7 @@ class TestIndependentReviewBlockers(unittest.TestCase):
                 self.assertEqual(response.status_code, 200)
 
             summary = get_all_telemetry_summary(
+                base_dir=root / "telemetry",
                 job_roots=(Path(jobs_dir), Path(script_jobs_dir)),
                 budget_root=root,
             )

@@ -31,6 +31,16 @@ class PipelineUIAPITests(unittest.TestCase):
         self.assertTrue(_should_resume_script_job({"status": "queued"}))
         self.assertTrue(_should_resume_script_job({"status": "writing"}))
 
+    def test_health_and_same_origin_api_health_alias_return_ok(self):
+        with TestClient(app) as client:
+            for route in ("/health", "/api/health"):
+                response = client.get(route)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(
+                    response.json(),
+                    {"status": "ok", "service": "fyf-video-pipeline"},
+                )
+
     def _write_job(
         self,
         jobs_root: Path,

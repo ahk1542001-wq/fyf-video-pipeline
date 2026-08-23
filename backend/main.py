@@ -315,6 +315,12 @@ def health():
     return {"status": "ok", "service": "fyf-video-pipeline"}
 
 
+@app.get("/api/health")
+def api_health():
+    """Same-origin alias of /health reachable through the frontend /api proxy."""
+    return {"status": "ok", "service": "fyf-video-pipeline"}
+
+
 @app.get("/api/runtime", response_model=RuntimeResponse)
 def get_runtime():
     generation_state = _generation_runtime_state()
