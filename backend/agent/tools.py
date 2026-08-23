@@ -20,6 +20,46 @@ from video_contract import StoryDraftScript, VideoScript
 logger = logging.getLogger(__name__)
 
 
+def _restore_storyboard_visual_variety(video_script: dict[str, Any]) -> dict[str, Any]:
+    """Apply the storyboard-wide generated-scene guard after batch merging."""
+    segments = video_script.get("segments", [])
+    if len(segments) < 4:
+        return video_script
+
+    generated_count = sum(
+        shot.get("media_type") in {"generated_image", "generated_video"}
+        for segment in segments
+        for shot in segment.get("visual", {}).get("evidence_shots", [])
+    )
+    if generated_count >= 2:
+        return video_script
+
+    for segment in segments:
+        visual = segment.get("visual", {})
+        claim_types = {
+            claim.get("evidence_type")
+            for claim in visual.get("evidence_claims", [])
+        }
+        if not claim_types or not claim_types.issubset({"concept", "relationship"}):
+            continue
+        for shot in visual.get("evidence_shots", []):
+            if shot.get("media_type") != "motion_graphic":
+                continue
+            shot["media_type"] = "generated_image"
+            shot["motion_spec"] = None
+            generated_count += 1
+            break
+        if generated_count >= 2:
+            break
+
+    if generated_count < 2:
+        raise ValueError(
+            "Storyboard visual variety requires at least two generated story-scene shots; "
+            "do not render every segment as cards or diagrams"
+        )
+    return video_script
+
+
 def research_topic(topic: str, duration_mode: str = "short") -> dict[str, Any]:
     """Research a topic to extract factual focus, narrative hook, and visual concepts.
 
@@ -102,21 +142,26 @@ def plan_visual_shots(title: str, segments: list[dict[str, Any]]) -> dict[str, A
     Returns:
         Fully planned and locked VideoScript dictionary.
     """
-    from writer_agent_vertex import generate_exact_lock
-    lock_input = {
+    from writer_agent_vertex import lock_narration_in_batches
+    draft_input = {
         "title": title,
-        "approved_segments": [
-            {"id": s.get("id", f"s{i+1}"), "text": s.get("text", "")}
+        "language": "my-MM",
+        "segments": [
+            {**s, "id": s.get("id", f"s{i+1}"), "text": s.get("text", "")}
             for i, s in enumerate(segments)
         ],
     }
-    raw_lock = generate_exact_lock(lock_input)
+    validated_draft = StoryDraftScript.model_validate(draft_input).model_dump(mode="json")
+    raw_lock = lock_narration_in_batches(validated_draft, batch_size=2)
 
     video_script = VideoScript.model_validate({
         "title": title,
         "language": "my-MM",
         "segments": raw_lock.get("segments", []),
     }).model_dump(mode="json")
+    video_script = VideoScript.model_validate(
+        _restore_storyboard_visual_variety(video_script)
+    ).model_dump(mode="json")
 
     directed_script = apply_director_pass(video_script)
     return directed_script

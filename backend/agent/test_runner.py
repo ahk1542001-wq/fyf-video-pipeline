@@ -149,13 +149,57 @@ class ADKAgentTests(unittest.TestCase):
 
     def test_plan_visual_shots_returns_directed_script(self):
         with patch(
-            "writer_agent_vertex.generate_exact_lock",
+            "writer_agent_vertex.lock_narration_in_batches",
             return_value=_mock_exact_lock(),
         ):
             script = plan_visual_shots("လယ်ယာကဏ္ဍ အခွင့်အလမ်းများ", _mock_draft()["segments"])
             self.assertEqual(script["title"], "လယ်ယာကဏ္ဍ အခွင့်အလမ်းများ")
             self.assertEqual(len(script["segments"]), 5)
             self.assertIn("scene_type", script["segments"][0])
+
+    def test_plan_visual_shots_locks_narration_in_two_segment_batches(self):
+        with patch(
+            "writer_agent_vertex.lock_narration_in_batches",
+            return_value=_mock_exact_lock(),
+        ) as lock_batches:
+            plan_visual_shots(
+                "လယ်ယာကဏ္ဍ အခွင့်အလမ်းများ",
+                _mock_draft()["segments"],
+            )
+
+        lock_batches.assert_called_once()
+        self.assertEqual(lock_batches.call_args.kwargs["batch_size"], 2)
+        self.assertEqual(
+            [segment["id"] for segment in lock_batches.call_args.args[0]["segments"]],
+            ["s1", "s2", "s3", "s4", "s5"],
+        )
+
+    def test_plan_visual_shots_restores_storyboard_wide_visual_variety(self):
+        all_motion = _mock_exact_lock()
+        for segment in all_motion["segments"]:
+            shot = segment["visual"]["evidence_shots"][0]
+            shot["media_type"] = "motion_graphic"
+            shot["motion_spec"] = {
+                "layout": "concept",
+                "labels": ["စိုက်ပျိုးရေး"],
+                "values": [],
+            }
+
+        with patch(
+            "writer_agent_vertex.lock_narration_in_batches",
+            return_value=all_motion,
+        ):
+            script = plan_visual_shots(
+                "လယ်ယာကဏ္ဍ အခွင့်အလမ်းများ",
+                _mock_draft()["segments"],
+            )
+
+        generated_count = sum(
+            shot["media_type"] in {"generated_image", "generated_video"}
+            for segment in script["segments"]
+            for shot in segment["visual"]["evidence_shots"]
+        )
+        self.assertGreaterEqual(generated_count, 2)
 
     def test_create_fyf_producer_agent_creates_adk_instance(self):
         agent = create_fyf_producer_agent()
