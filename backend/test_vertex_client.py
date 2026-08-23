@@ -40,6 +40,35 @@ class TestVertexClient(unittest.TestCase):
             {"vertexai": True, "project": "project-a", "location": "global"},
         )
 
+    def test_existing_configured_adc_file_wins_over_explicit_api_key(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            credential_file = Path(temp_dir) / "gcp-key.json"
+            credential_file.write_text("{}", encoding="utf-8")
+            credentials = object()
+            with patch.dict(
+                os.environ,
+                {
+                    "FYF_VERTEX_API_KEY": "blocked-key",
+                    "GOOGLE_APPLICATION_CREDENTIALS": str(credential_file),
+                    "GOOGLE_CLOUD_PROJECT": "project-a",
+                },
+                clear=True,
+            ), patch(
+                "backend.vertex_client.service_account.Credentials.from_service_account_file",
+                return_value=credentials,
+            ):
+                kwargs = vertex_client_kwargs(location="global")
+
+        self.assertEqual(
+            kwargs,
+            {
+                "vertexai": True,
+                "project": "project-a",
+                "location": "global",
+                "credentials": credentials,
+            },
+        )
+
     def test_local_ignored_env_file_can_supply_express_key(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             env_file = Path(temp_dir) / ".env"
