@@ -14,3 +14,14 @@ def test_replit_supported_python_range_excludes_unresolvable_313() -> None:
     assert supported.contains("3.11")
     assert supported.contains("3.12")
     assert not supported.contains("3.13")
+
+
+def test_runtime_declares_adk_directly_without_unused_agent_engine_extra() -> None:
+    project = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text())
+    dependencies = project["project"]["dependencies"]
+
+    assert any(dependency.startswith("google-adk") for dependency in dependencies)
+    assert not any(
+        dependency.startswith("google-cloud-aiplatform")
+        for dependency in dependencies
+    )
