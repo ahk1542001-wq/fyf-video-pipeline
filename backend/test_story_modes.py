@@ -283,6 +283,308 @@ class StoryModesTests(unittest.TestCase):
             "Approved fact",
         )
 
+    def test_exact_lock_normalizes_sequence_claims_to_deterministic_sequence_shot(self):
+        claims = {
+            "segments": [{
+                "id": "seg-4",
+                "claims": [
+                    {
+                        "claim_id": "sequence-1",
+                        "statement": "AI drafts, then a human approves before sending",
+                        "evidence_type": "sequence",
+                        "values": [],
+                    },
+                    {
+                        "claim_id": "relationship-1",
+                        "statement": "Human approval prevents an unsafe customer promise",
+                        "evidence_type": "relationship",
+                        "values": [],
+                    },
+                ],
+            }],
+        }
+        coverage = {
+            "segments": [{
+                "id": "seg-4",
+                "passed": True,
+                "missing_claims": [],
+                "issues": [],
+            }],
+        }
+        visual_plan = {
+            "segments": [{
+                "id": "seg-4",
+                "visual_action": "Show the approval workflow",
+                "scene_type": "demo",
+                "mascot_action": "explain",
+                "emotion": "focused",
+                "emphasis": [],
+                "phase": "in_progress",
+                "camera": "wide",
+                "screen_text": ["Draft → Approve → Send"],
+                "evidence_claims": claims["segments"][0]["claims"],
+                "evidence_shots": [
+                    {
+                        "shot_id": "seg-4-shot-1",
+                        "proves_claim_ids": ["sequence-1"],
+                        "prompt": "Show an AI draft waiting for a manager approval before send",
+                        "caption": "Draft then approve",
+                        "hold_fraction": 0.5,
+                        "media_type": "generated_image",
+                        "motion_preset": "static",
+                        "transition": "cut",
+                        "composition": "focal_center",
+                        "mascot_presence": "none",
+                        "motion_spec": None,
+                        "asset_path": None,
+                        "fallback_asset_path": None,
+                        "fallback_used": False,
+                        "verification_status": "planned",
+                    },
+                    {
+                        "shot_id": "seg-4-shot-2",
+                        "proves_claim_ids": ["relationship-1"],
+                        "prompt": "Show the unsafe promise stopped by manager approval",
+                        "caption": "Human approval prevents unsafe promises",
+                        "hold_fraction": 0.5,
+                        "media_type": "generated_image",
+                        "motion_preset": "static",
+                        "transition": "cut",
+                        "composition": "focal_center",
+                        "mascot_presence": "none",
+                        "motion_spec": None,
+                        "asset_path": None,
+                        "fallback_asset_path": None,
+                        "fallback_used": False,
+                        "verification_status": "planned",
+                    },
+                ],
+            }],
+        }
+        storyboard = {
+            "segments": [{
+                "id": "seg-4",
+                "evidence_shots": visual_plan["segments"][0]["evidence_shots"],
+            }],
+        }
+        client = MagicMock()
+        client.models.generate_content.side_effect = [
+            SimpleNamespace(text=json.dumps(claims)),
+            SimpleNamespace(text=json.dumps(coverage)),
+            SimpleNamespace(text=json.dumps(visual_plan)),
+            SimpleNamespace(text=json.dumps(storyboard)),
+        ]
+        req = {
+            "title": "Approved Title",
+            "approved_segments": [{"id": "seg-4", "text": "Approved text 4"}],
+        }
+
+        with patch("writer_agent_vertex.genai.Client", return_value=client), patch.dict(
+            "os.environ", {"FYF_VERTEX_MAX_ATTEMPTS": "1"}
+        ):
+            result = generate_exact_lock(req)
+
+        shot = result["segments"][0]["visual"]["evidence_shots"][0]
+        self.assertEqual(shot["media_type"], "motion_graphic")
+        self.assertEqual(shot["motion_spec"]["layout"], "sequence")
+        self.assertEqual(
+            shot["proves_claim_ids"],
+            ["sequence-1", "relationship-1"],
+        )
+        self.assertEqual(
+            shot["motion_spec"]["labels"],
+            [
+                "AI drafts, then a human approves before sending",
+                "Human approval prevents an unsafe customer promise",
+            ],
+        )
+
+    def test_sequence_normalizer_rejects_missing_or_invented_claim_coverage(self):
+        claims = [
+            {
+                "claim_id": "sequence-1",
+                "statement": "AI drafts, then a human approves before sending",
+                "evidence_type": "sequence",
+                "values": [],
+            },
+            {
+                "claim_id": "relationship-1",
+                "statement": "Human approval prevents an unsafe customer promise",
+                "evidence_type": "relationship",
+                "values": [],
+            },
+        ]
+        plan = writer_agent_vertex.CompactVisualPlanResponse.model_validate({
+            "segments": [{
+                "id": "seg-4",
+                "visual_action": "Show the approval workflow",
+                "scene_type": "demo",
+                "mascot_action": "explain",
+                "emotion": "focused",
+                "emphasis": [],
+                "phase": "in_progress",
+                "camera": "wide",
+                "screen_text": ["Draft → Approve → Send"],
+                "evidence_claims": claims,
+                "evidence_shots": [{
+                    "shot_id": "plan-shot",
+                    "proves_claim_ids": ["sequence-1", "relationship-1"],
+                    "prompt": "Show the approval workflow",
+                    "caption": "Approval workflow",
+                    "hold_fraction": 1.0,
+                    "media_type": "generated_image",
+                    "motion_spec": None,
+                }],
+            }],
+        })
+
+        for claim_ids in (["sequence-1"], ["sequence-1", "invented"]):
+            with self.subTest(claim_ids=claim_ids):
+                storyboard = writer_agent_vertex.StoryboardResponse.model_validate({
+                    "segments": [{
+                        "id": "seg-4",
+                        "evidence_shots": [{
+                            "shot_id": "storyboard-shot",
+                            "proves_claim_ids": claim_ids,
+                            "prompt": "Show the approval workflow",
+                            "caption": "Approval workflow",
+                            "hold_fraction": 1.0,
+                            "media_type": "generated_image",
+                            "motion_spec": None,
+                        }],
+                    }],
+                })
+
+                with self.assertRaisesRegex(ValueError, "claim coverage mismatch"):
+                    writer_agent_vertex._normalize_deterministic_sequence_shots(
+                        storyboard,
+                        plan,
+                    )
+
+    def test_sequence_normalizer_rejects_motion_values_overflow(self):
+        claims = [
+            {
+                "claim_id": "sequence-1",
+                "statement": "Six ordered checkpoints",
+                "evidence_type": "sequence",
+                "values": ["1", "2", "3", "4", "5", "6"],
+            },
+            {
+                "claim_id": "relationship-1",
+                "statement": "A seventh value explains the result",
+                "evidence_type": "relationship",
+                "values": ["7"],
+            },
+        ]
+        plan = writer_agent_vertex.CompactVisualPlanResponse.model_validate({
+            "segments": [{
+                "id": "seg-4",
+                "visual_action": "Show ordered checkpoints",
+                "scene_type": "demo",
+                "mascot_action": "explain",
+                "emotion": "focused",
+                "emphasis": [],
+                "phase": "in_progress",
+                "camera": "wide",
+                "screen_text": ["1 → 7"],
+                "evidence_claims": claims,
+                "evidence_shots": [{
+                    "shot_id": "plan-shot",
+                    "proves_claim_ids": ["sequence-1", "relationship-1"],
+                    "prompt": "Show seven ordered values",
+                    "caption": "Seven values",
+                    "hold_fraction": 1.0,
+                    "media_type": "generated_image",
+                    "motion_spec": None,
+                }],
+            }],
+        })
+        storyboard = writer_agent_vertex.StoryboardResponse.model_validate({
+            "segments": [{
+                "id": "seg-4",
+                "evidence_shots": [{
+                    "shot_id": "storyboard-shot",
+                    "proves_claim_ids": ["sequence-1", "relationship-1"],
+                    "prompt": "Show seven ordered values",
+                    "caption": "Seven values",
+                    "hold_fraction": 1.0,
+                    "media_type": "generated_image",
+                    "motion_spec": None,
+                }],
+            }],
+        })
+
+        with self.assertRaisesRegex(ValueError, "motion values exceed"):
+            writer_agent_vertex._normalize_deterministic_sequence_shots(
+                storyboard,
+                plan,
+            )
+
+    def test_sequence_normalizer_preserves_existing_ordered_sequence_spec(self):
+        claim = {
+            "claim_id": "sequence-1",
+            "statement": "AI drafts, then a human approves before sending",
+            "evidence_type": "sequence",
+            "values": [],
+        }
+        plan = writer_agent_vertex.CompactVisualPlanResponse.model_validate({
+            "segments": [{
+                "id": "seg-4",
+                "visual_action": "Show the approval workflow",
+                "scene_type": "demo",
+                "mascot_action": "explain",
+                "emotion": "focused",
+                "emphasis": [],
+                "phase": "in_progress",
+                "camera": "wide",
+                "screen_text": ["Draft → Approve → Send"],
+                "evidence_claims": [claim],
+                "evidence_shots": [{
+                    "shot_id": "plan-shot",
+                    "proves_claim_ids": ["sequence-1"],
+                    "prompt": "Show the approval workflow",
+                    "caption": "Approval workflow",
+                    "hold_fraction": 1.0,
+                    "media_type": "motion_graphic",
+                    "motion_preset": "static",
+                    "motion_spec": {
+                        "layout": "sequence",
+                        "labels": ["AI drafts", "Human approves", "System sends"],
+                        "values": [],
+                    },
+                }],
+            }],
+        })
+        storyboard = writer_agent_vertex.StoryboardResponse.model_validate({
+            "segments": [{
+                "id": "seg-4",
+                "evidence_shots": [{
+                    "shot_id": "storyboard-shot",
+                    "proves_claim_ids": ["sequence-1"],
+                    "prompt": "Show the approval workflow",
+                    "caption": "Approval workflow",
+                    "hold_fraction": 1.0,
+                    "media_type": "motion_graphic",
+                    "motion_preset": "static",
+                    "motion_spec": {
+                        "layout": "sequence",
+                        "labels": ["AI drafts", "Human approves", "System sends"],
+                        "values": [],
+                    },
+                }],
+            }],
+        })
+
+        normalized = writer_agent_vertex._normalize_deterministic_sequence_shots(
+            storyboard,
+            plan,
+        )
+
+        self.assertEqual(
+            normalized.segments[0].evidence_shots[0].motion_spec.labels,
+            ["AI drafts", "Human approves", "System sends"],
+        )
+
     def test_exact_lock_retries_storyboard_on_the_configured_flash_route(self):
         class TransientVertexError(RuntimeError):
             code = 504

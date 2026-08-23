@@ -4,7 +4,7 @@ import time
 import logging
 from google import genai
 from google.genai import types
-from video_contract import ClaimCoverageResponse, CompactVisualPlanResponse, EvidenceClaimsResponse, ExactLockRequest, StoryboardResponse, StoryDraftModesResponse, StoryDraftScript, StoryModesResponse, VideoScript, VisualTreatment
+from video_contract import ClaimCoverageResponse, CompactVisualPlanResponse, EvidenceClaimsResponse, ExactLockRequest, MotionGraphicSpec, StoryboardResponse, StoryDraftModesResponse, StoryDraftScript, StoryModesResponse, VideoScript, VisualTreatment
 from vertex_model_routing import model_for
 from backend.vertex_telemetry import telemetry_retry_attempt, track_client
 from backend.vertex_thinking import generation_config_for
@@ -294,6 +294,7 @@ def _direct_storyboard(
     expected_ids = {segment.id for segment in visual_plan.segments}
     if {segment.id for segment in storyboard.segments} != expected_ids:
         storyboard = _reconcile_storyboard_segment_ids(storyboard, visual_plan)
+    storyboard = _normalize_deterministic_sequence_shots(storyboard, visual_plan)
     plans = {segment.id: segment for segment in visual_plan.segments}
     if len(storyboard.segments) >= 4:
         generated_count = sum(
@@ -367,6 +368,115 @@ def _direct_storyboard(
                 "do not render every segment as cards or diagrams"
             )
     return storyboard
+
+
+def _normalize_deterministic_sequence_shots(
+    storyboard: StoryboardResponse,
+    visual_plan: CompactVisualPlanResponse,
+) -> StoryboardResponse:
+    """Make already-covered ordered claims deterministic without changing claim meaning."""
+    plans = {segment.id: segment for segment in visual_plan.segments}
+    for segment in storyboard.segments:
+        claims = plans[segment.id].evidence_claims
+        claims_by_id = {claim.claim_id: claim for claim in claims}
+        covered_claim_ids = {
+            claim_id
+            for shot in segment.evidence_shots
+            for claim_id in shot.proves_claim_ids
+        }
+        if covered_claim_ids != set(claims_by_id):
+            raise ValueError(
+                f"Storyboard claim coverage mismatch for segment {segment.id}"
+            )
+
+        def sequence_spec_for(claim_ids: list[str]) -> MotionGraphicSpec:
+            values = [
+                value
+                for claim_id in claim_ids
+                for value in claims_by_id[claim_id].values
+            ]
+            if len(values) > 6:
+                raise ValueError(
+                    f"Storyboard sequence motion values exceed contract limit for segment {segment.id}"
+                )
+            return MotionGraphicSpec(
+                layout="sequence",
+                labels=[claims_by_id[claim_id].statement for claim_id in claim_ids],
+                values=values,
+            )
+
+        sequence_ids = [
+            claim.claim_id for claim in claims if claim.evidence_type == "sequence"
+        ]
+        relationship_ids = [
+            claim.claim_id for claim in claims if claim.evidence_type == "relationship"
+        ]
+        if not sequence_ids:
+            continue
+
+        deterministic_shots = []
+        for sequence_id in sequence_ids:
+            existing = next(
+                (
+                    shot
+                    for shot in segment.evidence_shots
+                    if sequence_id in shot.proves_claim_ids
+                    and shot.media_type == "motion_graphic"
+                    and shot.motion_spec
+                    and shot.motion_spec.layout == "sequence"
+                ),
+                None,
+            )
+            if existing is not None:
+                deterministic_shots.append(existing)
+                continue
+
+            candidate = next(
+                (
+                    shot
+                    for shot in segment.evidence_shots
+                    if sequence_id in shot.proves_claim_ids
+                ),
+                None,
+            )
+            if candidate is None:
+                continue
+
+            candidate.media_type = "motion_graphic"
+            candidate.motion_preset = "static"
+            candidate.treatment = None
+            candidate.motion_spec = sequence_spec_for(candidate.proves_claim_ids)
+            deterministic_shots.append(candidate)
+
+        if not deterministic_shots:
+            continue
+
+        shared_shot = deterministic_shots[0]
+        added_relationship_ids = []
+        for relationship_id in relationship_ids:
+            if relationship_id not in shared_shot.proves_claim_ids:
+                shared_shot.proves_claim_ids.append(relationship_id)
+                added_relationship_ids.append(relationship_id)
+        if added_relationship_ids:
+            assert shared_shot.motion_spec is not None
+            labels = list(shared_shot.motion_spec.labels)
+            values = list(shared_shot.motion_spec.values)
+            for relationship_id in added_relationship_ids:
+                statement = claims_by_id[relationship_id].statement
+                if statement not in labels:
+                    labels.append(statement)
+                for value in claims_by_id[relationship_id].values:
+                    if value not in values:
+                        values.append(value)
+            if len(labels) > 6 or len(values) > 6:
+                raise ValueError(
+                    f"Storyboard shared sequence evidence exceeds contract limit for segment {segment.id}"
+                )
+            shared_shot.motion_spec = shared_shot.motion_spec.model_copy(
+                update={"labels": labels, "values": values}
+            )
+
+    return StoryboardResponse.model_validate(storyboard.model_dump(mode="json"))
 
 
 def _reconcile_storyboard_segment_ids(
