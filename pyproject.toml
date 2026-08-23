@@ -3,7 +3,7 @@ name = "fyf-video-pipeline"
 version = "0.1.0"
 description = "Evidence-led Burmese video generation with Gemini, Google ADK, native telemetry, and deterministic Remotion rendering"
 readme = "README.md"
-requires-python = ">=3.11,<3.14"
+requires-python = ">=3.11,<3.13"
 dependencies = [
     "fastapi>=0.141.1",
     "google-cloud-aiplatform[agent_engines,adk]>=1.112,<2",
