@@ -23,12 +23,12 @@ class TestVertexClient(unittest.TestCase):
             )
         self.assertEqual(kwargs, {"vertexai": True, "project": "project-a", "location": "global"})
 
-    def test_deployment_adc_wins_over_injected_generic_google_api_key(self):
+    def test_configured_adc_path_blocks_injected_generic_key_when_file_is_missing(self):
         with patch.dict(
             os.environ,
             {
                 "GOOGLE_API_KEY": "host-injected-key",
-                "GOOGLE_APPLICATION_CREDENTIALS": "gcp-key.json",
+                "GOOGLE_APPLICATION_CREDENTIALS": "/definitely-missing/fyf-gcp-key.json",
                 "GOOGLE_CLOUD_PROJECT": "project-a",
             },
             clear=True,
