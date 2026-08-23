@@ -23,6 +23,23 @@ class TestVertexClient(unittest.TestCase):
             )
         self.assertEqual(kwargs, {"vertexai": True, "project": "project-a", "location": "global"})
 
+    def test_deployment_adc_wins_over_injected_generic_google_api_key(self):
+        with patch.dict(
+            os.environ,
+            {
+                "GOOGLE_API_KEY": "host-injected-key",
+                "GOOGLE_APPLICATION_CREDENTIALS": "gcp-key.json",
+                "GOOGLE_CLOUD_PROJECT": "project-a",
+            },
+            clear=True,
+        ):
+            kwargs = vertex_client_kwargs(location="global")
+
+        self.assertEqual(
+            kwargs,
+            {"vertexai": True, "project": "project-a", "location": "global"},
+        )
+
     def test_local_ignored_env_file_can_supply_express_key(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             env_file = Path(temp_dir) / ".env"
