@@ -3,9 +3,7 @@
 # uvicorn (:8000, internal). Remotion renders inside this same container.
 #
 # Build:  gcloud builds submit --tag REGION-docker.pkg.dev/PROJECT/fyf/fyf-pipeline .
-# Deploy: gcloud run deploy fyf-pipeline --image ... --region ... \
-#           --cpu 2 --memory 4Gi --execution-environment gen2 \
-#           --set-env-vars FYF_RUNTIME_MODE=hackathon,FYF_SEGMENT_RENDER_ENABLED=1,...
+# Deploy: scripts/deploy_cloudrun.sh wraps this plus secrets and IAM.
 
 FROM node:20-slim AS web-builder
 
@@ -25,8 +23,8 @@ RUN npm ci --no-audit --no-fund
 FROM python:3.11-slim AS runtime
 
 ENV PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    DEBIAN_FRONTEND=noninteractive
+    DEBIAN_FRONTEND=noninteractive \
+    UV_PROJECT_ENVIRONMENT=/app/.venv
 
 # Node 20 (remotion CLI + next server) + media/browser libs for Remotion.
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -39,10 +37,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
+# uv installs the exact locked dependency graph from uv.lock.
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+WORKDIR /app
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
+
+ENV PATH="/app/.venv/bin:$PATH"
 
 # Python application code (repo-root modules included).
 COPY backend ./backend
