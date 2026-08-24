@@ -985,12 +985,16 @@ def ask_data_insights(payload: dict = Body(...)):
 
         from backend.agent.data_officer import ask_data_officer
 
-        # The Next.js standalone rewrite proxy tears the connection down at
-        # ~30s and answers with an opaque HTML 500, so the whole handler must
-        # finish well inside that window. One attempt, hard-bounded.
+        # Hard-bound the whole officer turn inside one event loop so slow
+        # Vertex/MCP turns fail cleanly instead of hanging the client.
         result = None
         try:
-            result = asyncio.wait_for(asyncio.run(ask_data_officer(question)), timeout=26.0)
+            async def _officer_turn():
+                return await asyncio.wait_for(
+                    ask_data_officer(question), timeout=26.0
+                )
+
+            result = asyncio.run(_officer_turn())
         except asyncio.TimeoutError:
             logger.warning("Data Officer exceeded 26s budget for question")
             raise HTTPException(
