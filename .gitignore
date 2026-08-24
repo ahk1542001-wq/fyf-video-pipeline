@@ -6,6 +6,7 @@ __pycache__/
 .env
 .env.*
 !.env.example
+!.env.clickhouse.template
 *.env.local
 *.env.*.local
 gcp-key.json
