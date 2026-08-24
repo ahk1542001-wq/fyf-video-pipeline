@@ -80,7 +80,41 @@ class VideoStylesTests(unittest.TestCase):
         # Apply evidence story
         evidence_script = apply_video_style(script, "evidence_story")
         self.assertEqual(evidence_script["style_applied"], "evidence_story")
-        self.assertEqual(evidence_script["segments"][0]["visual"]["camera"], "diorama_overview")
+        self.assertEqual(evidence_script["segments"][0]["visual"]["camera"], "wide")
+
+    def test_every_style_stays_within_video_contract_enums(self):
+        """Regression: style presets once used out-of-contract values ('medium',
+        'mascot_focus', 'zoom_in', 'steady', ...) that crashed the video pipeline
+        at plan_visual_treatments validation time."""
+        import sys
+        from pathlib import Path
+
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from backend.test_video_contract import SCRIPT
+        from video_contract import VideoScript
+
+        valid_cameras = {"wide", "push_in", "close_up", "over_shoulder"}
+        valid_motions = {"slow_push", "pan_left", "pan_right", "drift", "static"}
+
+        for style_id, config in VIDEO_STYLES.items():
+            for camera in config["preferred_cameras"]:
+                self.assertIn(
+                    camera, valid_cameras,
+                    f"style {style_id} uses out-of-contract camera {camera!r}",
+                )
+            for motion in config["preferred_motion_presets"]:
+                self.assertIn(
+                    motion, valid_motions,
+                    f"style {style_id} uses out-of-contract motion {motion!r}",
+                )
+
+        for style_id in VIDEO_STYLES:
+            styled = apply_video_style(
+                {**SCRIPT, "segments": [dict(seg) for seg in SCRIPT["segments"]]},
+                style_id,
+            )
+            # Must survive the strict pipeline contract (extra keys included).
+            VideoScript.model_validate(styled)
 
 
 if __name__ == "__main__":

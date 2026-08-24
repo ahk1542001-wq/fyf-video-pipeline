@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from writer_agent_vertex import (
+    _reconcile_compact_plan,
     _reconcile_storyboard_segment_ids,
     _sleep_before_vertex_retry,
     _stage_client,
@@ -192,6 +193,49 @@ class VertexWriterRetryTests(unittest.TestCase):
             "gemini-3.6-flash",
             [call.kwargs["model"] for call in client.models.generate_content.call_args_list],
         )
+
+
+class CompactPlanReconciliationTests(unittest.TestCase):
+    """Regression: extra model-returned plan segments must be dropped, not fail the lock."""
+
+    def _segment(self, segment_id: str) -> CompactVisualPlanSegment:
+        return CompactVisualPlanSegment(
+            id=segment_id, visual_action="show", scene_type="demo",
+            mascot_action="present", emotion="focused", phase="setup",
+            camera="wide", screen_text=["စာ"], evidence_claims=[
+                EvidenceClaim(claim_id=f"c_{segment_id}", statement="သက်သေပြချက်", evidence_type="concept"),
+            ],
+            evidence_shots=[EvidenceShot(
+                shot_id=f"p_{segment_id}", proves_claim_ids=[f"c_{segment_id}"],
+                prompt="prompt", caption="caption", hold_fraction=0.5,
+            )],
+        )
+
+    def test_extra_out_of_scope_segments_are_dropped_and_order_restored(self):
+        from types import SimpleNamespace
+
+        request = SimpleNamespace(approved_segments=[
+            SimpleNamespace(id="s2"), SimpleNamespace(id="s1"),
+        ])
+        metadata = CompactVisualPlanResponse(segments=[
+            self._segment("s1"), self._segment("extra_9"), self._segment("s2"),
+        ])
+
+        _reconcile_compact_plan(metadata, request)
+
+        self.assertEqual([segment.id for segment in metadata.segments], ["s2", "s1"])
+
+    def test_missing_approved_segment_still_raises_for_retry(self):
+        from types import SimpleNamespace
+
+        request = SimpleNamespace(approved_segments=[
+            SimpleNamespace(id="s1"), SimpleNamespace(id="s_missing"),
+        ])
+        metadata = CompactVisualPlanResponse(segments=[self._segment("s1")])
+
+        with self.assertRaises(ValueError) as ctx:
+            _reconcile_compact_plan(metadata, request)
+        self.assertIn("s_missing", str(ctx.exception))
 
 
 if __name__ == "__main__":

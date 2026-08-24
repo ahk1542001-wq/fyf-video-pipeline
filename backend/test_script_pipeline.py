@@ -5,11 +5,26 @@ from pathlib import Path
 from unittest.mock import patch
 
 from backend.script_pipeline import (
+    _is_transient_error,
     _script_max_retries,
     _sleep_before_script_retry,
     _terminal_error_message,
     run_script_pipeline,
 )
+
+
+class TransientClassificationTests(unittest.TestCase):
+    def test_empty_error_message_is_treated_as_transient(self):
+        """Regression: opaque failures (empty provider error text) once aborted
+        jobs as terminal instead of using a bounded retry."""
+
+        class OpaqueError(RuntimeError):
+            def __str__(self) -> str:
+                return ""
+
+        self.assertTrue(_is_transient_error(OpaqueError("")))
+        self.assertTrue(_is_transient_error(RuntimeError("504 DEADLINE_EXCEEDED")))
+        self.assertFalse(_is_transient_error(ValueError("Output segment count does not match input segment count")))
 
 
 def draft(segment_count: int = 12) -> dict:

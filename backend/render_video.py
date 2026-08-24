@@ -173,6 +173,12 @@ def _stage_render_inputs(job_dir: str) -> Iterator[_RenderStaging]:
                     os.makedirs(os.path.dirname(destination), exist_ok=True)
                     shutil.copy2(source, destination)
 
+        # Root.tsx registers demo defaultProps (sampleInput). Remotion merges
+        # composition defaults with --props, so without explicit empty keys the
+        # demo v3SceneAssets leak into non-preset renders and 404 during render.
+        render_input.setdefault("v3SceneAssets", [])
+        render_input.setdefault("v3MascotSegments", [])
+
         props_path = os.path.join(temp_dir, "props.json")
         with open(props_path, "w", encoding="utf-8") as handle:
             json.dump(render_input, handle, ensure_ascii=False)

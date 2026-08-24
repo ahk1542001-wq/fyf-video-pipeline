@@ -41,6 +41,10 @@ def _is_transient_error(error: BaseException) -> bool:
     if isinstance(error, (TimeoutError, ConnectionError, OSError)):
         return True
     text = str(error).upper()
+    if not text.strip():
+        # Opaque failures (empty provider/network error text) carry no contract
+        # signal, so a bounded retry is safer than giving up the job.
+        return True
     transient_markers = (
         "429", "500", "502", "503", "504",
         "RESOURCE_EXHAUSTED", "DEADLINE_EXCEEDED", "UNAVAILABLE",

@@ -7,13 +7,16 @@ from typing import Any
 
 DEFAULT_STYLE_ID = "fyf_explainer"
 
+# Camera/motion values MUST stay within the video_contract enums:
+#   camera: "wide" | "push_in" | "close_up" | "over_shoulder"
+#   motion_preset: "slow_push" | "pan_left" | "pan_right" | "drift" | "static"
 VIDEO_STYLES: dict[str, dict[str, Any]] = {
     "fyf_explainer": {
         "id": "fyf_explainer",
         "name": "FYF Explainer (Default)",
         "description": "Standard high-clarity whiteboard with balanced mascot pacing and diagrammatic evidence.",
-        "preferred_cameras": ["wide", "medium", "mascot_focus"],
-        "preferred_motion_presets": ["pan_right", "zoom_in", "steady"],
+        "preferred_cameras": ["wide", "push_in", "close_up"],
+        "preferred_motion_presets": ["pan_right", "slow_push", "static"],
         "color_theme": "emerald_clarity",
         "badge_accent": "#16856B",
     },
@@ -21,8 +24,8 @@ VIDEO_STYLES: dict[str, dict[str, Any]] = {
         "id": "cinematic_continuity",
         "name": "Cinematic Continuity",
         "description": "Dramatic push-ins, close-up evidence inspection, and dynamic camera movements.",
-        "preferred_cameras": ["push_in", "close_up", "medium"],
-        "preferred_motion_presets": ["zoom_in", "pan_left", "push_in"],
+        "preferred_cameras": ["push_in", "close_up", "over_shoulder"],
+        "preferred_motion_presets": ["slow_push", "pan_left", "drift"],
         "color_theme": "cinematic_slate",
         "badge_accent": "#2563EB",
     },
@@ -30,8 +33,8 @@ VIDEO_STYLES: dict[str, dict[str, Any]] = {
         "id": "evidence_story",
         "name": "Evidence Story",
         "description": "High-density data visualization, documentary pacing, and document inspection focus.",
-        "preferred_cameras": ["diorama_overview", "document_split", "macro_inspection"],
-        "preferred_motion_presets": ["steady", "pan_right", "zoom_in"],
+        "preferred_cameras": ["wide", "over_shoulder", "close_up"],
+        "preferred_motion_presets": ["static", "pan_right", "slow_push"],
         "color_theme": "evidence_amber",
         "badge_accent": "#D97706",
     },

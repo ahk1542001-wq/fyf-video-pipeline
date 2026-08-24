@@ -4,7 +4,7 @@ import time
 import logging
 from google import genai
 from google.genai import types
-from video_contract import ClaimCoverageResponse, CompactVisualPlanResponse, EvidenceClaimsResponse, ExactLockRequest, MotionGraphicSpec, StoryboardResponse, StoryDraftModesResponse, StoryDraftScript, StoryModesResponse, VideoScript, VisualTreatment
+from video_contract import ClaimCoverageResponse, CompactVisualPlanResponse, EvidenceClaimsResponse, ExactLockRequest, MotionGraphicSpec, StoryboardResponse, StoryDraftModesResponse, StoryDraftScript, StoryDraftSegment, StoryModesResponse, VideoScript, VisualTreatment
 from vertex_model_routing import model_for
 from backend.vertex_telemetry import telemetry_retry_attempt, track_client
 from backend.vertex_thinking import generation_config_for
@@ -639,20 +639,36 @@ def generate_narration_script(topic_or_draft: str, duration_mode: str = "short")
 
 
 def lock_narration_in_batches(draft_data: dict, *, batch_size: int = 5) -> dict:
-    """Lock long narration in restart-friendly bounded Vertex batches."""
+    """Lock long narration in restart-friendly bounded Vertex batches.
+
+    If a multi-segment batch keeps failing contract validation (the model
+    merged or dropped segments), that window falls back to one-segment locks,
+    which are far easier for the model to satisfy. Single-segment batches
+    fail closed.
+    """
     if batch_size < 1 or batch_size > 8:
         raise ValueError("batch_size must be between 1 and 8")
     draft = StoryDraftScript.model_validate(draft_data)
     merged: list[dict] = []
-    for start in range(0, len(draft.segments), batch_size):
-        batch = draft.segments[start : start + batch_size]
+
+    def lock_batch(batch: list[StoryDraftSegment]) -> list[dict]:
         locked = generate_exact_lock({
             "title": draft.title,
             "approved_segments": [
                 {"id": segment.id, "text": segment.text} for segment in batch
             ],
         })
-        merged.extend(locked["segments"])
+        return locked["segments"]
+
+    for start in range(0, len(draft.segments), batch_size):
+        batch = draft.segments[start : start + batch_size]
+        try:
+            merged.extend(lock_batch(batch))
+        except ValueError:
+            if len(batch) == 1:
+                raise
+            for segment in batch:
+                merged.extend(lock_batch([segment]))
     return VideoScript.model_validate({
         "title": draft.title,
         "language": "my-MM",
@@ -750,6 +766,24 @@ def generate_story_modes(topic_or_draft: str) -> dict:
     )
 
 
+def _reconcile_compact_plan(metadata: "CompactVisualPlanResponse", request) -> None:
+    """Align model-returned plan segments to the approved narration.
+
+    The model occasionally returns extra segments with invented IDs. Extra and
+    out-of-scope entries are safe to discard; missing IDs cannot be invented,
+    so those still raise and trigger a retry with repair context.
+    """
+    approved_ids = [segment.id for segment in request.approved_segments]
+    by_id = {segment.id: segment for segment in metadata.segments}
+    missing = [segment_id for segment_id in approved_ids if segment_id not in by_id]
+    if missing:
+        raise ValueError(
+            "Output segment IDs do not match approved narration IDs "
+            f"(missing: {missing})"
+        )
+    metadata.segments[:] = [by_id[segment_id] for segment_id in approved_ids]
+
+
 def generate_exact_lock(request_data: dict) -> dict:
     """
     Implements exact_lock story mode.
@@ -842,6 +876,7 @@ def generate_exact_lock(request_data: dict) -> dict:
                 result_dict = json.loads(response.text)
                 _drop_invalid_optional_treatments(result_dict)
                 metadata = CompactVisualPlanResponse.model_validate(result_dict)
+                _reconcile_compact_plan(metadata, request)
                 metadata_by_id = {segment.id: segment for segment in metadata.segments}
 
                 if len(metadata.segments) != len(request.approved_segments):

@@ -356,6 +356,7 @@ class VideoScript(BaseModel):
     title: str = Field(min_length=1)
     language: Literal["my-MM"] = "my-MM"
     segments: list[ScriptSegment] = Field(min_length=1)
+    style_applied: str | None = None
 
     @field_validator("title")
     @classmethod
