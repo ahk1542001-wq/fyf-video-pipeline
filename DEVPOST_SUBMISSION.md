@@ -1,17 +1,16 @@
 # FYF Agentic Cinema — Devpost Submission Draft
 
-**Track:** Replit Partner Track
-**Product:** FYF Video Pipeline — an evidence-led Burmese video production agent
-
-> This is a factual submission draft, not a claim that the Replit track is
-> complete. The Replit deployment URL remains a release gate until the free
-> quota resets and a public `replit.app` or `replit.dev` URL is verified.
+**Track:** ClickHouse Partner Track
+**Product:** FYF Video Pipeline — an evidence-led Burmese video production agent that audits itself in ClickHouse
 
 ## Project summary
 
 FYF turns a Burmese topic or draft into a reviewable vertical video. The agent
 keeps factual claims, visual evidence, narration, render checkpoints, and final
 quality gates explicit so a human can inspect the result before sharing it.
+Every production run writes sanitized job, QA, scene, and model-call telemetry
+to ClickHouse Cloud, and a built-in "Data Officer" agent answers questions about
+that data at runtime through the official mcp-clickhouse MCP server.
 
 ## What the working product does
 
@@ -23,57 +22,30 @@ quality gates explicit so a human can inspect the result before sharing it.
 6. Enforces rate limits, concurrency guardrails, and daily budget caps to protect against quota exhaustion.
 7. Supports automatic and operator-driven resumable recovery (`/api/jobs/{job_id}/resume`).
 8. Generates Burmese narration with Gemini TTS in hackathon mode.
-9. Renders a 1080x1920 vertical MP4 with Remotion and runs deterministic, creative, and final rendered-meaning QA.
+9. Renders a 1080x1920 vertical MP4 with Remotion (segmented strategy with per-segment checkpoints on constrained containers) and runs deterministic, creative, and final rendered-meaning QA.
 10. Shows approved results in Library and exposes a privacy-safe in-app telemetry ledger for calls, retries, tokens, TTS, latency, and cost confidence.
+11. **Dual-writes every job's sanitized telemetry into ClickHouse Cloud** (`video_pipeline_jobs`, `video_qa_records`, `video_scene_telemetry`, `video_vertex_calls`) via an optional sink in the telemetry store.
+12. Ships the **FYF Data Officer** — an ADK agent whose tools come from the official **mcp-clickhouse** MCP server — exposed at `POST /api/insights`: ask "how many jobs passed QA this week?" and get an answer grounded in live warehouse data.
 
 ## Google Cloud / Gemini runtime evidence
 
 - Python runtime uses the official `google-genai` SDK and Google ADK (`google-adk`).
-- Hackathon mode routes text/storyboard work through Gemini 3.7 Flash and
-  narration through Gemini TTS.
-- The local verified job ledger records real provider calls and QA results;
-  prompts, response text, and credentials are excluded from telemetry.
-- The repository includes the locked dependency graph, setup instructions,
-  backend tests, frontend checks, and Remotion checks.
+- Hackathon mode routes text/storyboard work through Gemini 3.7 Flash and narration through Gemini TTS.
+- The verified job ledger records real provider calls and QA results; prompts, response text, and credentials are excluded from telemetry.
+- Deployment target: Google Cloud Run (Dockerfile + one-shot `scripts/deploy_cloudrun.sh`; Next.js standalone rewrites same-origin `/api/*` to FastAPI).
 
-## Replit partner-track evidence
+## ClickHouse partner-track evidence
 
-- Replit Agent was used during development of this project.
-- `.replit`, `replit.nix`, and `run_replit.sh` define the deployment boundary.
-- `run_replit.sh` uses the locked Python 3.11 environment, builds/starts the
-  Next.js production server, and routes same-origin `/api/*` and `/health`
-  requests to FastAPI.
-- **Hosted URL:** pending quota reset and a successful public deployment.
-- Do not submit this draft until the hosted URL loads the Create Studio and
-  the deployment is verified from a clean browser session.
+- Official MCP server: `mcp-clickhouse` is launched as a stdio MCP server and wired into the agent via ADK `MCPToolset` (`backend/agent/data_officer.py`); imported and called at runtime by `POST /api/insights` in `backend/main.py`.
+- Runtime cluster: ClickHouse Cloud service on GCP `asia-southeast1` (secure HTTPS 8443), schema auto-provisioned by `backend/clickhouse_telemetry.py`.
+- Real writes: `backend/telemetry_store.py` dual-writes sanitized job telemetry on every completed generation; verified end-to-end against the live cluster (row-level SELECT round-trip).
+- Verified conversation: the Data Officer answered a live question ("How many jobs are in video_pipeline_jobs?") by executing a ClickHouse query through MCP during development testing.
 
-## Partner-track scope decision
+## Submission checklist
 
-The selected partner track is **Replit only**. The local `/telemetry` page is an
-operator feature; it is not being claimed as a second partner track.
+- [ ] Hosted project URL (Google Cloud Run) — pending first cloud deploy
+- [ ] Public GitHub repo with OSS license (LICENSE present; final secrets audit before flip)
+- [ ] <=3-minute English demo video (Create -> Library -> Telemetry -> /api/insights Q&A)
+- [ ] Devpost form under ClickHouse track
 
-## Demo and source gates
-
-- **Demo video:** use the public English or English-subtitled walkthrough,
-  no longer than three minutes. `[PENDING: public YouTube/Vimeo URL]`
-- **Source repository:** public Git repository with an open-source license,
-  source, assets, and run instructions. `[PENDING: final exact repository URL]`
-- **Hosted project URL:** `[PENDING: verified replit.app or replit.dev URL]`
-- **Submission:** choose Replit as the single partner track.
-
-## Verification snapshot
-
-- Backend regression & ADK agent suite: 353 tests passed.
-- Voice adapter/audio QA suite: 23 tests passed.
-- Remotion suite: 27 tests passed; Remotion TypeScript check passed.
-- Frontend ESLint, TypeScript, and production build passed.
-- Local production entrypoint passed `/`, `/health`, `/api/runtime`, and
-  `/api/telemetry` checks.
-- In-app browser verified Create, Library, Telemetry, and a completed-job
-  telemetry selection with zero recorded retries/failures.
-
-## Post-hackathon boundary
-
-After judging, the local/private product can run in product mode with the
-Replit deployment boundary and hackathon-only partner documentation removed
-or disabled. That change is deliberately separate from this submission draft.
+Deadline: September 9, 2026, 2:00 PM PT.
