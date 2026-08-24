@@ -125,3 +125,18 @@ Idempotent; safe to rerun.
   not user-constructed.
 - The Data Officer instructs read-only SELECT usage. For defense in depth,
   provision the ClickHouse user with read-only grants.
+
+### Dependency advisories (accepted, tracked)
+
+`pip-audit` reports two transitive advisories that cannot be resolved today
+without breaking the runtime:
+
+| Package | Advisory | Why accepted |
+| --- | --- | --- |
+| `fastmcp` 2.14.7 (via mcp-clickhouse) | PYSEC-2026-2475/2476, fix ≥3.2.0 | Not reachable from the HTTP API: it runs only inside the mcp-clickhouse stdio subprocess. fastmcp ≥3 requires mcp≥2, which conflicts with google-adk's `mcp<2` requirement. Revisit when mcp-clickhouse bumps fastmcp. |
+| `diskcache` 5.6.3 (orphan) | PYSEC-2026-2447, no fix yet | No fix published; nothing in this repo imports it and nothing in the lock requires it — inert on disk. |
+
+Re-run the audit after any dependency change:
+```bash
+uvx pip-audit --skip-editable -l -p .venv
+```
