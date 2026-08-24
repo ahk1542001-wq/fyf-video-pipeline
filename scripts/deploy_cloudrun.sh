@@ -36,6 +36,12 @@ SECRETS_FLAGS=()
 echo "== build =="
 gcloud builds submit --tag "$IMAGE" .
 
+echo "== allow runtime SA to read secrets =="
+SA_NUM=$(gcloud projects describe "$PROJECT" --format='value(projectNumber)')
+gcloud projects add-iam-policy-binding "$PROJECT" \
+  --member="serviceAccount:${SA_NUM}-compute@developer.gserviceaccount.com" \
+  --role="roles/secretmanager.secretAccessor" --quiet >/dev/null || true
+
 echo "== deploy =="
 gcloud run deploy "$SERVICE" \
   --image "$IMAGE" \
