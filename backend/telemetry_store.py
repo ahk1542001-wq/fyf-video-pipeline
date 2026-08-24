@@ -82,6 +82,28 @@ def record_job_telemetry(
     }
 
     write_json_atomically(telemetry_file, sanitized)
+
+    # Best-effort ClickHouse Cloud mirror (Agentic Cinema partner track).
+    # Never blocks the local write; silently skipped when unconfigured.
+    try:
+        from backend.clickhouse_telemetry import (
+            record_job_telemetry as _ch_record_job_telemetry,
+        )
+
+        _ch_record_job_telemetry(
+            job_id=job_id,
+            title=str(metrics.get("title", "")),
+            duration_sec=float(sanitized["total_duration_ms"]) / 1000.0,
+            voice_mode="gemini",
+            status=str(sanitized["status"]),
+            total_render_time_ms=int(metrics.get("render_duration_ms", 0)),
+            total_tokens_used=input_tokens + output_tokens,
+            cost_usd=float(cost_estimate.estimated_cost_usd),
+            qa_passed=bool(metrics.get("qa_passed", False)),
+        )
+    except Exception as exc:  # pragma: no cover - optional sink
+        logger.debug("ClickHouse telemetry mirror skipped: %s", exc)
+
     if cost_estimate.estimated_cost_usd > 0:
         from backend.budget_store import reconcile_budget
         reconcile_budget(job_id, cost_estimate.estimated_cost_usd, outcome=metrics.get("status", "completed"), root_dir=target_dir.parent)
