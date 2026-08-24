@@ -141,13 +141,123 @@ class PipelineUIAPITests(unittest.TestCase):
         lease_factory.assert_not_called()
 
     def test_public_startup_never_auto_resumes_paid_jobs(self):
-        with patch.dict(os.environ, {"FYF_PUBLIC_DEPLOYMENT": "true"}, clear=True), patch(
-            "backend.main.run_script_pipeline"
-        ) as script_pipeline, patch("backend.main._run_video_pipeline_tracked") as video_pipeline:
-            asyncio.run(resume_interrupted_script_jobs())
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            script_jobs_root = root / "script-jobs"
+            jobs_root = root / "jobs"
+            interrupted_script = script_jobs_root / "abcd1234"
+            interrupted_script.mkdir(parents=True)
+            (interrupted_script / "status.json").write_text(json.dumps({
+                "job_id": "abcd1234",
+                "status": "writing",
+                "stage": "storyboard",
+                "restart_resumable": True,
+            }), encoding="utf-8")
+            interrupted_video = jobs_root / "deadbeef"
+            interrupted_video.mkdir(parents=True)
+            (interrupted_video / "status.json").write_text(json.dumps({
+                "job_id": "deadbeef",
+                "status": "rendering",
+                "restart_resumable": True,
+            }), encoding="utf-8")
+            completed_script = script_jobs_root / "feedface"
+            completed_script.mkdir(parents=True)
+            (completed_script / "status.json").write_text(json.dumps({
+                "job_id": "feedface",
+                "status": "completed",
+                "stage": "completed",
+                "restart_resumable": False,
+            }), encoding="utf-8")
+            failed_video = jobs_root / "facefeed"
+            failed_video.mkdir(parents=True)
+            (failed_video / "status.json").write_text(json.dumps({
+                "job_id": "facefeed",
+                "status": "failed",
+                "restart_resumable": True,
+            }), encoding="utf-8")
+            malformed_job = script_jobs_root / "c0ffee00"
+            malformed_job.mkdir(parents=True)
+            (malformed_job / "status.json").write_text("[]", encoding="utf-8")
+            outside_job = root / "outside" / "11223344"
+            outside_job.mkdir(parents=True)
+            outside_status = outside_job / "status.json"
+            outside_status.write_text(json.dumps({
+                "job_id": "11223344",
+                "status": "writing",
+                "restart_resumable": True,
+            }), encoding="utf-8")
+            (script_jobs_root / "11223344").symlink_to(outside_job, target_is_directory=True)
 
-        script_pipeline.assert_not_called()
-        video_pipeline.assert_not_called()
+            with patch.dict(os.environ, {"FYF_PUBLIC_DEPLOYMENT": "true"}, clear=True), patch(
+                "backend.main.SCRIPT_JOBS_ROOT", script_jobs_root
+            ), patch("backend.main.JOBS_ROOT", jobs_root), patch(
+                "backend.main.run_script_pipeline"
+            ) as script_pipeline, patch(
+                "backend.main._run_video_pipeline_tracked"
+            ) as video_pipeline, patch(
+                "backend.main.release_reservation"
+            ) as release_reservation:
+                asyncio.run(resume_interrupted_script_jobs())
+
+            script_pipeline.assert_not_called()
+            video_pipeline.assert_not_called()
+            script_status = json.loads((interrupted_script / "status.json").read_text(encoding="utf-8"))
+            video_status = json.loads((interrupted_video / "status.json").read_text(encoding="utf-8"))
+            completed_status = json.loads((completed_script / "status.json").read_text(encoding="utf-8"))
+            failed_status = json.loads((failed_video / "status.json").read_text(encoding="utf-8"))
+            outside_data = json.loads(outside_status.read_text(encoding="utf-8"))
+            self.assertEqual(script_status["status"], "needs_attention")
+            self.assertEqual(video_status["status"], "needs_attention")
+            self.assertEqual(completed_status["status"], "completed")
+            self.assertEqual(failed_status["status"], "failed")
+            self.assertEqual(outside_data["status"], "writing")
+            self.assertEqual((malformed_job / "status.json").read_text(encoding="utf-8"), "[]")
+            self.assertTrue(script_status["restart_resumable"])
+            self.assertTrue(video_status["restart_resumable"])
+            self.assertIn("Public deployment restart", script_status["error"])
+            self.assertIn("Public deployment restart", video_status["error"])
+            self.assertEqual(
+                {call.args[0] for call in release_reservation.call_args_list},
+                {"abcd1234", "deadbeef"},
+            )
+
+    def test_public_startup_retries_quarantine_when_reservation_release_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            script_jobs_root = root / "script-jobs"
+            jobs_root = root / "jobs"
+            interrupted = script_jobs_root / "abcd1234"
+            interrupted.mkdir(parents=True)
+            status_path = interrupted / "status.json"
+            status_path.write_text(json.dumps({
+                "job_id": "abcd1234",
+                "status": "writing",
+                "restart_resumable": True,
+            }), encoding="utf-8")
+
+            common_patches = (
+                patch.dict(os.environ, {"FYF_PUBLIC_DEPLOYMENT": "true"}, clear=True),
+                patch("backend.main.SCRIPT_JOBS_ROOT", script_jobs_root),
+                patch("backend.main.JOBS_ROOT", jobs_root),
+            )
+            with common_patches[0], common_patches[1], common_patches[2], patch(
+                "backend.main.release_reservation", side_effect=OSError("ledger unavailable")
+            ):
+                asyncio.run(resume_interrupted_script_jobs())
+
+            first_status = json.loads(status_path.read_text(encoding="utf-8"))
+            self.assertEqual(first_status["status"], "writing")
+
+            with patch.dict(os.environ, {"FYF_PUBLIC_DEPLOYMENT": "true"}, clear=True), patch(
+                "backend.main.SCRIPT_JOBS_ROOT", script_jobs_root
+            ), patch("backend.main.JOBS_ROOT", jobs_root), patch(
+                "backend.main.release_reservation"
+            ) as release_reservation:
+                asyncio.run(resume_interrupted_script_jobs())
+
+            second_status = json.loads(status_path.read_text(encoding="utf-8"))
+            self.assertEqual(second_status["status"], "needs_attention")
+            release_reservation.assert_called_once_with("abcd1234")
 
     def test_recent_returns_only_newest_six_completed_approved_jobs_with_safe_fields(self):
         with tempfile.TemporaryDirectory() as temp_dir:

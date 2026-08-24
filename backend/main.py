@@ -37,6 +37,7 @@ from backend.job_store import (
     update_job_status,
     write_json_atomically,
 )
+from backend.budget_store import release_reservation
 from backend.lock_store import create_script_lock, read_script_lock
 from backend.pipeline import run_pipeline
 from backend.runtime_limits import (
@@ -462,7 +463,10 @@ async def resume_script_job(job_id: str, request: Request, background_tasks: Bac
 async def resume_interrupted_script_jobs():
     """Resume persisted script and video jobs after a backend restart."""
     if _is_public_deployment():
-        logger.info("Public deployment startup does not auto-resume paid generation jobs.")
+        _quarantine_interrupted_public_jobs()
+        logger.info(
+            "Public deployment startup quarantined interrupted jobs instead of auto-resuming paid generation."
+        )
         return
 
     if SCRIPT_JOBS_ROOT.exists():
@@ -567,6 +571,53 @@ async def resume_interrupted_script_jobs():
                     })
                 except Exception:
                     logger.exception("Could not mark video job %s as needs_attention", job_dir.name)
+
+
+def _quarantine_interrupted_public_jobs() -> None:
+    """Free stale public concurrency slots without issuing provider requests.
+
+    Replit preserves job files across deployments. Public startup intentionally
+    does not auto-resume paid work, so persisted active statuses must become
+    manually resumable or they block every new request forever.
+    """
+    active_by_root = (
+        (SCRIPT_JOBS_ROOT, {"queued", "writing", "adk_producer", "retrying"}, True),
+        (JOBS_ROOT, {"queued", "visuals", "voice", "rendering", "qa", "creative_qa"}, False),
+    )
+    for root, active_statuses, is_script_job in active_by_root:
+        if not root.is_dir():
+            continue
+        for job_dir in root.iterdir():
+            status_path = job_dir / "status.json"
+            if (
+                job_dir.is_symlink()
+                or status_path.is_symlink()
+                or not job_dir.is_dir()
+                or not is_valid_job_id(job_dir.name)
+                or not status_path.is_file()
+            ):
+                continue
+            try:
+                data = json.loads(status_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(data, dict):
+                continue
+            if data.get("status") not in active_statuses:
+                continue
+            try:
+                updates = {
+                    "status": "needs_attention",
+                    "restart_resumable": True,
+                    "error": "Public deployment restart paused this job before any automatic paid retry. Manual resume is available.",
+                }
+                release_reservation(job_dir.name)
+                if is_script_job:
+                    update_script_status(job_dir, **updates)
+                else:
+                    update_job_status(job_dir, updates)
+            except Exception:
+                logger.exception("Could not quarantine interrupted public job %s", job_dir.name)
 
 
 @app.post("/api/story-polish", response_model=StoryPolishResponse)
