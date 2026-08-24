@@ -245,7 +245,10 @@ class TestResumeAndGuardrails(unittest.TestCase):
             script_root = Path(script_jobs_dir)
             with patch("backend.main.SCRIPT_JOBS_ROOT", script_root), \
                  patch("backend.main.LOCKS_ROOT", Path(locks_dir)), \
-                 patch.dict("os.environ", {"FYF_MAX_CONCURRENT_JOBS": "5"}):
+                 patch.dict("os.environ", {
+                     "FYF_MAX_CONCURRENT_JOBS": "5",
+                     "FYF_BUDGET_LEDGER_PATH": str(Path(script_jobs_dir) / ".budget_ledger.json"),
+                 }):
 
                 # Case A: Completed job -> rejected
                 j_completed = "c0000001"

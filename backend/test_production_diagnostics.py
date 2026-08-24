@@ -158,7 +158,10 @@ class TestProductionDiagnostics(unittest.TestCase):
             with patch.dict("os.environ", {
                 "FYF_RATE_LIMIT_PER_MINUTE": "1",
                 "FYF_BUDGET_LEDGER_PATH": str(root / ".budget_ledger.json"),
-            }):
+            }), \
+                 patch("backend.main.SCRIPT_JOBS_ROOT", root / "script-jobs"), \
+                 patch("backend.main.JOBS_ROOT", root / "jobs"), \
+                 patch("backend.main.run_script_pipeline") as producer_mock:
                 ip = "192.168.1.100"
                 # First request passes
                 resp1 = client.post(
@@ -167,6 +170,7 @@ class TestProductionDiagnostics(unittest.TestCase):
                     headers={"X-Forwarded-For": ip},
                 )
                 self.assertEqual(resp1.status_code, 202)
+                producer_mock.assert_called_once()  # hermetic: no real provider work
 
                 # Second request rejected by rate limit
                 resp2 = client.post(
@@ -188,6 +192,7 @@ class TestProductionDiagnostics(unittest.TestCase):
             root = Path(temp_dir)
             with patch.dict("os.environ", {"FYF_BUDGET_LEDGER_PATH": str(root / ".budget_ledger.json")}), \
                  patch("backend.main.LOCKS_ROOT", Path(locks_dir)), \
+                 patch("backend.main.SCRIPT_JOBS_ROOT", root / "script-jobs"), \
                  patch("writer_agent_vertex.generate_story_modes", return_value=_valid_story_modes_data()), \
                  patch("writer_agent_vertex.generate_exact_lock", return_value=_valid_video_script_data()):
 

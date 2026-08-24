@@ -32,14 +32,18 @@ class PipelineUIAPITests(unittest.TestCase):
         self.assertTrue(_should_resume_script_job({"status": "writing"}))
 
     def test_health_and_same_origin_api_health_alias_return_ok(self):
-        with TestClient(app) as client:
-            for route in ("/health", "/api/health"):
-                response = client.get(route)
-                self.assertEqual(response.status_code, 200)
-                self.assertEqual(
-                    response.json(),
-                    {"status": "ok", "service": "fyf-video-pipeline"},
-                )
+        # Hermetic: startup lifespan must never scan or resume real paid jobs.
+        with tempfile.TemporaryDirectory() as temp_dir, patch(
+            "backend.main.JOBS_ROOT", Path(temp_dir) / "jobs"
+        ), patch("backend.main.SCRIPT_JOBS_ROOT", Path(temp_dir) / "script-jobs"):
+            with TestClient(app) as client:
+                for route in ("/health", "/api/health"):
+                    response = client.get(route)
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(
+                        response.json(),
+                        {"status": "ok", "service": "fyf-video-pipeline"},
+                    )
 
     def _write_job(
         self,
@@ -111,7 +115,9 @@ class PipelineUIAPITests(unittest.TestCase):
     def test_public_runtime_fails_closed_without_vertex_credential(self):
         with patch.dict(os.environ, {"FYF_PUBLIC_DEPLOYMENT": "true"}, clear=True), patch(
             "backend.main._vertex_credentials_configured", return_value=False
-        ):
+        ), tempfile.TemporaryDirectory() as temp_dir, patch(
+            "backend.main.JOBS_ROOT", Path(temp_dir) / "jobs"
+        ), patch("backend.main.SCRIPT_JOBS_ROOT", Path(temp_dir) / "script-jobs"):
             with TestClient(app) as client:
                 response = client.get("/api/runtime")
 
@@ -132,7 +138,9 @@ class PipelineUIAPITests(unittest.TestCase):
                 "FYF_VERTEX_API_KEY": "configured-but-never-used-in-test",
             },
             clear=True,
-        ), patch("backend.main.acquire_guardrail_lease", lease_factory):
+        ), patch("backend.main.acquire_guardrail_lease", lease_factory), tempfile.TemporaryDirectory() as temp_dir, patch(
+            "backend.main.JOBS_ROOT", Path(temp_dir) / "jobs"
+        ), patch("backend.main.SCRIPT_JOBS_ROOT", Path(temp_dir) / "script-jobs"):
             with TestClient(app) as client:
                 response = client.post("/api/generate-script", json={"topic": "Test topic"})
 
