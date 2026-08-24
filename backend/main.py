@@ -196,6 +196,21 @@ def _vertex_credentials_configured() -> bool:
     if os.getenv("FYF_VERTEX_API_KEY") or os.getenv("GOOGLE_API_KEY"):
         return True
 
+    # Cloud Run / GCE: Application Default Credentials from the attached
+    # service account (metadata server) are valid Vertex credentials.
+    if _truthy_env("GOOGLE_GENAI_USE_VERTEXAI") and os.getenv("GOOGLE_CLOUD_PROJECT", "").strip():
+        try:
+            import urllib.request
+
+            req = urllib.request.Request(
+                "http://metadata.google.internal/computeMetadata/v1/project/project-id",
+                headers={"Metadata-Flavor": "Google"},
+            )
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                return resp.status == 200
+        except OSError:
+            return False
+
     configured_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
     if configured_path and Path(configured_path).is_file():
         return True
