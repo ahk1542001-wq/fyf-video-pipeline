@@ -5,7 +5,7 @@ run = "bash run_replit.sh"
 channel = "stable-24_05"
 
 [deployment]
-build = "cd remotion && npm ci --no-audit --no-fund && cd ../frontend && npm ci --no-audit --no-fund && npm run build && mkdir -p .next/standalone/.next && cp -R .next/static .next/standalone/.next/ && { [ ! -d public ] || cp -R public .next/standalone/; }"
+build = "cd remotion && npm ci --no-audit --no-fund && npx remotion browser ensure && cd ../frontend && npm ci --no-audit --no-fund && npm run build && mkdir -p .next/standalone/.next && cp -R .next/static .next/standalone/.next/ && { [ ! -d public ] || cp -R public .next/standalone/; }"
 run = "FYF_PUBLIC_DEPLOYMENT=true bash run_replit.sh"
 deploymentTarget = "cloudrun"
 
