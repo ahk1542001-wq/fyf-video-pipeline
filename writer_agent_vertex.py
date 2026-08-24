@@ -45,6 +45,25 @@ def _vertex_json_schema(model: type) -> dict:
     return clean(model.model_json_schema())
 
 
+def _inline_schema_refs(schema: dict) -> dict:
+    """Inline $defs/$ref so the schema fits FunctionDeclaration's OpenAPI subset."""
+    defs = schema.get("$defs") or {}
+
+    def resolve(value):
+        if isinstance(value, dict):
+            ref = value.get("$ref")
+            if isinstance(ref, str) and ref.startswith("#/$defs/"):
+                target = defs.get(ref.split("/")[-1])
+                if isinstance(target, dict):
+                    return resolve(target)
+            return {key: resolve(item) for key, item in value.items() if key != "$defs"}
+        if isinstance(value, list):
+            return [resolve(item) for item in value]
+        return value
+
+    return resolve(schema)
+
+
 def _max_attempts() -> int:
     try:
         configured = int(
@@ -863,6 +882,24 @@ def generate_exact_lock(request_data: dict) -> dict:
             if metadata is None and lock_mode == "per_segment":
                 collected_segments: list[CompactVisualPlanSegment] = []
                 total_segments = len(request.approved_segments)
+                # Vertex's responseJsonSchema constrained-decoding endpoint proved
+                # unstable under burst load (429 / hang-to-504), while forced
+                # function calling with the same schema stayed healthy, so the
+                # per-segment path emits its metadata through a required tool call.
+                emit_tool = types.Tool(
+                    function_declarations=[
+                        types.FunctionDeclaration(
+                            name="emit_lock_metadata",
+                            description=(
+                                "Return the visual metadata JSON object for this "
+                                "single segment."
+                            ),
+                            parameters=_inline_schema_refs(
+                                _vertex_json_schema(CompactVisualPlanSegment)
+                            ),
+                        )
+                    ]
+                )
                 for seg_no, approved_seg in enumerate(request.approved_segments, start=1):
                     print(f"Generating lock visual metadata for segment {seg_no}/{total_segments} using Vertex AI...")
                     seg_claims_json = json.dumps(
@@ -875,6 +912,9 @@ def generate_exact_lock(request_data: dict) -> dict:
                         f"Title: {request.title}\nSegments:\n"
                         f"Segment {seg_no} (ID: {approved_seg.id}):\nText: {approved_seg.text}\n"
                         f"Fact Agent claims: {seg_claims_json}"
+                        "Contract reminders: every non-kinetic visual.treatment MUST include "
+                        "focal_object, action and change; screen_text must contain 1 or 2 strings; "
+                        "motion_spec is allowed only for motion_graphic shots."
                     )
                     with telemetry_retry_attempt("lock_metadata", attempt + 1):
                         seg_response = client.models.generate_content(
@@ -882,13 +922,28 @@ def generate_exact_lock(request_data: dict) -> dict:
                             contents=one_prompt + repair_context,
                             config=generation_config_for("lock",
                                 system_instruction=system_instruction,
-                                response_mime_type="application/json",
-                                response_json_schema=_vertex_json_schema(CompactVisualPlanSegment),
+                                tools=[emit_tool],
+                                tool_config=types.ToolConfig(
+                                    function_calling_config=(
+                                        types.FunctionCallingConfig(
+                                            mode=types.FunctionCallingConfigMode.ANY,
+                                            allowed_function_names=[
+                                                "emit_lock_metadata"
+                                            ],
+                                        )
+                                    )
+                                ),
                             ),
                         )
-                    if not seg_response.text:
-                        raise ValueError("Vertex returned an empty response")
-                    seg_dict = json.loads(seg_response.text)
+                    seg_calls = list(getattr(seg_response, "function_calls", None) or [])
+                    if seg_calls and seg_calls[0].args is not None:
+                        seg_dict = json.loads(json.dumps(dict(seg_calls[0].args)))
+                    elif seg_response.text:
+                        seg_dict = json.loads(seg_response.text)
+                    else:
+                        raise ValueError(
+                            "Vertex returned neither a function call nor JSON text"
+                        )
                     _drop_invalid_optional_treatments(seg_dict)
                     seg_plan = CompactVisualPlanSegment.model_validate(seg_dict)
                     if seg_plan.id != approved_seg.id:
@@ -897,6 +952,30 @@ def generate_exact_lock(request_data: dict) -> dict:
                         )
                     collected_segments.append(seg_plan)
                 metadata = CompactVisualPlanResponse(segments=collected_segments)
+                metadata_by_id = {segment.id: segment for segment in metadata.segments}
+                if set(metadata_by_id) != {
+                    segment.id for segment in request.approved_segments
+                }:
+                    raise ValueError(
+                        "Output segment IDs do not match approved narration IDs"
+                    )
+                for segment in metadata.segments:
+                    expected_claims = [
+                        claim.model_dump(mode="json")
+                        for claim in claims_by_id[segment.id]
+                    ]
+                    actual_claims = [
+                        claim.model_dump(mode="json") for claim in segment.evidence_claims
+                    ]
+                    if actual_claims != expected_claims:
+                        logger.warning(
+                            "Visual Director changed Fact Agent claims for segment %s; "
+                            "using the Fact Agent claims as canonical evidence",
+                            segment.id,
+                        )
+                        segment.evidence_claims = [
+                            claim.model_copy(deep=True) for claim in claims_by_id[segment.id]
+                        ]
             elif metadata is None:
                 with telemetry_retry_attempt("lock_metadata", attempt + 1):
                     response = client.models.generate_content(
