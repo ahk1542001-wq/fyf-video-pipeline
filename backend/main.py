@@ -17,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal, Optional
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, status
+from fastapi import BackgroundTasks, Body, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator
@@ -950,7 +950,7 @@ def get_job_telemetry_alias(job_id: str):
 
 
 @app.post("/api/insights")
-def ask_data_insights(payload: Dict[str, Any]):
+def ask_data_insights(payload: dict = Body(...)):
     """Ask the FYF Data Officer (ADK agent + mcp-clickhouse) a question about
     production telemetry. Read-only; answers from ClickHouse Cloud."""
     question = str(payload.get("question", "")).strip()
