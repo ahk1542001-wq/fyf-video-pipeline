@@ -271,6 +271,10 @@ def _enforce_public_generation_access(request: Request) -> None:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=runtime["generation_message"])
 
     expected_token = os.getenv("FYF_GENERATION_ACCESS_TOKEN", "")
+    if not expected_token:
+        # Open demonstration mode: no token configured; budget caps and the
+        # concurrency guard are the protection layer.
+        return
     submitted_token = request.headers.get("x-fyf-access-token", "")
     if not submitted_token or not hmac.compare_digest(submitted_token, expected_token):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Private generation access is required.")
