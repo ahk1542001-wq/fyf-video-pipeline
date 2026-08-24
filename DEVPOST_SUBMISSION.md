@@ -39,7 +39,8 @@ that data at runtime through the official mcp-clickhouse MCP server.
 - Official MCP server: `mcp-clickhouse` is launched as a stdio MCP server and wired into the agent via ADK `MCPToolset` (`backend/agent/data_officer.py`); imported and called at runtime by `POST /api/insights` in `backend/main.py`.
 - Runtime cluster: ClickHouse Cloud service on GCP `asia-southeast1` (secure HTTPS 8443), schema auto-provisioned by `backend/clickhouse_telemetry.py`.
 - Real writes: `backend/telemetry_store.py` dual-writes sanitized job telemetry on every completed generation; verified end-to-end against the live cluster (row-level SELECT round-trip).
-- Verified conversations (production, 2026-08-24/25): the Data Officer executed real ClickHouse SELECTs through MCP and answered "How many video jobs are recorded in total, and how many succeeded?" from live warehouse data (`tool_used: true`).
+- Verified conversations (production, 2026-08-24/25): the Data Officer executed real ClickHouse SELECTs through MCP and answered "How many video jobs are recorded in total, and what are their titles?" from live warehouse data (`tool_used: true`) — including a job produced minutes earlier on Cloud Run.
+- Dual-write verified end-to-end on production: a freshly rendered Cloud Run job appeared as a new `video_pipeline_jobs` row seconds after completion (root causes found and fixed: an unwired mirror function and client timeouts shorter than the Cloud Run to ClickHouse cold path).
 - In-app UI: the Telemetry page ships an **Ask the Data Officer** panel — judges can ask their own questions and see answers badged "✓ answered from live ClickHouse query".
 
 ## Shipped production evidence (2026-08-25)
