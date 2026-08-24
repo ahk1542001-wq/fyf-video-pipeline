@@ -19,7 +19,6 @@ FORBIDDEN_TERMS: Set[str] = {
     "kaggle",
     "colab-mcp",
     "mcp-server-colab",
-    "clickhouse",
     "grafana",
     "elevenlabs",
 }
@@ -36,6 +35,8 @@ FORBIDDEN_FILE_PATTERNS: List[re.Pattern] = [
 # Allowable documentation history exclusions if strictly necessary
 ALLOWED_TERM_EXCLUSIONS: Set[str] = {
     "docs/COMPLIANCE_BASELINE.md",
+    # ADRs must name rejected alternatives by their real vendor names.
+    "docs/decisions/ADR-001-clickhouse-partner-track.md",
     "backend/public_compliance.py",
     "backend/test_public_compliance.py",
 }

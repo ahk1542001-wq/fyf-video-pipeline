@@ -4,7 +4,7 @@ import time
 import logging
 from google import genai
 from google.genai import types
-from video_contract import ClaimCoverageResponse, CompactVisualPlanResponse, EvidenceClaimsResponse, ExactLockRequest, MotionGraphicSpec, StoryboardResponse, StoryDraftModesResponse, StoryDraftScript, StoryDraftSegment, StoryModesResponse, VideoScript, VisualTreatment
+from video_contract import ClaimCoverageResponse, CompactVisualPlanResponse, CompactVisualPlanSegment, EvidenceClaimsResponse, ExactLockRequest, MotionGraphicSpec, StoryboardResponse, StoryDraftModesResponse, StoryDraftScript, StoryDraftSegment, StoryModesResponse, VideoScript, VisualTreatment
 from vertex_model_routing import model_for
 from backend.vertex_telemetry import telemetry_retry_attempt, track_client
 from backend.vertex_thinking import generation_config_for
@@ -859,7 +859,45 @@ def generate_exact_lock(request_data: dict) -> dict:
                 f"{last_validation_error[:600]}"
             )
         try:
-            if metadata is None:
+            lock_mode = os.getenv("FYF_LOCK_METADATA_MODE", "combined").strip().lower()
+            if metadata is None and lock_mode == "per_segment":
+                collected_segments: list[CompactVisualPlanSegment] = []
+                total_segments = len(request.approved_segments)
+                for seg_no, approved_seg in enumerate(request.approved_segments, start=1):
+                    print(f"Generating lock visual metadata for segment {seg_no}/{total_segments} using Vertex AI...")
+                    seg_claims_json = json.dumps(
+                        [claim.model_dump(mode="json") for claim in claims_by_id[approved_seg.id]],
+                        ensure_ascii=False,
+                    )
+                    one_prompt = (
+                        "Please supply visual metadata for ONE segment of an approved script. "
+                        "PRESERVE THE NARRATION EXACTLY.\n\n"
+                        f"Title: {request.title}\nSegments:\n"
+                        f"Segment {seg_no} (ID: {approved_seg.id}):\nText: {approved_seg.text}\n"
+                        f"Fact Agent claims: {seg_claims_json}"
+                    )
+                    with telemetry_retry_attempt("lock_metadata", attempt + 1):
+                        seg_response = client.models.generate_content(
+                            model=_stage_model("lock", attempt),
+                            contents=one_prompt + repair_context,
+                            config=generation_config_for("lock",
+                                system_instruction=system_instruction,
+                                response_mime_type="application/json",
+                                response_json_schema=_vertex_json_schema(CompactVisualPlanSegment),
+                            ),
+                        )
+                    if not seg_response.text:
+                        raise ValueError("Vertex returned an empty response")
+                    seg_dict = json.loads(seg_response.text)
+                    _drop_invalid_optional_treatments(seg_dict)
+                    seg_plan = CompactVisualPlanSegment.model_validate(seg_dict)
+                    if seg_plan.id != approved_seg.id:
+                        raise ValueError(
+                            f"Visual plan returned segment id {seg_plan.id!r}; expected {approved_seg.id!r}"
+                        )
+                    collected_segments.append(seg_plan)
+                metadata = CompactVisualPlanResponse(segments=collected_segments)
+            elif metadata is None:
                 with telemetry_retry_attempt("lock_metadata", attempt + 1):
                     response = client.models.generate_content(
                         model=_stage_model("lock", attempt),

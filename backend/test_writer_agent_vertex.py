@@ -145,7 +145,7 @@ class VertexWriterRetryTests(unittest.TestCase):
             )
         ]
 
-        self.assertEqual(len(config_calls), 6)
+        self.assertEqual(len(config_calls), 7)
         forbidden = {"temperature", "top_p", "top_k"}
         for call in config_calls:
             configured = {
