@@ -438,6 +438,52 @@ def _load_approved_local_visual_script(
         return None
     return persisted_script
 
+def _mirror_job_telemetry_to_clickhouse(job_id: str, job_dir: Path, script_dict: Dict[str, Any]) -> None:
+    """Best-effort dual-write of terminal job metrics into ClickHouse Cloud.
+
+    Reads back the persisted per-job telemetry snapshot so every finished run
+    (success or failure) lands in video_pipeline_jobs for the Data Officer.
+    Never raises into the pipeline; failures are logged at warning level.
+    """
+    try:
+        from backend.telemetry_store import record_job_telemetry
+
+        telemetry_file = job_dir / "telemetry.json"
+        if not telemetry_file.is_file():
+            return
+        snapshot = json.loads(telemetry_file.read_text(encoding="utf-8"))
+        summary = snapshot.get("summary") or {}
+        status_row = read_job_status(job_dir) or {}
+
+        timings = status_row.get("stage_timings") or {}
+        total_duration_ms = int(
+            sum(float(v) for v in timings.values() if isinstance(v, (int, float))) * 1000
+        )
+        qa_report = status_row.get("qa_report") or {}
+        final_qa = status_row.get("final_visual_qa") or {}
+
+        record_job_telemetry(
+            job_id,
+            {
+                "title": str(script_dict.get("title", "")),
+                "model_name": "gemini-3.7-flash",
+                "input_tokens": int(summary.get("total_input_tokens") or 0),
+                "output_tokens": int(summary.get("total_output_tokens") or 0),
+                "model_call_count": int(
+                    summary.get("billable_calls") or summary.get("total_calls") or 0
+                ),
+                "retry_count": int(summary.get("job_retry_count") or 0),
+                "total_duration_ms": total_duration_ms,
+                "render_duration_ms": int(float(timings.get("render") or 0) * 1000),
+                "status": str(status_row.get("status") or snapshot.get("job_status") or "completed"),
+                "qa_passed": bool(qa_report.get("passed", False) or final_qa.get("passed", False)),
+                "calls": snapshot.get("calls", []),
+            },
+        )
+    except Exception:
+        logger.warning("[%s] ClickHouse telemetry mirror failed", job_id, exc_info=True)
+
+
 async def run_pipeline(
     job_id: str,
     script_dict: Dict[str, Any],
@@ -788,5 +834,6 @@ async def run_pipeline(
             pass
     finally:
         telemetry_collector.persist()
+        _mirror_job_telemetry_to_clickhouse(job_id, job_dir, script_dict)
         telemetry_context.__exit__(None, None, None)
         release_job_lease(job_dir, lease_token)
