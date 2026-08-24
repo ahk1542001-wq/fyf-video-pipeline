@@ -243,19 +243,21 @@ def _generation_runtime_state() -> dict[str, bool | str]:
             "generation_message": "Public generation is intentionally disabled by the operator.",
         }
 
-    if not os.getenv("FYF_GENERATION_ACCESS_TOKEN"):
+    if os.getenv("FYF_GENERATION_ACCESS_TOKEN"):
         return {
-            "generation_available": False,
-            "generation_access_required": False,
-            "generation_status": "access_token_required",
-            "generation_message": "Generation is disabled until the operator configures a private access token.",
+            "generation_available": True,
+            "generation_access_required": True,
+            "generation_status": "private_access_required",
+            "generation_message": "Private generation access is required before a provider request can be queued.",
         }
 
+    # No access token configured: open demonstration mode protected by the
+    # runtime budget caps and concurrency guard.
     return {
         "generation_available": True,
-        "generation_access_required": True,
-        "generation_status": "private_access_required",
-        "generation_message": "Private generation access is required before a provider request can be queued.",
+        "generation_access_required": False,
+        "generation_status": "ready",
+        "generation_message": "Public demonstration generation is available.",
     }
 
 
