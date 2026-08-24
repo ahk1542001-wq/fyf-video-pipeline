@@ -981,7 +981,8 @@ def ask_data_insights(payload: dict = Body(...)):
         result = asyncio.run(ask_data_officer(question))
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
-    except Exception:
+    except Exception as exc:
         logger.exception("Data Officer failed for question")
-        raise HTTPException(status_code=502, detail="Data Officer could not answer right now")
+        # TEMP DEBUG: surface root cause until hosted diagnostics stabilize.
+        raise HTTPException(status_code=502, detail=f"Data Officer failed: {type(exc).__name__}: {exc}"[:500])
     return {"success": True, "question": question, **result}
