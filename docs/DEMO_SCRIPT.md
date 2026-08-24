@@ -50,7 +50,19 @@ Language: English (spoken or subtitles). Screen recording at 1920x1080, browser 
 >
 > The factory doesn't just produce videos — it can audit itself."
 
-**Action:** run two insight questions live; show one matching SQL query result in the ClickHouse console.
+**Action:** open the Telemetry page and use the "Ask the Data Officer" box (no terminal needed).
+
+Verified questions that answer live from ClickHouse Cloud (2026-08-25):
+
+| Ask this | Expected shape of the answer |
+| --- | --- |
+| "How many video jobs are recorded, how many succeeded, and what did they cost in total?" | counts + total cost from `video_pipeline_jobs` |
+| "How many model calls did the latest job use?" | call count from `video_vertex_calls` |
+| "What is the title of the most recent completed job?" | Burmese title from the latest row |
+
+Answers carry a green badge: **✓ answered from live ClickHouse query**. If a
+question times out (>26s budget), the panel shows a clean retryable message —
+just ask again; do not re-record the whole take.
 
 ## Beat 5 — Stack recap (2:30-2:50)
 
@@ -63,8 +75,10 @@ Language: English (spoken or subtitles). Screen recording at 1920x1080, browser 
 ---
 
 ### Recording checklist
-- [ ] Fresh topic run recorded end-to-end (or pre-recorded segments spliced)
-- [ ] `/api/insights` answered live on camera (tool_used true)
+- [x] Production URL ready: https://fyf-pipeline-605161166139.asia-southeast1.run.app
+- [x] Approved library already holds a cloud-rendered job (`b2ec7c5d`, OTP-safety explainer) usable for Beat 3
+- [ ] Fresh topic run recorded end-to-end (or pre-recorded segments spliced; existing MP4s: e49aa2d5 32.8s, 838803f2 34.7s, b2ec7c5d)
+- [ ] Data Officer answered live on camera via the Telemetry page panel
 - [ ] ClickHouse console shows the same numbers as the answer
 - [ ] English subtitles track exported
 - [ ] Upload YouTube/Vimeo public, add link to Devpost form

@@ -127,7 +127,7 @@ Public restarts never auto-resume paid jobs. A restart leaves work for an authen
 
 ## Verification evidence
 
-- Backend regression & ADK agent suite: **358 tests passed**.
+- Backend regression & ADK agent suite: **412 tests + 83 subtests passed**.
 - Voice adapter/audio QA suite: **23 tests passed**.
 - Remotion suite: **27 tests passed**.
 - Frontend ESLint, TypeScript, and production build passed.
@@ -136,6 +136,7 @@ Public restarts never auto-resume paid jobs. A restart leaves work for an authen
 - A private end-to-end run was completed locally; raw job identifiers, provider payloads, and private cost records are intentionally omitted from this public snapshot.
 - The public demo path was exercised through the browser from script creation to rendered video, Library playback/download, and Telemetry inspection. Exact provider usage remains in the local ignored job ledger.
 - Browser verification covered Create, real generation, Library preview/download, and Telemetry selection for a completed job.
+- Production Cloud Run jobs verified end-to-end on 2026-08-25: rendered MP4s downloaded and ffprobe-checked; the Data Officer answered compound questions ("jobs recorded / succeeded / total cost") from live ClickHouse rows with tool_used=true.
 
 ## Screenshots
 
