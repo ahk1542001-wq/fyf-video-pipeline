@@ -985,19 +985,26 @@ def ask_data_insights(payload: dict = Body(...)):
 
         from backend.agent.data_officer import ask_data_officer
 
+        # The Next.js standalone rewrite proxy tears the connection down at
+        # ~30s and answers with an opaque HTML 500, so the whole handler must
+        # finish well inside that window. One attempt, hard-bounded.
         result = None
-        last_error: Exception | None = None
-        for attempt in range(2):
-            try:
-                result = asyncio.run(ask_data_officer(question))
-                break
-            except RuntimeError as exc:
-                last_error = exc
-                logger.warning("Data Officer attempt %d failed: %s", attempt + 1, exc)
-                if attempt == 0:
-                    time.sleep(2.0)
+        try:
+            result = asyncio.wait_for(asyncio.run(ask_data_officer(question)), timeout=26.0)
+        except asyncio.TimeoutError:
+            logger.warning("Data Officer exceeded 26s budget for question")
+            raise HTTPException(
+                status_code=504,
+                detail="Data Officer timed out; try a simpler question.",
+            )
+        except RuntimeError as exc:
+            logger.warning("Data Officer failed: %s", exc)
+            raise HTTPException(status_code=503, detail=str(exc))
+        except Exception:
+            logger.exception("Data Officer failed unexpectedly")
+            raise HTTPException(status_code=502, detail="Data Officer failed unexpectedly")
         if result is None:
-            raise HTTPException(status_code=503, detail=str(last_error))
+            raise HTTPException(status_code=503, detail="Data Officer unavailable")
     except HTTPException:
         raise
     except Exception:

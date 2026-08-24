@@ -32,6 +32,8 @@ Guidelines:
 - The relevant tables are: video_pipeline_jobs, video_qa_records,
   video_scene_telemetry, video_vertex_calls.
 - Prefer read-only SELECT queries. Never INSERT/ALTER/DROP.
+- You have a very small time budget: use at most TWO tool calls, then answer
+  with whatever you learned. A partial grounded answer beats no answer.
 - Keep answers short (2-4 sentences), include concrete numbers when available,
   and mention the table you used.
 - If no data exists yet, say so plainly instead of guessing.
