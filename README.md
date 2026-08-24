@@ -3,7 +3,9 @@
 Evidence-led Burmese AI video generation with Gemini, native telemetry, and deterministic Remotion rendering.
 
 > [!NOTE]
-> **Current Status:** Verified local-first production path — real browser UI, Vertex/Gemini generation, Gemini TTS, Remotion rendering, deterministic QA, creative QA, final visual QA, Library playback, and in-app Telemetry are working. Replit is a public/demo boundary: hosted generation fails closed until an operator configures a secret-store credential and private access gate.
+> **Current Status:** Verified local-first production path — real browser UI, Vertex/Gemini generation, Gemini TTS, Remotion rendering (segmented strategy with per-segment checkpoints), deterministic QA, creative QA, final visual QA, Library playback, and in-app Telemetry are working. Production hosting runs on **Google Cloud Run**; production telemetry mirrors into **ClickHouse Cloud**, and the built-in **FYF Data Officer** agent answers questions about that data through the official `mcp-clickhouse` MCP server.
+>
+> Entering the Google Cloud Agentic Cinema hackathon on the **ClickHouse partner track** — see [DEVPOST_SUBMISSION.md](DEVPOST_SUBMISSION.md) and the decision records in [docs/decisions/](docs/decisions/).
 
 > [!WARNING]
 > **Release boundary**
@@ -132,6 +134,27 @@ Public restarts never auto-resume paid jobs. A restart leaves work for an authen
 - A private end-to-end run was completed locally; raw job identifiers, provider payloads, and private cost records are intentionally omitted from this public snapshot.
 - The public demo path was exercised through the browser from script creation to rendered video, Library playback/download, and Telemetry inspection. Exact provider usage remains in the local ignored job ledger.
 - Browser verification covered Create, real generation, Library preview/download, and Telemetry selection for a completed job.
+
+## ClickHouse partner-track integration
+
+Every completed generation dual-writes sanitized telemetry into ClickHouse Cloud (`video_pipeline_jobs`, `video_qa_records`, `video_scene_telemetry`, `video_vertex_calls`). The **FYF Data Officer** agent — built with Google ADK and the official [`mcp-clickhouse`](https://github.com/ClickHouse/mcp-clickhouse) MCP server — answers natural-language questions about that warehouse at runtime:
+
+```bash
+curl -X POST https://<your-cloud-run-url>/api/insights \
+  -H "Content-Type: application/json" \
+  -d '{"question": "How many jobs passed QA this week?"}'
+```
+
+Configuration is environment-driven (`CLICKHOUSE_HOST`, `CLICKHOUSE_PORT`, `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD`); without it the feature disables itself gracefully.
+
+## Deploying to Google Cloud Run
+
+```bash
+gcloud auth login
+google_cloud_project=<your-project> bash scripts/deploy_cloudrun.sh
+```
+
+The script enables required APIs, creates the Artifact Registry repository, uploads ClickHouse credentials to Secret Manager, builds the multi-stage image via Cloud Build, and deploys a gen2 Cloud Run service (Next.js standalone front door, FastAPI backend, Remotion + headless browser inside). See [docs/PROJECT_STRUCTURE.md](docs/PROJECT_STRUCTURE.md) for the repository map and [docs/decisions/](docs/decisions/) for the reasoning behind the architecture.
 
 ## License
 
