@@ -27,13 +27,21 @@ fyf-video-pipeline/
 ├── scripts/
 │   ├── deploy_cloudrun.sh      # One-shot Cloud Build + Cloud Run deploy
 │   └── start_cloudrun.sh       # Container entrypoint (uvicorn + next server)
+├── writer_agent_vertex.py        # Vertex script/story/lock stages (per-segment lock via forced tool call)
+├── video_contract.py             # Pydantic contracts shared by every stage
+├── vertex_model_routing.py       # Env-overridable model routes per stage
 ├── docs/
-│   └── decisions/              # Architecture Decision Records (ADRs)
+│   ├── PROJECT_STRUCTURE.md      # This file
+│   ├── DEVELOPER_GUIDE.md        # Setup, env reference, testing, deploy, ops notes
+│   ├── DEMO_SCRIPT.md            # 5-beat English demo recording script
+│   ├── COMPLIANCE_BASELINE.md    # Public-repo compliance rules
+│   └── decisions/                # ADRs: 001 ClickHouse track, 002 Cloud Run,
+│                                 #        003 forced function calling
 ├── tests/                      # Backend and contract test suites
 ├── voice_service/              # Voice synthesis service modules
 ├── output/                     # Runtime artifacts (jobs, locks, telemetry) — gitignored
-├── Dockerfile                  # Multi-stage image for Google Cloud Run
-├── requirements.txt            # Locked Python dependencies
+├── Dockerfile                  # Multi-stage uv-based image for Google Cloud Run
+├── pyproject.toml / uv.lock    # Locked Python dependencies
 ├── LICENSE                     # Open-source license (hackathon requirement)
 └── AGENTS.md                   # Working rules for AI agents contributing here
 ```

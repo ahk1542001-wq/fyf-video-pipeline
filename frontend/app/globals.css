@@ -457,6 +457,12 @@ a {
   gap: 9px;
 }
 
+.action-hint {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--muted, #6b7280);
+}
+
 .button {
   display: inline-flex;
   align-items: center;

@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import sys
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -984,11 +985,21 @@ def ask_data_insights(payload: dict = Body(...)):
 
         from backend.agent.data_officer import ask_data_officer
 
-        result = asyncio.run(ask_data_officer(question))
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc))
-    except Exception as exc:
+        result = None
+        last_error: Exception | None = None
+        for attempt in range(2):
+            try:
+                result = asyncio.run(ask_data_officer(question))
+                break
+            except RuntimeError as exc:
+                last_error = exc
+                if attempt == 0:
+                    time.sleep(2.0)
+        if result is None:
+            raise HTTPException(status_code=503, detail=str(last_error))
+    except HTTPException:
+        raise
+    except Exception:
         logger.exception("Data Officer failed for question")
-        # TEMP DEBUG: surface root cause until hosted diagnostics stabilize.
-        raise HTTPException(status_code=502, detail=f"Data Officer failed: {type(exc).__name__}: {exc}"[:500])
+        raise HTTPException(status_code=502, detail="Data Officer failed unexpectedly")
     return {"success": True, "question": question, **result}

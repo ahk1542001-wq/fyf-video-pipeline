@@ -6,6 +6,8 @@ Evidence-led Burmese AI video generation with Gemini, native telemetry, and dete
 > **Current Status:** Verified local-first production path — real browser UI, Vertex/Gemini generation, Gemini TTS, Remotion rendering (segmented strategy with per-segment checkpoints), deterministic QA, creative QA, final visual QA, Library playback, and in-app Telemetry are working. Production hosting runs on **Google Cloud Run**; production telemetry mirrors into **ClickHouse Cloud**, and the built-in **FYF Data Officer** agent answers questions about that data through the official `mcp-clickhouse` MCP server.
 >
 > Entering the Google Cloud Agentic Cinema hackathon on the **ClickHouse partner track** — see [DEVPOST_SUBMISSION.md](DEVPOST_SUBMISSION.md) and the decision records in [docs/decisions/](docs/decisions/).
+>
+> New here? Start with [docs/DEVELOPER_GUIDE.md](docs/DEVELOPER_GUIDE.md) — setup, environment reference, testing, deployment, and operational failure modes (including why the lock stage uses forced function calling: [ADR-003](docs/decisions/ADR-003-forced-function-calling.md)).
 
 > [!WARNING]
 > **Release boundary**

@@ -776,6 +776,11 @@ export default function Home() {
             )}
 
             <div className="action-stack">
+              {!topic.trim() && writingStatus !== "writing" && (
+                <p className="action-hint" role="note">
+                  Enter a topic above to enable script generation.
+                </p>
+              )}
               <button
                 type="button"
                 onClick={generateScript}

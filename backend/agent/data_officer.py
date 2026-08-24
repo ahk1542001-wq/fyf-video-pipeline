@@ -108,12 +108,26 @@ async def ask_data_officer(question: str) -> dict[str, Any]:
     content = genai_types.Content(role="user", parts=[genai_types.Part(text=question)])
     final_text = ""
     tool_used = False
+    errors: list[str] = []
     async for event in runner.run_async(user_id="fyf-operator", session_id=session.id, new_message=content):
+        error_message = getattr(event, "error_message", None)
+        if error_message:
+            error_code = getattr(event, "error_code", "") or ""
+            errors.append(f"{error_code}: {str(error_message)}"[:200])
         if event.content and event.content.parts:
             for part in event.content.parts:
                 if getattr(part, "function_call", None):
                     tool_used = True
-                if getattr(part, "text", None):
-                    final_text += part.text
+                text_part = getattr(part, "text", None)
+                # Skip model "thought" parts; only surfaced answers count.
+                if text_part and not getattr(part, "thought", False):
+                    final_text += text_part
 
-    return {"answer": final_text.strip(), "tool_used": tool_used}
+    answer = final_text.strip()
+    if not answer:
+        if errors:
+            raise RuntimeError(
+                "Data Officer model call failed: " + "; ".join(errors[:2])
+            )
+        raise RuntimeError("Data Officer returned an empty response")
+    return {"answer": answer, "tool_used": tool_used}
