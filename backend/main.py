@@ -993,6 +993,7 @@ def ask_data_insights(payload: dict = Body(...)):
                 break
             except RuntimeError as exc:
                 last_error = exc
+                logger.warning("Data Officer attempt %d failed: %s", attempt + 1, exc)
                 if attempt == 0:
                     time.sleep(2.0)
         if result is None:
