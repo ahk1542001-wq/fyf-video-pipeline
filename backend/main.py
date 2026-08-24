@@ -947,3 +947,26 @@ def get_job_telemetry_detail(job_id: str):
 @app.get("/api/jobs/{job_id}/telemetry")
 def get_job_telemetry_alias(job_id: str):
     return get_job_telemetry_detail(job_id)
+
+
+@app.post("/api/insights")
+def ask_data_insights(payload: Dict[str, Any]):
+    """Ask the FYF Data Officer (ADK agent + mcp-clickhouse) a question about
+    production telemetry. Read-only; answers from ClickHouse Cloud."""
+    question = str(payload.get("question", "")).strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="question is required")
+    if len(question) > 500:
+        raise HTTPException(status_code=400, detail="question too long")
+    try:
+        import asyncio
+
+        from backend.agent.data_officer import ask_data_officer
+
+        result = asyncio.run(ask_data_officer(question))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except Exception:
+        logger.exception("Data Officer failed for question")
+        raise HTTPException(status_code=502, detail="Data Officer could not answer right now")
+    return {"success": True, "question": question, **result}

@@ -1,1 +1,3 @@
 clickhouse-connect>=1.0
+mcp-clickhouse>=0.1.0
+mcp>=1.0.0
