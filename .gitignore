@@ -11,12 +11,12 @@ __pycache__/
 gcp-key.json
 
 # Local build/runtime artifacts; keep release commits source-first.
-output/
-jobs/
-script-jobs/
-locks/
-visual-artifacts/
-telemetry/
+/output/
+/jobs/
+/script-jobs/
+/locks/
+/visual-artifacts/
+/telemetry/
 *.pem
 *.key
 frontend/node_modules/
@@ -30,6 +30,7 @@ docs/superpowers/
 AGENTS.md
 **/AGENTS.md
 remotion/out/
+remotion/output/
 remotion/.agents/
 remotion/.skill/
 remotion/public/*.mp4
