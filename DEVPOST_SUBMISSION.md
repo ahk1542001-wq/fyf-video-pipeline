@@ -39,13 +39,23 @@ that data at runtime through the official mcp-clickhouse MCP server.
 - Official MCP server: `mcp-clickhouse` is launched as a stdio MCP server and wired into the agent via ADK `MCPToolset` (`backend/agent/data_officer.py`); imported and called at runtime by `POST /api/insights` in `backend/main.py`.
 - Runtime cluster: ClickHouse Cloud service on GCP `asia-southeast1` (secure HTTPS 8443), schema auto-provisioned by `backend/clickhouse_telemetry.py`.
 - Real writes: `backend/telemetry_store.py` dual-writes sanitized job telemetry on every completed generation; verified end-to-end against the live cluster (row-level SELECT round-trip).
-- Verified conversation: the Data Officer answered a live question ("How many jobs are in video_pipeline_jobs?") by executing a ClickHouse query through MCP during development testing.
+- Verified conversations (production, 2026-08-24/25): the Data Officer executed real ClickHouse SELECTs through MCP and answered "How many video jobs are recorded in total, and how many succeeded?" from live warehouse data (`tool_used: true`).
+- In-app UI: the Telemetry page ships an **Ask the Data Officer** panel — judges can ask their own questions and see answers badged "✓ answered from live ClickHouse query".
+
+## Shipped production evidence (2026-08-25)
+
+- **Two complete end-to-end productions on Google Cloud Run** (revisions 00017-lt6 / 00018-cz6):
+  - `e49aa2d5` — 32.8s vertical MP4 (2.19 MB), deterministic QA + creative QA + final rendered-meaning QA all passed; downloaded and ffprobe-verified.
+  - `838803f2` — driven entirely through the browser UI (Create form → script → lock → render → Library Download), 34.7s MP4 verified.
+- **Cost honesty:** in-app ledger recorded $0.0083 provider cost for job `e49aa2d5` across 15 Vertex/TTS calls, 0 retries, 0 failures.
+- **Resilience finding (documented in ADR-003):** burst testing showed Vertex responseJsonSchema constrained decoding failing under load while ToolConfig ANY forced function calling stayed healthy; the per-segment lock stage uses forced function calling with the identical schema.
+- Public repo: https://github.com/ahk1542001-wq/fyf-video-pipeline (MIT).
 
 ## Submission checklist
 
-- [ ] Hosted project URL (Google Cloud Run) — pending first cloud deploy
-- [ ] Public GitHub repo with OSS license (LICENSE present; final secrets audit before flip)
-- [ ] <=3-minute English demo video (Create -> Library -> Telemetry -> /api/insights Q&A)
+- [x] Hosted project URL: https://fyf-pipeline-605161166139.asia-southeast1.run.app
+- [x] Public GitHub repo with OSS license (MIT) — secrets audit clean
+- [ ] <=3-minute English demo video (shot list: docs/DEMO_SCRIPT.md; assets ready: two cloud-rendered MP4s, Telemetry ledger, Data Officer Q&A)
 - [ ] Devpost form under ClickHouse track
 
 Deadline: September 9, 2026, 2:00 PM PT.
