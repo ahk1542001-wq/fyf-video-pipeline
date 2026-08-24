@@ -68,10 +68,15 @@ def _mcp_server_command() -> list[str] | None:
     return None
 
 
-def create_data_officer_agent(model_name: str | None = None) -> LlmAgent | None:
+def create_data_officer_agent(
+    model_name: str | None = None,
+) -> tuple[LlmAgent, "MCPToolset"] | None:
     """Build the Data Officer agent wired to mcp-clickhouse.
 
-    Returns None when ClickHouse env is not configured or no launcher found.
+    Returns (agent, toolset) so callers can close the MCP session when done;
+    each request spawns its own stdio subprocess and leaking it eventually
+    starves the container. Returns None when ClickHouse env is not configured
+    or no launcher found.
     """
     if not os.getenv("CLICKHOUSE_HOST"):
         logger.info("CLICKHOUSE_HOST not set; Data Officer disabled")
@@ -95,12 +100,13 @@ def create_data_officer_agent(model_name: str | None = None) -> LlmAgent | None:
     )
 
     resolved_model = model_name or model_for("script")
-    return LlmAgent(
+    agent = LlmAgent(
         name="fyf_data_officer",
         model=Gemini(model=resolved_model),
         instruction=DATA_OFFICER_INSTRUCTION,
         tools=[toolset],
     )
+    return agent, toolset
 
 
 async def ask_data_officer(question: str) -> dict[str, Any]:
@@ -109,9 +115,10 @@ async def ask_data_officer(question: str) -> dict[str, Any]:
     from google.adk.sessions import InMemorySessionService
     from google.genai import types as genai_types
 
-    agent = create_data_officer_agent()
-    if agent is None:
+    built = create_data_officer_agent()
+    if built is None:
         raise RuntimeError("Data Officer unavailable: set CLICKHOUSE_HOST + install mcp-clickhouse")
+    agent, toolset = built
 
     session_service = InMemorySessionService()
     session = await session_service.create_session(app_name="fyf_data_officer", user_id="fyf-operator")
@@ -121,19 +128,25 @@ async def ask_data_officer(question: str) -> dict[str, Any]:
     final_text = ""
     tool_used = False
     errors: list[str] = []
-    async for event in runner.run_async(user_id="fyf-operator", session_id=session.id, new_message=content):
-        error_message = getattr(event, "error_message", None)
-        if error_message:
-            error_code = getattr(event, "error_code", "") or ""
-            errors.append(f"{error_code}: {str(error_message)}"[:200])
-        if event.content and event.content.parts:
-            for part in event.content.parts:
-                if getattr(part, "function_call", None):
-                    tool_used = True
-                text_part = getattr(part, "text", None)
-                # Skip model "thought" parts; only surfaced answers count.
-                if text_part and not getattr(part, "thought", False):
-                    final_text += text_part
+    try:
+        async for event in runner.run_async(user_id="fyf-operator", session_id=session.id, new_message=content):
+            error_message = getattr(event, "error_message", None)
+            if error_message:
+                error_code = getattr(event, "error_code", "") or ""
+                errors.append(f"{error_code}: {str(error_message)}"[:200])
+            if event.content and event.content.parts:
+                for part in event.content.parts:
+                    if getattr(part, "function_call", None):
+                        tool_used = True
+                    text_part = getattr(part, "text", None)
+                    # Skip model "thought" parts; only surfaced answers count.
+                    if text_part and not getattr(part, "thought", False):
+                        final_text += text_part
+    finally:
+        try:
+            await toolset.close()
+        except Exception:  # pragma: no cover - best-effort cleanup
+            logger.debug("MCP toolset close failed", exc_info=True)
 
     answer = final_text.strip()
     if not answer:
