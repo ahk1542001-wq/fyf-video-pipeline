@@ -40,8 +40,10 @@ def get_clickhouse_client():
             password=CLICKHOUSE_PASSWORD,
             database=CLICKHOUSE_DATABASE,
             secure=CLICKHOUSE_SECURE,
-            connect_timeout=5,
-            send_receive_timeout=10,
+            # Match mcp-clickhouse's proven budgets; 5s/10s read-timed-out on
+            # every Cloud Run -> ClickHouse Cloud attempt.
+            connect_timeout=30,
+            send_receive_timeout=300,
         )
         _init_clickhouse_schema(_client)
         logger.info("Connected to ClickHouse Cloud at %s", CLICKHOUSE_HOST)
