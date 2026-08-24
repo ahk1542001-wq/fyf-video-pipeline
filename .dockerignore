@@ -18,4 +18,3 @@ conversation
 .replit
 replit.nix
 run_replit.sh
-uv.lock
