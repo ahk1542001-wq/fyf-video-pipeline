@@ -10,6 +10,9 @@ echo "Starting FYF Video Pipeline on Replit..."
 # overridden so a deployment never silently depends on a private partner key.
 export FYF_RUNTIME_MODE="${FYF_RUNTIME_MODE:-hackathon}"
 export NEXT_PUBLIC_FYF_RUNTIME_MODE="${NEXT_PUBLIC_FYF_RUNTIME_MODE:-$FYF_RUNTIME_MODE}"
+# Segmented render keeps per-segment checkpoints and avoids long single
+# chromium runs that get OOM-killed on small deployment containers.
+export FYF_SEGMENT_RENDER_ENABLED="${FYF_SEGMENT_RENDER_ENABLED:-1}"
 
 start_backend() {
   # The deployment build creates this environment. Prefer it so the public
