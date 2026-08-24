@@ -137,6 +137,16 @@ Public restarts never auto-resume paid jobs. A restart leaves work for an authen
 - The public demo path was exercised through the browser from script creation to rendered video, Library playback/download, and Telemetry inspection. Exact provider usage remains in the local ignored job ledger.
 - Browser verification covered Create, real generation, Library preview/download, and Telemetry selection for a completed job.
 
+## Screenshots
+
+| Create Studio | Approved library |
+| --- | --- |
+| ![Create Studio](docs/media/create-studio.png) | ![Library](docs/media/library.png) |
+
+| Telemetry ledger | Ask the Data Officer (live ClickHouse) |
+| --- | --- |
+| ![Telemetry ledger](docs/media/telemetry-ledger.png) | ![Data Officer](docs/media/data-officer.png) |
+
 ## ClickHouse partner-track integration
 
 Every completed generation dual-writes sanitized telemetry into ClickHouse Cloud (`video_pipeline_jobs`, `video_qa_records`, `video_scene_telemetry`, `video_vertex_calls`). The **FYF Data Officer** agent — built with Google ADK and the official [`mcp-clickhouse`](https://github.com/ClickHouse/mcp-clickhouse) MCP server — answers natural-language questions about that warehouse at runtime:
