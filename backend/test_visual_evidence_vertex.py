@@ -9,7 +9,8 @@ from unittest.mock import MagicMock, patch
 from google.genai.errors import ClientError
 from video_contract import VideoScript
 from visual_evidence_vertex import (
-    _client, _input_fingerprint, _plan_final_visual_repair, _quota_retry, generate_and_verify_visual_evidence,
+    _client, _enforce_attention_reset_cadence, _input_fingerprint, _plan_final_visual_repair, _quota_retry,
+    generate_and_verify_visual_evidence,
     repair_creative_failures, repair_final_visual_failures, ensure_relationship_modes,
     plan_visual_treatments,
 )
@@ -1190,6 +1191,57 @@ class VisualEvidenceVertexTests(unittest.TestCase):
 
         kinds = [segment["visual"]["evidence_shots"][0]["treatment"]["treatment_type"] for segment in result["segments"]]
         self.assertNotEqual(kinds, ["object_action"] * 3)
+
+
+class AttentionResetCadenceTests(unittest.TestCase):
+    """Regression: VISUAL_WORLD_NOT_RESET was unfixable because fallback
+    treatments assign attention_reset deterministically by index."""
+
+    def _scene(self, scene_id, start, end, reset=False):
+        return {
+            "id": scene_id,
+            "startFrame": start,
+            "endFrame": end,
+            "visual": {
+                "evidence_shots": [
+                    {"shot_id": f"{scene_id}_shot", "treatment": {"attention_reset": reset}},
+                ],
+            },
+        }
+
+    def test_breaching_scene_gets_a_reset_beat(self):
+        script = {
+            "fps": 30,
+            "segments": [
+                self._scene("s1", 0, 275, reset=True),
+                self._scene("s2", 275, 558),
+                self._scene("s3", 558, 830),
+                self._scene("s4", 830, 1026),
+                self._scene("s5", 1026, 1275),
+                self._scene("s6", 1275, 1492, reset=True),
+            ],
+        }
+        claims_before = json.dumps(
+            [(s["id"], (s["visual"]["evidence_shots"][0].get("proves_claim_ids"))) for s in script["segments"]],
+        )
+
+        result = _enforce_attention_reset_cadence(script)
+
+        resets = [
+            bool(s["visual"]["evidence_shots"][-1]["treatment"]["attention_reset"])
+            for s in result["segments"]
+        ]
+        # s5 breached the 900-frame gap and must now carry the reset beat.
+        self.assertTrue(resets[4])
+        self.assertFalse(resets[1])
+        self.assertFalse(resets[2])
+        self.assertEqual(
+            claims_before,
+            json.dumps(
+                [(s["id"], (s["visual"]["evidence_shots"][0].get("proves_claim_ids"))) for s in result["segments"]],
+            ),
+            "cadence enforcement must not touch locked evidence claims",
+        )
 
 
 if __name__ == "__main__":

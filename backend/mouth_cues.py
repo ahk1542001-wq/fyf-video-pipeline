@@ -12,6 +12,8 @@ import unicodedata
 from pathlib import Path
 from typing import Any, Iterable
 
+from backend.creative_quality import enforce_attention_reset_cadence
+
 FPS = 30
 
 
@@ -511,7 +513,7 @@ def build_render_input(
             wav_path, timed_segments, fps=fps
         )
 
-    return {
+    render_input = {
         "title": script_data["title"],
         "language": script_data.get("language", "my-MM"),
         "fps": fps,
@@ -522,3 +524,6 @@ def build_render_input(
         "mouthCueSource": mouth_cue_source,
         "segmentTimingSource": segment_timing_source,
     }
+    # Frames exist from here on, so deterministic creative QA can now be satisfied
+    # before render/QA regardless of which upstream path produced the script.
+    return enforce_attention_reset_cadence(render_input)

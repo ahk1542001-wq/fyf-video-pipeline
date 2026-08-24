@@ -18,7 +18,11 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from video_contract import EvidenceClaim, EvidenceShot, MotionGraphicSpec, VideoScript, VisualTreatment
 from vertex_model_routing import model_for
-from backend.creative_quality import failed_scene_ids, rebalance_creative_rhythm
+from backend.creative_quality import (
+    enforce_attention_reset_cadence as _enforce_attention_reset_cadence,
+    failed_scene_ids,
+    rebalance_creative_rhythm,
+)
 from backend.director_context import DirectorPolicy, build_director_context
 from backend.vertex_client import vertex_client_kwargs
 from backend.vertex_telemetry import telemetry_retry_attempt, track_client
@@ -506,6 +510,7 @@ def plan_visual_treatments(script_data: dict, job_dir: str, policy: Optional[Dir
         script=script,
     )
 
+    script = _enforce_attention_reset_cadence(script, policy)
     return VideoScript.model_validate(script).model_dump(mode="json")
 
 
@@ -1359,5 +1364,6 @@ def repair_final_visual_failures(script_data: dict, report: dict, job_dir: str) 
     # Generated repair plans remain planned and flow through the existing
     # generation plus per-shot verifier. Motion plans have already passed it.
     repaired = generate_and_verify_visual_evidence(script, job_dir)
+    repaired = _enforce_attention_reset_cadence(repaired)
     _write_final_repair_checkpoint(repair_checkpoint, source_fingerprint, repaired)
     return repaired

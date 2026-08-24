@@ -22,6 +22,40 @@ class DirectorPolicy(_DirectorPolicy):
     max_transition_run: int = Field(default=3, ge=1)
 
 
+def enforce_attention_reset_cadence(script: dict[str, Any], policy: DirectorPolicy | None = None) -> dict[str, Any]:
+    """Force an attention_reset beat wherever the deterministic QA cadence would breach.
+
+    Creative QA fails a scene with VISUAL_WORLD_NOT_RESET when too many frames pass
+    without any treatment carrying attention_reset. The director model cannot fix
+    this reliably because fallback treatments assign attention_reset by index, so
+    we mirror the QA arithmetic here and set the flag on the last shot of any
+    breaching scene. Locked narration and evidence claims are untouched.
+    """
+    policy = policy or DirectorPolicy()
+    fps = float(script.get("fps") or 30)
+    # Mirror the creative-QA threshold; the director policy variant may not carry it.
+    max_seconds = float(getattr(policy, "max_seconds_without_reset", 30))
+    max_gap = max_seconds * fps
+    reset_start = None
+    for scene in script.get("segments", []):
+        start = scene.get("startFrame")
+        end = scene.get("endFrame")
+        if start is None or end is None:
+            continue
+        if reset_start is None:
+            reset_start = start
+        visual = scene.get("visual") or {}
+        shots = visual.get("evidence_shots") or []
+        treatments = [shot.get("treatment") or {} for shot in shots]
+        if any(treatment.get("attention_reset") for treatment in treatments):
+            reset_start = end
+        elif end - reset_start > max_gap and shots:
+            treatments[-1]["attention_reset"] = True
+            shots[-1]["treatment"] = treatments[-1]
+            reset_start = end
+    return script
+
+
 def _scenes(value: dict[str, Any]) -> list[dict[str, Any]]:
     return value.get("segments") or value.get("scenes") or []
 
