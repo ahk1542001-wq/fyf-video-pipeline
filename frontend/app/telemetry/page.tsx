@@ -41,6 +41,38 @@ export default function TelemetryPage() {
   const [selectedJobId, setSelectedJobId] = useState<string>("");
   const [jobDetails, setJobDetails] = useState<JobTelemetryResponse | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [officerQuestion, setOfficerQuestion] = useState("");
+  const [officerAnswer, setOfficerAnswer] = useState<string | null>(null);
+  const [officerToolUsed, setOfficerToolUsed] = useState(false);
+  const [officerBusy, setOfficerBusy] = useState(false);
+  const [officerError, setOfficerError] = useState<string | null>(null);
+
+  async function askDataOfficer(event: React.FormEvent) {
+    event.preventDefault();
+    const question = officerQuestion.trim();
+    if (!question || officerBusy) return;
+    setOfficerBusy(true);
+    setOfficerError(null);
+    setOfficerAnswer(null);
+    setOfficerToolUsed(false);
+    try {
+      const res = await fetch(`${API_URL}/api/insights`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(typeof data.detail === "string" ? data.detail : "Data Officer unavailable");
+      }
+      setOfficerAnswer(String(data.answer ?? ""));
+      setOfficerToolUsed(Boolean(data.tool_used));
+    } catch (err) {
+      setOfficerError(err instanceof Error ? err.message : "Request failed");
+    } finally {
+      setOfficerBusy(false);
+    }
+  }
 
   useEffect(() => {
     async function loadData() {
@@ -292,6 +324,51 @@ export default function TelemetryPage() {
               </div>
             ))}
           </div>
+        </section>
+
+        {/* Data Officer: natural-language Q&A over ClickHouse Cloud via mcp-clickhouse */}
+        <section className="bg-[#FFFFFF] rounded-xl border border-[#30382C]/15 p-6 shadow-xs mt-6">
+          <div className="flex items-center justify-between mb-4 pb-3 border-b border-[#30382C]/10">
+            <h3 className="text-md font-bold text-[#30382C]">🧠 Ask the Data Officer</h3>
+            <span className="text-xs bg-[#2563EB]/10 text-[#2563EB] font-bold px-2.5 py-0.5 rounded-full">
+              ClickHouse Cloud · mcp-clickhouse
+            </span>
+          </div>
+          <p className="text-xs text-[#30382C]/70 mb-3">
+            An ADK agent answers questions about production jobs, QA outcomes and
+            model-call cost by querying the ClickHouse tables through the official
+            mcp-clickhouse MCP server.
+          </p>
+          <form onSubmit={askDataOfficer} className="flex flex-col sm:flex-row gap-2 mb-3">
+            <input
+              type="text"
+              value={officerQuestion}
+              onChange={(e) => setOfficerQuestion(e.target.value)}
+              placeholder="e.g. How many video jobs succeeded this week?"
+              maxLength={500}
+              className="flex-1 min-h-[44px] px-3 py-2 rounded-lg border border-[#30382C]/20 text-sm text-[#30382C] bg-white focus:outline-none focus:border-[#16856B]"
+            />
+            <button
+              type="submit"
+              disabled={officerBusy || !officerQuestion.trim()}
+              className="button button--primary min-h-[44px] px-5 disabled:opacity-50"
+            >
+              {officerBusy ? "Querying ClickHouse…" : "Ask"}
+            </button>
+          </form>
+          {officerError && (
+            <p role="alert" className="text-xs text-[#B45309] bg-[#B45309]/10 border border-[#B45309]/20 rounded-lg p-3">
+              {officerError}
+            </p>
+          )}
+          {officerAnswer !== null && (
+            <div className="rounded-lg bg-[#F0FDF4] border border-[#16856B]/20 p-4">
+              <p className="text-sm text-[#30382C] whitespace-pre-wrap">{officerAnswer}</p>
+              <p className="mt-2 text-[11px] font-mono text-[#16856B]">
+                {officerToolUsed ? "✓ answered from live ClickHouse query" : "answered without tool use"}
+              </p>
+            </div>
+          )}
         </section>
       </main>
     </div>
