@@ -13,6 +13,17 @@ import {
   type VoiceProvider,
 } from "../lib/video-ui";
 
+const SCRIPT_JOB_STORAGE_KEY = "fyf-active-script-job";
+const WIZARD_TOPIC_STORAGE_KEY = "fyf-wizard-topic";
+const LOCKED_SCRIPT_STORAGE_KEY = "fyf-locked-script";
+
+function formatElapsed(ms: number): string {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes > 0 ? `${minutes}m ${String(seconds).padStart(2, "0")}s` : `${seconds}s`;
+}
+
 interface VideoScript {
   title: string;
   language: "my-MM";
@@ -160,6 +171,64 @@ export default function Home() {
     };
   }, []);
 
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    async function restoreWizardState() {
+      const savedTopic = window.sessionStorage.getItem(WIZARD_TOPIC_STORAGE_KEY);
+      if (savedTopic) setTopic(savedTopic);
+
+      const savedLock = window.sessionStorage.getItem(LOCKED_SCRIPT_STORAGE_KEY);
+      if (savedLock) {
+        try {
+          const parsed: unknown = JSON.parse(savedLock);
+          if (
+            isRecord(parsed) &&
+            isVideoScript(parsed.script) &&
+            typeof parsed.lockId === "string" &&
+            /^[0-9a-f]{8}$/.test(parsed.lockId)
+          ) {
+            setScript(parsed.script);
+            setScriptLockId(parsed.lockId);
+            setScriptLocked(true);
+            setWritingStatus("done");
+            setScriptProgress("Script locked and ready.");
+          }
+        } catch {
+          window.sessionStorage.removeItem(LOCKED_SCRIPT_STORAGE_KEY);
+        }
+      }
+
+      const activeJob = window.sessionStorage.getItem(SCRIPT_JOB_STORAGE_KEY);
+      if (!activeJob) return;
+      setWritingStatus("writing");
+      setScriptProgress("Reconnecting to the running script job…");
+      try {
+        const statusRes = await fetchWithDeadline(`${API_URL}/api/script-jobs/${activeJob}/status`);
+        const job: unknown = statusRes.ok ? await statusRes.json() : null;
+        if (isRecord(job) && job.status === "needs_attention") {
+          setWritingStatus("needs_attention");
+          setResumableScriptJobId(activeJob);
+          setScriptProgress(typeof job.error === "string" ? job.error : "Temporary provider issue. Checkpoint saved.");
+          window.sessionStorage.removeItem(SCRIPT_JOB_STORAGE_KEY);
+          return;
+        }
+        await pollScriptJob(activeJob, { isCancelled: () => cancelled });
+      } catch (err) {
+        setError((err as Error).message || "Lost track of the running script job.");
+        setWritingStatus("error");
+        window.sessionStorage.removeItem(SCRIPT_JOB_STORAGE_KEY);
+      }
+    }
+
+    let cancelled = false;
+    void restoreWizardState();
+    return () => {
+      cancelled = true;
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   function isRecord(val: unknown): val is Record<string, unknown> {
     return typeof val === "object" && val !== null;
   }
@@ -210,27 +279,29 @@ export default function Home() {
     }
   }
 
-  async function pollScriptJob(jobId: string) {
+  async function pollScriptJob(jobId: string, opts: { isCancelled?: () => boolean } = {}) {
     const startTime = Date.now();
     while (Date.now() - startTime < 45 * 60 * 1000) {
+      if (opts.isCancelled?.()) return;
       const statusRes = await fetchWithDeadline(`${API_URL}/api/script-jobs/${jobId}/status`);
       if (!statusRes.ok) throw new Error("Could not check script job status");
       const job: unknown = await statusRes.json();
       if (!isRecord(job) || typeof job.status !== "string") throw new Error("Malformed script job payload");
 
+      const elapsed = `· ${formatElapsed(Date.now() - startTime)} elapsed`;
       const progress = typeof job.progress === "number" ? ` (${job.progress}%)` : "";
       if (job.stage === "adk_producer") {
-        setScriptProgress(`Google ADK Producer Agent running…${progress}`);
+        setScriptProgress(`Google ADK Producer Agent running… ${progress} ${elapsed}. This stage researches and drafts the full story, so it can take several minutes.`);
       } else if (job.stage === "narration") {
-        setScriptProgress(`Writing narration with Vertex…${progress}`);
+        setScriptProgress(`Writing narration with Vertex… ${progress} ${elapsed}`);
       } else if (job.stage === "storyboard" || job.stage === "visual_lock") {
         const batch = typeof job.batch === "number" ? job.batch : 1;
         const count = typeof job.batch_count === "number" ? job.batch_count : "?";
-        setScriptProgress(`Building visual story batch ${batch}/${count}…${progress}`);
+        setScriptProgress(`Building visual story batch ${batch}/${count}… ${progress} ${elapsed}`);
       } else if (job.stage === "retrying") {
-        setScriptProgress("Recovering the saved script checkpoint…");
+        setScriptProgress(`Provider hiccup — auto-retrying from the saved checkpoint… ${elapsed}`);
       } else {
-        setScriptProgress(`Preparing the script job…${progress}`);
+        setScriptProgress(`Preparing the script job… ${progress} ${elapsed}`);
       }
 
       if (job.status === "completed" && isVideoScript(job.data) && typeof job.lock_id === "string" && /^[0-9a-f]{8}$/.test(job.lock_id)) {
@@ -240,17 +311,24 @@ export default function Home() {
         setWritingStatus("done");
         setResumableScriptJobId(null);
         setScriptProgress("Script locked and ready.");
+        window.sessionStorage.removeItem(SCRIPT_JOB_STORAGE_KEY);
+        window.sessionStorage.setItem(
+          LOCKED_SCRIPT_STORAGE_KEY,
+          JSON.stringify({ script: job.data, lockId: job.lock_id }),
+        );
         return;
       }
 
       if (job.status === "needs_attention") {
         setWritingStatus("needs_attention");
         setResumableScriptJobId(jobId);
+        window.sessionStorage.removeItem(SCRIPT_JOB_STORAGE_KEY);
         setScriptProgress(typeof job.error === "string" ? job.error : "Temporary provider issue. Checkpoint saved.");
         return;
       }
 
       if (job.status === "failed") {
+        window.sessionStorage.removeItem(SCRIPT_JOB_STORAGE_KEY);
         throw new Error(typeof job.error === "string" ? job.error : "Script production failed");
       }
 
@@ -281,6 +359,8 @@ export default function Home() {
     setVideoUrl(null);
     setError(null);
     setResumableScriptJobId(null);
+    window.sessionStorage.setItem(WIZARD_TOPIC_STORAGE_KEY, topic);
+    window.sessionStorage.removeItem(LOCKED_SCRIPT_STORAGE_KEY);
 
     try {
       const res = await fetchWithDeadline(`${API_URL}/api/generate-script`, {
@@ -302,6 +382,7 @@ export default function Home() {
 
       if (isRecord(data) && typeof data.job_id === "string") {
         const jobId = data.job_id;
+        window.sessionStorage.setItem(SCRIPT_JOB_STORAGE_KEY, jobId);
         await pollScriptJob(jobId);
       } else {
         setError("Invalid response format from script generation");
