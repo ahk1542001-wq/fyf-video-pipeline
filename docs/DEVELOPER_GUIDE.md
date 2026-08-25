@@ -12,7 +12,7 @@ ADK + Vertex AI, with ClickHouse-backed telemetry and an MCP "Data Officer".
 | Agent runtime | Google ADK + google-genai | gemini-3.7-flash default route |
 | Video/image models | Veo 3.1, Gemini image models | routed via `vertex_model_routing.py` |
 | Voice | Gemini TTS (`gemini-2.5-flash-preview-tts`) | selectable in UI |
-| Frontend | Next.js 15 (standalone) | rewrites `/api/*` to `FYF_BACKEND_URL` |
+| Frontend | Next.js 16 (standalone) | rewrites `/api/*` to `FYF_BACKEND_URL` |
 | Telemetry store | ClickHouse Cloud (asia-southeast1) | dual-write from `backend/telemetry_store.py` |
 | Insights agent | ADK LlmAgent + mcp-clickhouse MCP | `backend/agent/data_officer.py` |
 | Hosting | Google Cloud Run (`--no-cpu-throttling`) | single container, dual process |
@@ -34,7 +34,7 @@ See `docs/PROJECT_STRUCTURE.md` for the annotated tree. Key entry points:
 uv sync                      # creates .venv from pyproject.toml + uv.lock
 
 # 2. Frontend
-cd web && npm ci && cd ..
+cd frontend && npm ci
 
 # 3. Credentials (choose one; never commit these files)
 cp .env.example .env         # then fill values
@@ -48,7 +48,7 @@ cp .env.clickhouse.template .env.clickhouse   # if you have a CH instance
 
 # 5. Run both processes
 uvicorn backend.main:app --port 8000 --reload   # terminal 1
-cd web && npm run dev                            # terminal 2 → http://localhost:3001
+cd frontend && npm run dev                       # terminal 2 → http://localhost:3001
 ```
 
 The frontend proxies `/api/*` to `127.0.0.1:8000`, so the UI works against
@@ -140,3 +140,48 @@ Re-run the audit after any dependency change:
 ```bash
 uvx pip-audit --skip-editable -l -p .venv
 ```
+
+## Change-Impact & Context Integrity Protocol
+
+Before changing any file, write a context packet first:
+
+```yaml
+task_goal: what changes and why
+canonical_sources_read: [files you actually opened]
+existing_implementation: what exists today
+symbols_to_change: [functions/classes touched]
+callers_and_consumers: [importers and callers]
+relevant_tests: [targeted suites to rerun]
+affected_documentation: [docs describing this behavior]
+conflicts_or_stale_claims: [doc vs source contradictions]
+planned_files: [exact paths]
+new_file_justification: only when adding a file
+unknowns: open questions
+```
+
+Run these six bounded searches before proposing a change:
+
+1. Search the exact symbol, error, and requested feature with `rg`.
+2. Search the filename plus aliases and synonyms used by callers or docs.
+3. Locate the existing implementation; extend it instead of rebuilding it.
+4. Map definition → callers/imports → tests → docs for every changed interface.
+5. Before adding a file, perform an existing-equivalent search and record why reuse is insufficient.
+6. When documentation conflicts, source and tests define current behavior; flag and repair the stale doc in the same change.
+
+Focused verification for the lane you touched:
+
+| Change lane | Minimum check |
+| --- | --- |
+| Backend boot | `FYF_RUNTIME_MODE=hackathon .venv/bin/python -B -m uvicorn backend.main:app --port 8000` |
+| Python change | `uv run pytest -q -k <keyword>` |
+| Remotion composition | `cd remotion && npm test` |
+| Frontend | `cd frontend && npm run build` |
+
+Full gate before declaring done: `uv run pytest -q` must pass offline (suites live under backend/ and voice_service/ per pyproject.toml testpaths; the root tests/ directory is intentionally absent).
+
+Definition of done for documentation changes:
+
+- No unverified status, version, or deadline claims.
+- Every factual statement cites its source path (file, plus line where useful).
+- Contradictions against executable source/tests are fixed in the doc, not argued away.
+- The pre-change packet and six searches are referenced in your handoff.

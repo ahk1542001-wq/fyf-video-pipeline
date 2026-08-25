@@ -38,3 +38,6 @@ remotion/public/*.mp4
 remotion/public/*.wav
 remotion/check_*.png
 frontend/public/video_frames/
+
+# Root agent contract ships to clones; nested copies stay local-only.
+!/AGENTS.md

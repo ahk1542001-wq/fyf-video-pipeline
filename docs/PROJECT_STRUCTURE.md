@@ -37,13 +37,13 @@ fyf-video-pipeline/
 │   ├── COMPLIANCE_BASELINE.md    # Public-repo compliance rules
 │   └── decisions/                # ADRs: 001 ClickHouse track, 002 Cloud Run,
 │                                 #        003 forced function calling
-├── tests/                      # Backend and contract test suites
+├── (no root tests/)            # Python suites live in backend/ and voice_service/ (pyproject.toml testpaths); root tests/ intentionally absent.
 ├── voice_service/              # Voice synthesis service modules
 ├── output/                     # Runtime artifacts (jobs, locks, telemetry) — gitignored
 ├── Dockerfile                  # Multi-stage uv-based image for Google Cloud Run
 ├── pyproject.toml / uv.lock    # Locked Python dependencies
 ├── LICENSE                     # Open-source license (hackathon requirement)
-└── AGENTS.md                   # Working rules for AI agents contributing here
+└── AGENTS.md                   # Tracked contributor contract; gate enforced by backend/test_docs_integrity.py
 ```
 
 ## Key flows

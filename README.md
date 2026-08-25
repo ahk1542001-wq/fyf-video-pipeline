@@ -11,7 +11,7 @@ Evidence-led Burmese AI video generation with Gemini, native telemetry, and dete
 
 > [!WARNING]
 > **Release boundary**
-> This public snapshot excludes credentials, local job output, non-public voice assets, raw provider payloads, internal agent instructions, and one-off recording/operator scripts. It has an owner-only access pass for an explicitly enabled public demo, not end-user authentication, billing, or tenant isolation.
+> The only agent-facing file shipped is the sanitized public contributor contract in [AGENTS.md](AGENTS.md). This public snapshot excludes credentials, local job output, non-public voice assets, raw provider payloads, private internal agent instructions and handoffs, and one-off recording/operator scripts. It has an owner-only access pass for an explicitly enabled public demo, not end-user authentication, billing, or tenant isolation.
 
 ## Repository boundary
 
