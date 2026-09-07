@@ -56,6 +56,9 @@ def generate_voice(
     else:
         narration = " ".join(seg.get("text", "") for seg in segments)
 
+    language = script_json.get("language", "my-MM")
+    voice = script_json.get("voice_actor") or voice
+
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
     wav_path = _gemini_tts(
@@ -63,5 +66,6 @@ def generate_voice(
         voice=voice,
         style=style,
         output_path=output_path,
+        language=language,
     )
     return wav_path

@@ -32,6 +32,11 @@ def run_adk_pipeline(
     topic: str,
     duration_mode: str = "short",
     job_dir: Path | None = None,
+    studio_name: str = "FYF Studio",
+    language: str = "my-MM",
+    genre: str = "explainer",
+    presenter_mode: str = "on_screen",
+    voice_actor: str = "Sadaltager",
 ) -> dict[str, Any]:
     """Execute the ADK Producer Agent story generation pipeline via Google ADK Runner.
 
@@ -43,6 +48,11 @@ def run_adk_pipeline(
         topic: Topic or draft input.
         duration_mode: Target duration ("short" or "standard").
         job_dir: Optional job directory to persist intermediate artifacts.
+        studio_name: Name of the studio or channel.
+        language: Language code ("my-MM" or "en-US").
+        genre: Production genre ("explainer", "cinematic_documentary", etc.).
+        presenter_mode: "on_screen" or "voiceover_only".
+        voice_actor: Selected Gemini voice actor.
 
     Returns:
         Dictionary containing the completed VideoScript, narration draft, and audit report.
@@ -50,8 +60,13 @@ def run_adk_pipeline(
     Raises:
         RuntimeError or Provider exception if ADK execution fails.
     """
-    logger.info("Initializing Google ADK Producer Agent & Runner for topic: %s (mode: %s)", topic, duration_mode)
-    producer_agent = create_fyf_producer_agent()
+    logger.info("Initializing Google ADK Producer Agent & Runner for topic: %s (mode: %s, lang: %s, studio: %s)", topic, duration_mode, language, studio_name)
+    producer_agent = create_fyf_producer_agent(
+        language=language,
+        genre=genre,
+        presenter_mode=presenter_mode,
+        studio_name=studio_name,
+    )
     session_service = InMemorySessionService()
     session_id = f"fyf-session-{uuid.uuid4().hex[:8]}"
     user_id = "fyf-producer-user"
@@ -64,10 +79,15 @@ def run_adk_pipeline(
         auto_create_session=True,
     )
 
+    if language == "en-US":
+        msg_text = f"Produce an evidence-led English cinema video script for {studio_name} on topic: '{topic}'. Genre: {genre}. Presenter mode: {presenter_mode}. Duration mode: {duration_mode}."
+    else:
+        msg_text = f"Produce an evidence-led Burmese video script for topic: '{topic}'. Duration mode: {duration_mode}."
+
     user_message = types.Content(
         role="user",
         parts=[types.Part.from_text(
-            text=f"Produce an evidence-led Burmese video script for topic: '{topic}'. Duration mode: {duration_mode}."
+            text=msg_text
         )],
     )
 
@@ -176,6 +196,18 @@ def run_adk_pipeline(
     if not script_data:
         raise RuntimeError("ADK Runner execution completed without producing a valid VideoScript.")
 
+    # The request owns production metadata. ADK tool responses may omit these
+    # optional fields (or echo an older default), so carry the selected studio,
+    # language, genre, presenter, and voice through the persisted script that
+    # downstream rendering and TTS consume.
+    script_data = {
+        **script_data,
+        "studio_name": studio_name,
+        "language": language,
+        "genre": genre,
+        "presenter_mode": presenter_mode,
+        "voice_actor": voice_actor,
+    }
     validated = VideoScript.model_validate(script_data).model_dump(mode="json")
     if job_dir:
         if collected_artifacts.get("research"):

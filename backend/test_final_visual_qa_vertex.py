@@ -467,6 +467,70 @@ class FinalVisualQATests(unittest.TestCase):
         self.assertIn("Reject English or other foreign-language explanatory text", prompt)
         self.assertFalse(report["passed"])
 
+    def test_english_language_policy_reaches_batch_and_individual_paths(self):
+        client = MagicMock()
+        client.models.generate_content.side_effect = [
+            SimpleNamespace(text='{"items":"malformed"}'),
+            self.passing_response("c1"),
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            script = script_fixture()
+            script["language"] = "en-US"
+            (root / "script.json").write_text(
+                json.dumps(script, ensure_ascii=False), encoding="utf-8"
+            )
+            (root / "render_input.json").write_text(json.dumps({
+                "fps": 30, "segments": [{"id": "s1", "startFrame": 0, "endFrame": 300}],
+            }), encoding="utf-8")
+            (root / "video.mp4").write_bytes(b"video")
+            with patch("backend.final_visual_qa_vertex._client", return_value=client), patch(
+                "backend.final_visual_qa_vertex._extract_frame",
+                side_effect=lambda video, seconds, output: output.write_bytes(b"jpg"),
+            ):
+                report = verify_final_rendered_meaning(str(root))
+
+        self.assertTrue(report["passed"])
+        batch_prompt = client.models.generate_content.call_args_list[0].kwargs["contents"][0]
+        individual_prompt = client.models.generate_content.call_args_list[1].kwargs["contents"][0]
+        for prompt in (batch_prompt, individual_prompt):
+            self.assertIn("English-speaking beginner", prompt)
+            self.assertIn("English explanatory text", prompt)
+            self.assertNotIn("Burmese-speaking beginner", prompt)
+            self.assertNotIn("Reject English or other foreign-language explanatory text", prompt)
+
+    def test_script_language_change_invalidates_cached_qa_result(self):
+        client = MagicMock()
+        client.models.generate_content.side_effect = [
+            self.passing_batch_response_for("s1"),
+            self.passing_batch_response_for("s1"),
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            script = script_fixture()
+            script["language"] = "en-US"
+            (root / "script.json").write_text(
+                json.dumps(script, ensure_ascii=False), encoding="utf-8"
+            )
+            (root / "render_input.json").write_text(json.dumps({
+                "fps": 30, "segments": [{"id": "s1", "startFrame": 0, "endFrame": 300}],
+            }), encoding="utf-8")
+            (root / "video.mp4").write_bytes(b"video")
+            with patch("backend.final_visual_qa_vertex._client", return_value=client), patch(
+                "backend.final_visual_qa_vertex._extract_frame",
+                side_effect=lambda video, seconds, output: output.write_bytes(b"jpg"),
+            ):
+                first = verify_final_rendered_meaning(str(root))
+                script["language"] = "my-MM"
+                (root / "script.json").write_text(
+                    json.dumps(script, ensure_ascii=False), encoding="utf-8"
+                )
+                second = verify_final_rendered_meaning(str(root))
+
+        self.assertTrue(first["passed"])
+        self.assertTrue(second["passed"])
+        self.assertEqual(client.models.generate_content.call_count, 2)
+
     def test_partial_checkpoint_resumes_only_unfinished_segments(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -565,6 +629,8 @@ class FinalVisualQATests(unittest.TestCase):
         self.assertEqual(client.models.generate_content.call_count, 2)
 
     def test_prompt_contract_change_invalidates_every_scene_result(self):
+        from backend.final_visual_qa_vertex import QA_PROMPT_VERSION
+
         client = MagicMock()
         client.models.generate_content.side_effect = [
             self.passing_batch_response_for("s1", "s2"),
@@ -578,7 +644,10 @@ class FinalVisualQATests(unittest.TestCase):
                 side_effect=lambda video, seconds, output: output.write_bytes(b"jpg"),
             ):
                 verify_final_rendered_meaning(str(root))
-                with patch("backend.final_visual_qa_vertex.QA_PROMPT_VERSION", 2):
+                with patch(
+                    "backend.final_visual_qa_vertex.QA_PROMPT_VERSION",
+                    QA_PROMPT_VERSION + 1,
+                ):
                     report = verify_final_rendered_meaning(str(root))
 
         self.assertTrue(report["passed"])

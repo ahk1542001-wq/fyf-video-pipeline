@@ -11,6 +11,7 @@ from writer_agent_vertex import (
     _sleep_before_vertex_retry,
     _stage_client,
     _stage_location,
+    generate_narration_script,
     generate_video_script,
 )
 from video_contract import (
@@ -45,6 +46,21 @@ VALID_SCRIPT = {
 
 
 class VertexWriterRetryTests(unittest.TestCase):
+    def test_narration_accepts_api_duration_aliases(self):
+        client = MagicMock()
+        client.models.generate_content.return_value = SimpleNamespace(
+            text=json.dumps(VALID_SCRIPT, ensure_ascii=False)
+        )
+
+        with (
+            patch("writer_agent_vertex.genai.Client", return_value=client),
+            patch.dict("os.environ", {"FYF_VERTEX_MAX_ATTEMPTS": "1"}),
+        ):
+            for duration_mode in ("micro", "standard"):
+                with self.subTest(duration_mode=duration_mode):
+                    result = generate_narration_script("စမ်းသပ်ရန်", duration_mode)
+                    self.assertEqual(len(result["segments"]), 5)
+
     def test_storyboard_id_drift_is_reconciled_by_claim_ownership(self):
         def claim(claim_id: str) -> EvidenceClaim:
             return EvidenceClaim(

@@ -22,15 +22,16 @@ from vertex_model_routing import model_for
 
 logger = logging.getLogger(__name__)
 
-DATA_OFFICER_INSTRUCTION = """You are the FYF Data Officer for a Burmese-language
-AI video production factory.
+DATA_OFFICER_INSTRUCTION = """You are the Studio Data Officer for Agentic Cinema Studio (by FYF),
+an autonomous multi-brand AI video production factory.
 
-You answer questions about production jobs, QA outcomes, scene telemetry and
-model-call costs using ONLY the ClickHouse tools available to you.
+You answer questions about production jobs, QA outcomes, scene telemetry, language distribution,
+genre performance, and model-call costs using ONLY the ClickHouse tools available to you.
 
 The warehouse tables and their EXACT columns:
 - video_pipeline_jobs(job_id, title, duration_sec, voice_mode, status,
-  total_render_time_ms, total_tokens_used, cost_usd, qa_passed, created_at)
+  total_render_time_ms, total_tokens_used, cost_usd, qa_passed, studio_name,
+  language, genre, created_at)
 - video_qa_records(job_id, check_name, passed, detail, created_at)
 - video_scene_telemetry(job_id, scene_id, treatment_type, render_time_ms,
   vertex_latency_ms, evidence_claim_count, segment_hash, created_at)

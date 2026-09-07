@@ -7,7 +7,7 @@ import {
   useVideoConfig,
   Audio,
 } from "remotion";
-import { theme } from "./theme";
+import { theme, getFonts } from "./theme";
 import { MascotAnimator } from "./MascotAnimator";
 import { RenderInput } from "./types";
 import {
@@ -21,6 +21,10 @@ import {
 } from "./components";
 import { SemanticVisual } from "./SemanticVisual";
 import { TypedVisual } from "./TypedVisual";
+import { CallToAction } from "./CallToAction";
+import { ProgressBar } from "./ProgressBar";
+import { normalizeRenderControls } from "./renderControls";
+import { studioBranding } from "./studioBranding";
 import {
   CinematicVisual,
   isCinematicVisual,
@@ -31,6 +35,11 @@ export const VideoPipeline: React.FC<RenderInput> = (props) => {
   const frame = useCurrentFrame();
   const { durationInFrames, fps } = useVideoConfig();
   const { title, segments, audioSrc, mouthCues } = props;
+  const renderControls = normalizeRenderControls(props);
+  const fonts = getFonts(props.language);
+  const branding = studioBranding(props.studio_name);
+  const isEnglish = props.language === "en-US" || props.language === "en";
+  const isVoiceoverOnly = props.presenter_mode === "voiceover_only";
 
   // Current segment based on frame
   const currentSegment = segments.find(
@@ -39,18 +48,12 @@ export const VideoPipeline: React.FC<RenderInput> = (props) => {
   const isDemo = currentSegment?.scene_type === "demo";
   const localFrame = frame - (currentSegment?.startFrame ?? 0);
   const cinematic = isCinematicVisual(currentSegment?.visual);
-  const showMascot = !cinematic || shouldShowCinematicMascot(
+  const showMascot = !isVoiceoverOnly && (!cinematic || shouldShowCinematicMascot(
     currentSegment?.visual,
     localFrame,
     fps,
     currentSegment ? currentSegment.endFrame - currentSegment.startFrame : undefined,
-  );
-
-  // Progress (for the top progress bar)
-  const progress = interpolate(frame, [0, durationInFrames], [0, 1], {
-    extrapolateLeft: "clamp",
-    extrapolateRight: "clamp",
-  });
+  ));
 
   return (
     <AbsoluteFill style={{ background: theme.colors.bg, overflow: "hidden" }}>
@@ -75,32 +78,14 @@ export const VideoPipeline: React.FC<RenderInput> = (props) => {
       )}
 
       {/* Layer 2: content */}
-      {/* Top progress bar */}
-      <div style={{ position: "absolute", top: cinematic ? 62 : 120, left: 80, right: 80 }}>
-        <div
-          style={{
-            height: 5,
-            background: theme.colors.accent,
-            borderRadius: 3,
-            overflow: "hidden",
-          }}
-        >
-          <div
-            style={{
-              height: "100%",
-              width: `${progress * 100}%`,
-              background: theme.colors.primary,
-              borderRadius: 3,
-            }}
-          />
-        </div>
-      </div>
+      {renderControls.retention_progress_bar && <ProgressBar position="top" />}
 
       {/* Scene badge */}
       {!cinematic && <div style={{ position: "absolute", top: 150, left: 80, zIndex: 20 }}>
-        <Entrance>
+        <Entrance animate={renderControls.animated_lower_thirds}>
           <span
             style={{
+              fontFamily: fonts.body,
               background: theme.colors.accent,
               color: theme.colors.text,
               fontSize: 15,
@@ -111,24 +96,24 @@ export const VideoPipeline: React.FC<RenderInput> = (props) => {
           >
             {currentSegment?.visual
               ? `${
-                  currentSegment.visual.kind === 'inventory_mismatch' ? 'စာရင်းကွာဟချက်' :
-                  currentSegment.visual.kind === 'approval_gate' ? 'လူသားစစ်ဆေးမှု' :
-                  currentSegment.visual.kind === 'inventory_correction' ? 'စနစ်ပြင်ဆင်မှု' :
-                  currentSegment.visual.kind === 'auto_action' ? 'အလိုအလျောက်လုပ်ဆောင်မှု' :
-                  currentSegment.visual.kind === 'consequence' ? 'အကျိုးဆက်' :
-                  currentSegment.visual.kind === 'process_timeline' ? 'လုပ်ငန်းစဉ်' :
-                  currentSegment.visual.kind === 'human_verification' ? 'လူသားစစ်ဆေးမှု' :
-                  currentSegment.visual.kind === 'approval_record' ? 'အတည်ပြုမှတ်တမ်း' :
-                  currentSegment.visual.kind === 'balance_pair' ? 'ဟန်ချက်ညီမှု' :
-    currentSegment.visual.kind === 'outro' ? 'နိဂုံး' :
-    'အထွေထွေ'
+                  currentSegment.visual.kind === 'inventory_mismatch' ? (isEnglish ? 'Inventory Mismatch' : 'စာရင်းကွာဟချက်') :
+                  currentSegment.visual.kind === 'approval_gate' ? (isEnglish ? 'Human Gate' : 'လူသားစစ်ဆေးမှု') :
+                  currentSegment.visual.kind === 'inventory_correction' ? (isEnglish ? 'System Correction' : 'စနစ်ပြင်ဆင်မှု') :
+                  currentSegment.visual.kind === 'auto_action' ? (isEnglish ? 'Automated Action' : 'အလိုအလျောက်လုပ်ဆောင်မှု') :
+                  currentSegment.visual.kind === 'consequence' ? (isEnglish ? 'Consequence' : 'အကျိုးဆက်') :
+                  currentSegment.visual.kind === 'process_timeline' ? (isEnglish ? 'Workflow' : 'လုပ်ငန်းစဉ်') :
+                  currentSegment.visual.kind === 'human_verification' ? (isEnglish ? 'Human Verification' : 'လူသားစစ်ဆေးမှု') :
+                  currentSegment.visual.kind === 'approval_record' ? (isEnglish ? 'Audit Record' : 'အတည်ပြုမှတ်တမ်း') :
+                  currentSegment.visual.kind === 'balance_pair' ? (isEnglish ? 'Balance' : 'ဟန်ချက်ညီမှု') :
+                  currentSegment.visual.kind === 'outro' ? (isEnglish ? 'Conclusion' : 'နိဂုံး') :
+                  (isEnglish ? 'General' : 'အထွေထွေ')
                 }${
-                  currentSegment.visual.phase === 'in_progress' ? ' - စစ်ဆေးနေဆဲ' :
-                  currentSegment.visual.phase === 'alert' ? ' - သတိပေးချက်' :
-                  currentSegment.visual.phase === 'completed' && currentSegment.visual.kind === 'auto_action' && currentSegment.visual.action === 'pause_notify' ? ' - လူထံလွှဲပြောင်းပြီး' :
-                  currentSegment.visual.phase === 'completed' ? ' - ပြီးစီး' : ''
+                  currentSegment.visual.phase === 'in_progress' ? (isEnglish ? ' - In Progress' : ' - စစ်ဆေးနေဆဲ') :
+                  currentSegment.visual.phase === 'alert' ? (isEnglish ? ' - Alert' : ' - သတိပေးချက်') :
+                  currentSegment.visual.phase === 'completed' && currentSegment.visual.kind === 'auto_action' && currentSegment.visual.action === 'pause_notify' ? (isEnglish ? ' - Handed Off' : ' - လူထံလွှဲပြောင်းပြီး') :
+                  currentSegment.visual.phase === 'completed' ? (isEnglish ? ' - Completed' : ' - ပြီးစီး') : ''
                 }`
-              : (isDemo ? "လက်တွေ့ပြသမှု" : "ရှင်းလင်းချက်")}
+              : (isDemo ? (isEnglish ? "Live Demo" : "လက်တွေ့ပြသမှု") : (isEnglish ? "Explainer" : "ရှင်းလင်းချက်"))}
           </span>
         </Entrance>
       </div>}
@@ -150,7 +135,7 @@ export const VideoPipeline: React.FC<RenderInput> = (props) => {
           <Entrance delay={5}>
             <p
               style={{
-                fontFamily: theme.fonts.display,
+                fontFamily: fonts.display,
                 fontWeight: 700,
                 fontSize: 44,
                 letterSpacing: 0,
@@ -191,6 +176,7 @@ export const VideoPipeline: React.FC<RenderInput> = (props) => {
                 highlight={false} // Use markdown bold for selective highlight, not global highlight
                 startFrame={currentSegment.startFrame}
                 emphasis={currentSegment.emphasis}
+                fontFamily={fonts.display}
               />
             </Breathe>
           ) : null}
@@ -207,7 +193,7 @@ export const VideoPipeline: React.FC<RenderInput> = (props) => {
       mascotPosition="bottom_left"
     />}
 
-      {/* FYF logo mark (bottom-right) */}
+      {/* Studio logo mark (bottom-right) */}
       <div
         style={{
           position: "absolute",
@@ -221,31 +207,33 @@ export const VideoPipeline: React.FC<RenderInput> = (props) => {
             <p
               key="1"
               style={{
-                fontFamily: theme.fonts.display,
+                fontFamily: fonts.display,
                 fontWeight: 700,
                 fontSize: 24,
                 color: theme.colors.text,
                 margin: 0,
               }}
             >
-              FYF
+              {branding.name}
             </p>,
             <p
               key="2"
               style={{
-                fontFamily: theme.fonts.body,
+                fontFamily: fonts.body,
                 fontSize: 13,
                 color: theme.colors.textDim,
                 margin: "2px 0 0 0",
               }}
             >
-              Understand AI. Build Real Systems.
+              {branding.tagline}
             </p>,
           ]}
           start={fps}
           per={6}
         />
       </div>
+
+      {renderControls.cta_text && <CallToAction text={renderControls.cta_text} />}
 
       {/* Layer 4: color grade (subtle warm tint) */}
       <div

@@ -50,12 +50,15 @@ def synthesize_voice(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Generate TTS audio via Gemini
-    generated_path_str = generate_gemini_tts(
-        text=full_text,
-        voice=voice,
-        style=style,
-        output_path=str(output_path),
-    )
+    tts_kwargs = {
+        "text": full_text,
+        "voice": voice,
+        "style": style,
+        "output_path": str(output_path),
+    }
+    if language != "my-MM":
+        tts_kwargs["language"] = language
+    generated_path_str = generate_gemini_tts(**tts_kwargs)
     generated_path = Path(generated_path_str)
 
     # If the output path was changed (e.g. mp3 -> wav), ensure it matches

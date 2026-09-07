@@ -146,3 +146,18 @@ export function selectActiveTreatment(
 export function routeTreatment(input: TreatmentInput): TreatmentRoute {
   return { ...input, ...resolveTreatment(input) };
 }
+
+export function resolveTypography(language?: string) {
+  if (language === "en-US" || language === "en") {
+    return {
+      display: "'Cinzel', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
+      body: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
+      mono: "'JetBrains Mono', 'Courier New', monospace",
+    };
+  }
+  return {
+    display: "'Noto Sans Myanmar', Arial, 'Helvetica Neue', sans-serif",
+    body: "'Noto Sans Myanmar', Arial, 'Helvetica Neue', sans-serif",
+    mono: "'JetBrains Mono', monospace",
+  };
+}

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import StudioHeader from "../../components/studio-header";
 import {
   API_URL,
@@ -15,6 +15,35 @@ type JobTelemetryResponse = {
   job: JobTelemetry;
   scenes: SceneTelemetry[];
 };
+
+interface QueryResult {
+  columns: string[];
+  rows: (string | number | boolean | null)[][];
+  row_count: number;
+  duration_ms: number;
+  source: string;
+}
+
+type QueryId = "jobs_overview" | "model_calls" | "scene_latency" | "cost_summary";
+
+const PRESET_QUERIES: Array<{ label: string; queryId: QueryId }> = [
+  {
+    label: "Jobs Summary",
+    queryId: "jobs_overview",
+  },
+  {
+    label: "Model Usage",
+    queryId: "model_calls",
+  },
+  {
+    label: "Scene Latencies",
+    queryId: "scene_latency",
+  },
+  {
+    label: "Cost Summary",
+    queryId: "cost_summary",
+  },
+];
 
 function formatCount(value: number | null | undefined): string {
   return value === null || value === undefined ? "—" : value.toLocaleString();
@@ -34,6 +63,12 @@ function statusTone(status: string | null | undefined): string {
   return "text-[#30382C]/70 bg-[#30382C]/5 border-[#30382C]/10";
 }
 
+function existingGenerationAccessHeaders(): HeadersInit {
+  if (typeof window === "undefined") return {};
+  const token = window.sessionStorage.getItem("fyf-generation-access")?.trim();
+  return token ? { "X-FYF-Access-Token": token } : {};
+}
+
 export default function TelemetryPage() {
   const [runtime, setRuntime] = useState<RuntimeInfo>(STATIC_RUNTIME_FALLBACK);
   const [runtimeSource, setRuntimeSource] = useState<"api" | "fallback">("fallback");
@@ -41,11 +76,99 @@ export default function TelemetryPage() {
   const [selectedJobId, setSelectedJobId] = useState<string>("");
   const [jobDetails, setJobDetails] = useState<JobTelemetryResponse | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [lastSynced, setLastSynced] = useState<string>("");
+  const [autoRefresh, setAutoRefresh] = useState(false);
+
+  // ClickHouse Query Console
+  const [selectedQueryId, setSelectedQueryId] = useState<QueryId>(PRESET_QUERIES[0].queryId);
+  const [queryResult, setQueryResult] = useState<QueryResult | null>(null);
+  const [queryLoading, setQueryLoading] = useState(false);
+  const [queryError, setQueryError] = useState<string | null>(null);
+
+  // Data Officer state
   const [officerQuestion, setOfficerQuestion] = useState("");
   const [officerAnswer, setOfficerAnswer] = useState<string | null>(null);
   const [officerToolUsed, setOfficerToolUsed] = useState(false);
   const [officerBusy, setOfficerBusy] = useState(false);
   const [officerError, setOfficerError] = useState<string | null>(null);
+
+  const loadData = useCallback(async () => {
+    setIsLoading(true);
+    try {
+      // 1. Fetch runtime
+      const runtimeRes = await fetch(`${API_URL}/api/runtime`).catch(() => null);
+      if (runtimeRes && runtimeRes.ok) {
+        const rData = await runtimeRes.json();
+        setRuntime(rData);
+        setRuntimeSource("api");
+      }
+
+      // 2. Fetch telemetry overview
+      const telRes = await fetch(`${API_URL}/api/telemetry`).catch(() => null);
+      if (telRes && telRes.ok) {
+        const tData = await telRes.json();
+        setSummary(tData);
+        if (!selectedJobId && Array.isArray(tData.jobs) && tData.jobs.length > 0) {
+          setSelectedJobId(tData.jobs[0].job_id);
+        }
+      }
+
+      // 3. Fetch selected job details
+      if (selectedJobId) {
+        const jobRes = await fetch(`${API_URL}/api/jobs/${selectedJobId}/telemetry`).catch(() => null);
+        if (jobRes && jobRes.ok) {
+          const jData = await jobRes.json();
+          setJobDetails(jData);
+        }
+      }
+      setLastSynced(new Date().toLocaleTimeString());
+    } catch (err) {
+      console.error("Telemetry load failed:", err);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [selectedJobId]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void loadData();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [loadData]);
+
+  // Auto-refresh interval
+  useEffect(() => {
+    if (!autoRefresh) return;
+    const timer = setInterval(() => {
+      void loadData();
+    }, 15000);
+    return () => clearInterval(timer);
+  }, [autoRefresh, loadData]);
+
+  async function runClickHouseQuery(queryId: QueryId = selectedQueryId) {
+    if (queryLoading) return;
+    setQueryLoading(true);
+    setQueryError(null);
+    try {
+      const res = await fetch(`${API_URL}/api/clickhouse/query`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...existingGenerationAccessHeaders(),
+        },
+        body: JSON.stringify({ query_id: queryId }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(typeof data.detail === "string" ? data.detail : "Query execution failed");
+      }
+      setQueryResult(data as QueryResult);
+    } catch (err) {
+      setQueryError(err instanceof Error ? err.message : "Query execution failed");
+    } finally {
+      setQueryLoading(false);
+    }
+  }
 
   async function askDataOfficer(event: React.FormEvent) {
     event.preventDefault();
@@ -58,7 +181,10 @@ export default function TelemetryPage() {
     try {
       const res = await fetch(`${API_URL}/api/insights`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...existingGenerationAccessHeaders(),
+        },
         body: JSON.stringify({ question }),
       });
       const data = await res.json().catch(() => ({}));
@@ -74,47 +200,8 @@ export default function TelemetryPage() {
     }
   }
 
-  useEffect(() => {
-    async function loadData() {
-      setIsLoading(true);
-      try {
-        // 1. Fetch runtime
-        const runtimeRes = await fetch(`${API_URL}/api/runtime`).catch(() => null);
-        if (runtimeRes && runtimeRes.ok) {
-          const rData = await runtimeRes.json();
-          setRuntime(rData);
-          setRuntimeSource("api");
-        }
-
-        // 2. Fetch telemetry overview
-        const telRes = await fetch(`${API_URL}/api/telemetry`).catch(() => null);
-        if (telRes && telRes.ok) {
-          const tData = await telRes.json();
-          setSummary(tData);
-          if (!selectedJobId && Array.isArray(tData.jobs) && tData.jobs.length > 0) {
-            setSelectedJobId(tData.jobs[0].job_id);
-          }
-        }
-
-        // 3. Fetch the selected job details after the overview identifies a real job.
-        if (selectedJobId) {
-          const jobRes = await fetch(`${API_URL}/api/jobs/${selectedJobId}/telemetry`).catch(() => null);
-          if (jobRes && jobRes.ok) {
-            const jData = await jobRes.json();
-            setJobDetails(jData);
-          }
-        }
-      } catch (err) {
-        console.error("Telemetry load failed:", err);
-      } finally {
-        setIsLoading(false);
-      }
-    }
-    loadData();
-  }, [selectedJobId]);
-
   return (
-    <div className="min-h-screen bg-[#F4F0E6] text-[#30382C]">
+    <div className="min-h-screen bg-[#F4F0E6] text-[#30382C] overflow-x-hidden">
       <StudioHeader runtime={runtime} runtimeSource={runtimeSource} />
 
       <main className="max-w-6xl mx-auto px-6 py-8">
@@ -124,7 +211,7 @@ export default function TelemetryPage() {
             <div className="flex flex-wrap items-center gap-3 mb-2">
               <h1 className="text-2xl font-black tracking-tight">⚡ Generation telemetry</h1>
               <span className="bg-[#16856B]/15 text-[#16856B] text-xs font-bold px-2.5 py-1 rounded-md border border-[#16856B]/30">
-                In-app cloud view
+                ClickHouse &amp; Cloud View
               </span>
             </div>
             <p className="text-sm opacity-80 max-w-2xl">
@@ -132,8 +219,27 @@ export default function TelemetryPage() {
             </p>
           </div>
 
-          <div className="flex items-center gap-3">
-            {isLoading && <span className="text-xs font-semibold opacity-60" aria-live="polite">Syncing…</span>}
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={() => void loadData()}
+              className="button button--secondary button--compact text-xs"
+              disabled={isLoading}
+            >
+              {isLoading ? "Syncing…" : "↻ Refresh Ledger"}
+            </button>
+            <button
+              type="button"
+              onClick={() => setAutoRefresh(prev => !prev)}
+              className={`button button--compact text-xs ${autoRefresh ? "button--primary" : "button--secondary"}`}
+            >
+              Auto-sync: {autoRefresh ? "ON (15s)" : "OFF"}
+            </button>
+            {lastSynced && (
+              <span className="text-[11px] opacity-60 font-mono">
+                Last synced: {lastSynced}
+              </span>
+            )}
             <span className="inline-flex items-center gap-2 bg-[#FFFFFF] px-3.5 py-1.5 rounded-lg border border-[#30382C]/15 text-xs font-semibold shadow-xs max-w-full">
               <span className="w-2 h-2 rounded-full bg-[#16856B] animate-pulse" />
               <span className="truncate">Primary: {runtime.script_model}</span>
@@ -179,7 +285,7 @@ export default function TelemetryPage() {
             </div>
 
             <div className="flex flex-wrap items-center justify-end gap-2 max-w-2xl">
-              {(summary?.jobs || []).slice(0, 6).map(job => {
+              {(summary?.jobs || []).slice(0, 8).map(job => {
                 const selected = selectedJobId === job.job_id;
                 return (
                   <button
@@ -250,8 +356,8 @@ export default function TelemetryPage() {
           {/* Scene Latency Waterfall Chart */}
           <div className="mb-6">
             <div className="flex items-center justify-between mb-3 text-xs font-semibold opacity-75">
-              <span>Scene ID & Treatment Grammar</span>
-              <span>Render Latency (ms) & Vertex Latency (ms)</span>
+              <span>Scene ID &amp; Treatment Grammar</span>
+              <span>Render Latency (ms) &amp; Vertex Latency (ms)</span>
             </div>
 
             <div className="space-y-2 max-h-96 overflow-y-auto pr-2">
@@ -296,6 +402,111 @@ export default function TelemetryPage() {
             </div>
           </div>
         </div>
+
+        {/* ClickHouse Interactive Query Console */}
+        <section className="bg-[#FFFFFF] rounded-xl border border-[#30382C]/15 p-6 shadow-xs mb-8">
+          <div className="flex flex-wrap items-center justify-between gap-4 mb-4 pb-3 border-b border-[#30382C]/10">
+            <div>
+              <div className="flex items-center gap-2">
+                <h3 className="text-md font-bold text-[#30382C]">📊 ClickHouse query console</h3>
+                <span className="text-xs bg-[#2563EB]/15 text-[#2563EB] font-bold px-2.5 py-0.5 rounded-full">
+                  SQL Query Interface
+                </span>
+              </div>
+              <p className="text-xs opacity-75 mt-1">
+                Run a bounded read-only view against ClickHouse Cloud tables with local mirror failover.
+              </p>
+            </div>
+          </div>
+
+          {/* Quick preset query pills */}
+          <div className="flex flex-wrap gap-2 mb-3">
+            <label htmlFor="clickhouse-query-selector" className="text-xs font-semibold self-center opacity-70">View:</label>
+            <select
+              id="clickhouse-query-selector"
+              value={selectedQueryId}
+              onChange={(event) => setSelectedQueryId(event.target.value as QueryId)}
+              className="px-3 py-1.5 text-xs rounded-md border border-[#30382C]/20 bg-[#F4F0E6] text-[#30382C] focus:outline-none focus:border-[#16856B]"
+            >
+              {PRESET_QUERIES.map((preset) => (
+                <option key={preset.queryId} value={preset.queryId}>{preset.label}</option>
+              ))}
+            </select>
+            <span className="text-xs font-semibold self-center opacity-70">Presets:</span>
+            {PRESET_QUERIES.map((p) => (
+              <button
+                key={p.label}
+                type="button"
+                className="button button--secondary button--compact text-xs"
+                onClick={() => {
+                  setSelectedQueryId(p.queryId);
+                  void runClickHouseQuery(p.queryId);
+                }}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
+
+          <div className="flex flex-col gap-3">
+            <div className="flex items-center justify-between">
+              <button
+                type="button"
+                id="run-query-button"
+                onClick={() => void runClickHouseQuery()}
+                disabled={queryLoading}
+                className="button button--primary button--compact"
+              >
+                {queryLoading ? "Executing query…" : "▶ Run Query"}
+              </button>
+              {queryResult && (
+                <div className="flex items-center gap-3 text-xs opacity-75 font-mono">
+                  <span>Rows: <strong>{queryResult.row_count}</strong></span>
+                  <span>Latency: <strong>{queryResult.duration_ms}ms</strong></span>
+                  <span className="text-[#16856B]">Source: {queryResult.source}</span>
+                </div>
+              )}
+            </div>
+
+            {queryError && (
+              <div role="alert" className="p-3 text-xs bg-[#FEE2E2] text-[#991B1B] border border-[#FCA5A5] rounded-lg">
+                {queryError}
+              </div>
+            )}
+
+            {queryResult && (
+              <div className="mt-3 overflow-x-auto max-h-80 border border-[#30382C]/10 rounded-lg">
+                <table className="w-full text-left text-xs border-collapse font-mono">
+                  <thead>
+                    <tr className="bg-[#F4F0E6] text-[#30382C] border-b border-[#30382C]/15">
+                      {queryResult.columns.map((col, idx) => (
+                        <th key={idx} className="p-2.5 font-bold">{col}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {queryResult.rows.map((row, rIdx) => (
+                      <tr key={rIdx} className="border-b border-[#30382C]/5 hover:bg-[#F4F0E6]/50">
+                        {row.map((cell, cIdx) => (
+                          <td key={cIdx} className="p-2.5 opacity-90 truncate max-w-xs">
+                            {cell === null ? <em className="opacity-50">null</em> : String(cell)}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                    {queryResult.rows.length === 0 && (
+                      <tr>
+                        <td colSpan={queryResult.columns.length || 1} className="p-4 text-center opacity-60">
+                          Query returned 0 rows.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </section>
 
         {/* Privacy and partner boundary */}
         <section className="bg-[#FFFFFF] rounded-xl border border-[#30382C]/15 p-6 shadow-xs">

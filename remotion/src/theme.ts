@@ -18,6 +18,11 @@ export const theme = {
     body: "'Noto Sans Myanmar', Arial, 'Helvetica Neue', sans-serif",
     mono: "'JetBrains Mono', monospace",
   },
+  englishFonts: {
+    display: "'Cinzel', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
+    body: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
+    mono: "'JetBrains Mono', 'Courier New', monospace",
+  },
   // THE easing curves. Linear is forbidden.
   ease: {
     out: Easing.bezier(0.16, 1, 0.3, 1), // easeOutExpo — entrances
@@ -30,3 +35,10 @@ export const theme = {
     bouncy: { damping: 11, stiffness: 170, mass: 0.7 }, // playful accents
   },
 } as const;
+
+export const getFonts = (language?: string) => {
+  if (language === "en-US" || language === "en") {
+    return theme.englishFonts;
+  }
+  return theme.fonts;
+};

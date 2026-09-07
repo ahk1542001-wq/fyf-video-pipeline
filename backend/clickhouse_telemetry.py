@@ -67,6 +67,9 @@ def _init_clickhouse_schema(client):
             total_tokens_used UInt32,
             cost_usd Float64,
             qa_passed UInt8,
+            studio_name String DEFAULT 'FYF Studio',
+            language String DEFAULT 'my-MM',
+            genre String DEFAULT 'explainer',
             created_at DateTime DEFAULT now()
         ) ENGINE = MergeTree()
         ORDER BY (job_id, created_at)
@@ -139,6 +142,9 @@ def record_job_telemetry(
     cost_usd: float,
     qa_passed: bool,
     base_dir: Optional[Path] = None,
+    studio_name: str = "FYF Studio",
+    language: str = "my-MM",
+    genre: str = "explainer",
 ) -> Dict[str, Any]:
     """Persist job-level telemetry to ClickHouse and local mirror."""
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -152,6 +158,9 @@ def record_job_telemetry(
         "total_tokens_used": total_tokens_used,
         "cost_usd": cost_usd,
         "qa_passed": int(qa_passed),
+        "studio_name": studio_name,
+        "language": language,
+        "genre": genre,
         "created_at": now_iso,
     }
 
@@ -168,11 +177,13 @@ def record_job_telemetry(
                 "video_pipeline_jobs",
                 [[
                     job_id, title, duration_sec, voice_mode, status,
-                    total_render_time_ms, total_tokens_used, cost_usd, int(qa_passed)
+                    total_render_time_ms, total_tokens_used, cost_usd, int(qa_passed),
+                    studio_name, language, genre,
                 ]],
                 column_names=[
                     "job_id", "title", "duration_sec", "voice_mode", "status",
-                    "total_render_time_ms", "total_tokens_used", "cost_usd", "qa_passed"
+                    "total_render_time_ms", "total_tokens_used", "cost_usd", "qa_passed",
+                    "studio_name", "language", "genre",
                 ]
             )
         except Exception as exc:

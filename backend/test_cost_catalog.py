@@ -17,3 +17,9 @@ def test_estimate_job_cost_unknown_model():
     est = estimate_job_cost("some-obscure-model-v99", input_tokens=10_000, output_tokens=2_000)
     assert est.cost_status == "unknown"
     assert est.estimated_cost_usd == 0.0
+
+
+def test_estimate_job_cost_missing_model_is_unknown():
+    est = estimate_job_cost("", input_tokens=10_000, output_tokens=2_000)
+    assert est.cost_status == "unknown"
+    assert est.estimated_cost_usd == 0.0

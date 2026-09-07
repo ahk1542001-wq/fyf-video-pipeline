@@ -164,7 +164,7 @@ Configuration is environment-driven (`CLICKHOUSE_HOST`, `CLICKHOUSE_PORT`, `CLIC
 
 ```bash
 gcloud auth login
-google_cloud_project=<your-project> bash scripts/deploy_cloudrun.sh
+PROJECT_ID=<your-project> bash scripts/deploy_cloudrun.sh
 ```
 
 The script enables required APIs, creates the Artifact Registry repository, uploads ClickHouse credentials to Secret Manager, builds the multi-stage image via Cloud Build, and deploys a gen2 Cloud Run service (Next.js standalone front door, FastAPI backend, Remotion + headless browser inside). See [docs/PROJECT_STRUCTURE.md](docs/PROJECT_STRUCTURE.md) for the repository map and [docs/decisions/](docs/decisions/) for the reasoning behind the architecture.

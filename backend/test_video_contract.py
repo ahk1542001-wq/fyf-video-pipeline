@@ -103,6 +103,26 @@ class VideoContractTests(unittest.TestCase):
     def test_legacy_script_validates(self):
         VideoScript.model_validate(SCRIPT)
 
+    def test_render_controls_survive_video_script_validation_and_serialization(self):
+        controls = {
+            "cta_text": "Learn more",
+            "retention_progress_bar": False,
+            "animated_lower_thirds": False,
+            "aspect_ratio": "16:9",
+        }
+        payload = {
+            **SCRIPT,
+            "render_controls": controls,
+            **controls,
+        }
+
+        validated = VideoScript.model_validate(payload)
+        serialized = validated.model_dump(mode="json")
+
+        self.assertEqual(serialized["render_controls"], controls)
+        for key, value in controls.items():
+            self.assertEqual(serialized[key], value)
+
     def test_directional_branch_supports_one_cause_with_parallel_outcomes(self):
         spec = MotionGraphicSpec.model_validate({
             "layout": "directional_branch",

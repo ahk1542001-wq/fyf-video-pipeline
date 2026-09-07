@@ -103,10 +103,16 @@ def apply_director_pass(script_data: dict[str, Any]) -> dict[str, Any]:
     script = VideoScript.model_validate(script_data).model_dump(mode="json")
     script = rebalance_creative_rhythm(script)
     _drop_partial_treatment_metadata(script)
+
+    is_voiceover_only = script.get("presenter_mode") == "voiceover_only"
     consecutive_mascot_segments = 0
     for segment in script["segments"]:
         visual = segment.get("visual") or {}
         shots = visual.get("evidence_shots", [])
+        if is_voiceover_only:
+            for shot in shots:
+                shot["mascot_presence"] = "none"
+            continue
         has_mascot = any(shot.get("mascot_presence") != "none" for shot in shots)
         consecutive_mascot_segments = consecutive_mascot_segments + 1 if has_mascot else 0
         if consecutive_mascot_segments >= 4:

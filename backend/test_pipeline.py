@@ -48,6 +48,52 @@ class TestPipeline(unittest.TestCase):
         self.plan_patch.stop()
         self.final_visual_patch.stop()
 
+    def test_terminal_telemetry_mirror_preserves_script_metadata(self):
+        from backend.pipeline import _mirror_job_telemetry_to_clickhouse
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            job_dir = Path(temp_dir) / "1234abcd"
+            job_dir.mkdir()
+            (job_dir / "status.json").write_text(
+                json.dumps({
+                    "job_id": job_dir.name,
+                    "status": "completed",
+                    "stage_timings": {"render": 1.25},
+                }),
+                encoding="utf-8",
+            )
+            (job_dir / "telemetry.json").write_text(
+                json.dumps({
+                    "summary": {
+                        "total_input_tokens": 11,
+                        "total_output_tokens": 7,
+                        "total_calls": 2,
+                    },
+                    "calls": [],
+                    "job_status": "completed",
+                }),
+                encoding="utf-8",
+            )
+
+            with patch("backend.telemetry_store.record_job_telemetry") as record:
+                _mirror_job_telemetry_to_clickhouse(
+                    job_dir.name,
+                    job_dir,
+                    {
+                        "title": "Cinema story",
+                        "studio_name": "Cinema Lab",
+                        "language": "en-US",
+                        "genre": "cinematic_documentary",
+                    },
+                )
+
+        self.assertTrue(record.called)
+        metrics = record.call_args.args[1]
+        self.assertEqual(metrics["studio_name"], "Cinema Lab")
+        self.assertEqual(metrics["language"], "en-US")
+        self.assertEqual(metrics["genre"], "cinematic_documentary")
+        self.assertIsNone(metrics.get("model_name"))
+
     def test_render_checkpoint_v2_records_strategy_and_accepts_legacy_monolithic(self):
         from backend.job_store import initialize_job_status, write_json_atomically
         from backend.pipeline import (

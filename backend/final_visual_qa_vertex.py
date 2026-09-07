@@ -24,8 +24,72 @@ from backend.vertex_thinking import generation_config_for
 
 CHECKPOINT_FILENAME = "final_visual_qa_checkpoint.json"
 QA_CHECKPOINT_VERSION = 2
-QA_PROMPT_VERSION = 1
+QA_PROMPT_VERSION = 2
 _SAFE_SEGMENT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+_BURMESE_QA_POLICY = (
+    "Pass only when an ordinary Burmese-speaking beginner can directly understand every locked "
+    "claim from the actual final composition. Reject missing values, wrong counts, misleading relations, "
+    "duplicate/overlapping content, unreadable focal evidence, or a claim visible "
+    "only in a decorative caption. Burmese script is the required audience language "
+    "and must never be rejected merely for not being English. Reject English or other "
+    "foreign-language explanatory text generated inside the visual when it is needed "
+    "to understand the comparison, relationship, value, or action. Allow only established "
+    "technical names such as AI, XAI, API, or a proper name. Generated media should be "
+    "text-free whenever the deterministic Burmese overlay carries the explanation. "
+    "Repeated sampled frames are acceptable for a deliberately held static shot; reject "
+    "duplication only when elements overlap or contradict each other."
+)
+
+_ENGLISH_QA_POLICY = (
+    "Pass only when an ordinary English-speaking beginner can directly understand every locked "
+    "claim from the actual final composition. Reject missing values, wrong counts, misleading relations, "
+    "duplicate/overlapping content, unreadable focal evidence, or a claim visible "
+    "only in a decorative caption. English is the required audience language and must never be "
+    "rejected merely for being English. Require English explanatory text generated inside the visual "
+    "when it is needed to understand the comparison, relationship, value, or action. Reject Burmese or "
+    "other foreign-language explanatory text in that role. Allow only established technical names such as "
+    "AI, XAI, API, or a proper name. Generated media should be text-free whenever the deterministic English "
+    "overlay carries the explanation. Repeated sampled frames are acceptable for a deliberately held static "
+    "shot; reject duplication only when elements overlap or contradict each other."
+)
+
+
+def _normalized_script_language(language: str | None) -> str:
+    """Return the persisted language code used by prompts and QA fingerprints."""
+    if not isinstance(language, str) or not language.strip():
+        return "my-MM"
+    return language.strip()
+
+
+def _audience_language_policy(language: str | None) -> str:
+    """Build the final-QA policy for the script's audience language.
+
+    ``my`` and ``en`` BCP-47 variants cover the language codes currently
+    supported by the studio. Unknown codes remain explicit instead of
+    silently inheriting the Burmese-only policy.
+    """
+    language_code = _normalized_script_language(language)
+    language_family = language_code.casefold().split("-", 1)[0]
+    if language_family == "my":
+        return _BURMESE_QA_POLICY
+    if language_family == "en":
+        return _ENGLISH_QA_POLICY
+    quoted_language = json.dumps(language_code, ensure_ascii=False)
+    return (
+        f"Pass only when an ordinary beginner who speaks the script language ({quoted_language}) "
+        "can directly understand every locked claim from the actual final composition. Reject missing "
+        "values, wrong counts, misleading relations, duplicate/overlapping content, unreadable focal "
+        "evidence, or a claim visible only in a decorative caption. The script language is the required "
+        f"audience language ({quoted_language}); require explanatory text in that language when needed "
+        "to understand the comparison, relationship, value, or action, and never reject it merely as "
+        "foreign. Reject explanatory text in another language in that role. Allow only established "
+        "technical names such as AI, XAI, API, or a proper name. Generated media should be text-free "
+        "whenever the deterministic overlay carries the explanation. Repeated sampled frames are "
+        "acceptable for a deliberately held static shot; reject duplication only when elements overlap "
+        "or contradict each other."
+    )
 
 
 class FinalVisualBatchItem(BaseModel):
@@ -57,6 +121,7 @@ def _final_qa_batch_size() -> int:
 
 def _qa_fingerprint(root: Path) -> str:
     digest = hashlib.sha256()
+    digest.update(f"qa_prompt_version:{QA_PROMPT_VERSION}".encode("utf-8"))
     digest.update(model_for("visual_verification").encode("utf-8"))
     digest.update(model_for("visual_verification_fallback").encode("utf-8"))
     for name in ("script.json", "render_input.json", "video.mp4"):
@@ -92,6 +157,7 @@ def segment_qa_fingerprint(
     render_segment: dict,
     media_fingerprint: str,
     media_source: str,
+    language: str = "my-MM",
 ) -> str:
     """Hash only the semantic-QA inputs for one rendered scene."""
     if not isinstance(segment_id, str) or not segment_id:
@@ -105,6 +171,7 @@ def segment_qa_fingerprint(
         "qa_prompt_version": QA_PROMPT_VERSION,
         "primary_model": model_for("visual_verification"),
         "fallback_model": model_for("visual_verification_fallback"),
+        "script_language": _normalized_script_language(language),
         "segment_id": segment_id,
         "locked_evidence_claims": claims,
         "render_input_segment": render_segment,
@@ -248,22 +315,17 @@ def _request_batch_verification(
     return _validate_batch_response(parsed, expected_segment_ids)
 
 
-def _scene_prompt(segment_id: str, claims: list[dict]) -> str:
+def _scene_prompt(
+    segment_id: str,
+    claims: list[dict],
+    language: str = "my-MM",
+) -> str:
     return (
         f"QA contract version {QA_PROMPT_VERSION}. Segment ID: {segment_id}. "
         "Act as the final FYF rendered-video evidence gate. The attached images are "
-        "chronological frames from one narrated segment. Pass only when an ordinary "
-        "Burmese-speaking beginner can directly understand every locked claim from the actual final "
-        "composition. Reject missing values, wrong counts, misleading relations, "
-        "duplicate/overlapping content, unreadable focal evidence, or a claim visible "
-        "only in a decorative caption. Burmese script is the required audience language "
-        "and must never be rejected merely for not being English. Reject English or other "
-        "foreign-language explanatory text generated inside the visual when it is needed "
-        "to understand the comparison, relationship, value, or action. Allow only established "
-        "technical names such as AI, XAI, API, or a proper name. Generated media should be "
-        "text-free whenever the deterministic Burmese overlay carries the explanation. "
-        "Repeated sampled frames are acceptable for a deliberately held static shot; reject "
-        "duplication only when elements overlap or contradict each other.\nLocked claims: "
+        "chronological frames from one narrated segment. "
+        + _audience_language_policy(language)
+        + "\nLocked claims: "
         + json.dumps(claims, ensure_ascii=False)
     )
 
@@ -278,8 +340,9 @@ def _build_scene_parts(
     media_path: Path,
     sample_times: list[float],
     temp: Path,
+    language: str = "my-MM",
 ) -> list:
-    parts = [_scene_prompt(segment_id, claims)]
+    parts = [_scene_prompt(segment_id, claims, language)]
     for index, timestamp in enumerate(sample_times):
         frame = temp / f"{_safe_frame_stem(segment_id)}-{index}.jpg"
         _extract_frame(media_path, timestamp, frame)
@@ -291,9 +354,13 @@ def _build_batch_parts(
     scene_parts: dict[str, list],
     scene_data: dict[str, dict],
     batch_ids: list[str],
+    language: str = "my-MM",
 ) -> list:
     parts = [
-        f"QA contract version {QA_PROMPT_VERSION}. Verify every requested segment exactly once. "
+        f"QA contract version {QA_PROMPT_VERSION}. "
+        "Act as the final FYF rendered-video evidence gate. "
+        + _audience_language_policy(language)
+        + " Verify every requested segment exactly once. "
         "Return one strict JSON item per segment, preserving the requested order. "
         "Each delimited segment below has locked claims followed by three chronological frames. "
         "Requested segments: " + ", ".join(f"SEGMENT {segment_id}" for segment_id in batch_ids)
@@ -480,6 +547,7 @@ def verify_final_rendered_meaning(job_dir: str) -> dict:
             render_segment=segment_timing,
             media_fingerprint=media_fingerprint,
             media_source=media_source,
+            language=script.language,
         )
         sources[segment.id] = (media_path, media_source, sample_times, fingerprints[segment.id])
         scene_data[segment.id] = {
@@ -516,8 +584,14 @@ def verify_final_rendered_meaning(job_dir: str) -> dict:
                     media_path,
                     sample_times,
                     temp,
+                    script.language,
                 )
-            batch_parts = _build_batch_parts(scene_parts, scene_data, batch_ids)
+            batch_parts = _build_batch_parts(
+                scene_parts,
+                scene_data,
+                batch_ids,
+                script.language,
+            )
 
             batch_results: dict[str, dict] = {}
             try:

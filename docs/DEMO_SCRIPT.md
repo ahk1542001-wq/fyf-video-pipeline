@@ -1,84 +1,101 @@
-# Demo Video Script (target: 2:30-2:50)
+# Demo Video Script: Agentic Business Video Studio
 
-Language: English (spoken or subtitles). Screen recording at 1920x1080, browser zoomed to ~125% for legibility.
+**Target length**: 2:30-2:50
 
-## Beat 1 — The problem (0:00-0:25)
+**Screen**: 1920x1080 (16:9), browser at a legible zoom
 
-**Screen:** plain text slide or the Create Studio with an empty form.
+**Recording gate**: Run this script only after root verifies the current UI, request contract, fresh render, and telemetry path. Use an owner-approved, non-sensitive business brief. Never use mock evidence, seeded demo numbers, a cached/API-only result, or a static audit badge.
 
-> "Financial scams in Myanmar often start with a single misread transfer slip.
-> FYF turns a Burmese topic into a fully reviewed vertical explainer video —
-> with every fact, image, and caption traceable before anything is published."
+If a target control is not verified, omit that claim from the recording. If the selected job or ClickHouse has no data, use the unavailable wording in Beat 4; do not fill the gap with an estimate.
 
-**Action:** type the topic `မိဘများအတွက် မှန်ကန်သော OCR ပြေစာစစ်ဆေးမှုဖြင့် ငွေလွှဲအမှားများကို ကာကွယ်ခြင်း` into Create Studio and press Generate.
+## Beat 1 - The business problem (0:00-0:25)
 
-## Beat 2 — Agentic script production (0:25-1:00)
+**Screen:** Create Studio at `http://localhost:3001/`, showing the verified two-column workbench.
 
-**Screen:** progress card cycling through `adk_orchestration → storyboard → lock`.
+**Voiceover:**
 
-> "A Google ADK producer agent researches the topic, drafts segments with
-> evidence-backed claims, audits its own quality, then freezes an immutable
-> story lock. Every claim carries its evidence class — nothing is invented
-> silently."
+> "Business teams need clear explainers, social ads, product launches, and brand videos from the same brief. Agentic Business Video Studio keeps that work in one reviewable workspace: choose a business preset, shape the brand output, approve the story, and render the finished video. The original Burmese FYF explainer remains Preset #1 and the default."
 
-**Action:** show the locked script view briefly (segments + claims).
+**Action:** Show the Quick Business Presets in order:
 
-## Beat 3 — Video generation (1:00-1:40)
+1. `Brand Explainer (Flagship)` (the Burmese FYF default)
+2. `High-Converting Social Ad`
+3. `Product Launch Hype (Magnific)`
 
-**Screen:** video job card: `visuals → voice → rendering`, then Library with the finished MP4 playing.
+Keep these labels scoped to the business product and the target event.
 
-> "Visuals are planned and verified per scene with Vertex AI, narrated with
-> Gemini TTS, and rendered as a 1080x1920 Remotion composition with Burmese
-> captions — segmented renders keep checkpoints so a constrained container can
-> always resume instead of failing.
->
-> Deterministic QA, creative QA, and a final rendered-meaning check must all
-> pass before the video reaches the Library."
+## Beat 2 - From brief to approved story (0:25-0:55)
 
-**Action:** play 5-8 seconds of the final MP4 inside the Library page.
+**Screen:** Left-side brief and story controls, then the story options and approval state.
 
-## Beat 4 — Self-auditing warehouse via ClickHouse MCP (1:40-2:30)
+**Action:** Paste the owner-approved business brief. If no approved brief is available, stop the take rather than inventing a product, claim, or source. Use the visible story-generation control, review the returned options, and approve the selected narration/story lock.
 
-**Screen:** split view — terminal curl to `/api/insights` (or the Telemetry page), then the ClickHouse SQL console showing `video_pipeline_jobs` rows.
+**Voiceover:**
 
-> "Here is where ClickHouse comes in. Every run dual-writes sanitized job,
-> scene, QA, and model-call telemetry into ClickHouse Cloud.
->
-> Our Data Officer — an ADK agent wired to the official mcp-clickhouse MCP
-> server — answers questions about that warehouse in natural language:
-> 'How many jobs passed QA this week?' ... answered live, from real rows.
->
-> The factory doesn't just produce videos — it can audit itself."
+> "One Google ADK Producer Agent coordinates research, drafting, story-quality review, and visual-shot planning. Voice generation, storyboard work, Remotion rendering, quality checks, and telemetry are pipeline stages, tools, or deterministic responsibilities, not separate agents. I review the options and approve the narration lock before rendering."
 
-**Action:** open the Telemetry page and use the "Ask the Data Officer" box (no terminal needed).
+## Beat 3 - Brand controls and multi-format output (0:55-1:35)
 
-Verified questions that answer live from ClickHouse Cloud (2026-08-25):
+**Screen:** Verified brand kit on the left and MP4 preview on the right.
 
-| Ask this | Expected shape of the answer |
-| --- | --- |
-| "How many video jobs are recorded, how many succeeded, and what did they cost in total?" | counts + total cost from `video_pipeline_jobs` |
-| "How many model calls did the latest job use?" | call count from `video_vertex_calls` |
-| "What is the title of the most recent completed job?" | Burmese title from the latest row |
+**Action:** Select a verified business preset, set the owner-approved CTA, toggle the requested options, and choose one format. Show the controls only if root has verified that they reach the render request:
 
-Answers carry a green badge: **✓ answered from live ClickHouse query**. If a
-question times out (>26s budget), the panel shows a clean retryable message —
-just ask again; do not re-record the whole take.
+- `cta_text`
+- `retention_progress_bar`
+- `animated_lower_thirds`
+- `aspect_ratio` (`9:16`, `16:9`, or `1:1`)
 
-## Beat 5 — Stack recap (2:30-2:50)
+Queue the video from the approved lock and show the real progress states. Do not claim a control is rendered when the current run did not carry it through.
 
-**Screen:** closing slide.
+**Voiceover:**
 
-> "FYF: Gemini on Vertex AI, Google ADK, Remotion, Cloud Run, and ClickHouse —
-> production-ready agentic video for audiences that deserve accurate
-> information. Source code is open under MIT."
+> "The brand kit is explicit: CTA text, retention progress, animated lower thirds, and aspect ratio. I can choose vertical, widescreen, or square output without opening a timeline editor. The workspace stays focused on the brief, the approved story, and the finished cut."
 
----
+## Beat 4 - Evidence-backed audit (1:35-2:25)
 
-### Recording checklist
-- [x] Production URL ready: https://fyf-pipeline-605161166139.asia-southeast1.run.app
-- [x] Approved library already holds a cloud-rendered job (`b2ec7c5d`, OTP-safety explainer) usable for Beat 3
-- [ ] Fresh topic run recorded end-to-end (or pre-recorded segments spliced; existing MP4s: e49aa2d5 32.8s, 838803f2 34.7s, b2ec7c5d)
-- [ ] Data Officer answered live on camera via the Telemetry page panel
-- [ ] ClickHouse console shows the same numbers as the answer
-- [ ] English subtitles track exported
-- [ ] Upload YouTube/Vimeo public, add link to Devpost form
+**Screen:** The completed MP4 in the right preview, then `/telemetry` with the same job selected.
+
+**Action:**
+
+1. Wait for the actual render and QA status. Play the fresh MP4 for several seconds.
+2. Point to the audit area and read only values present for the selected job, such as actual duration, token status/count, cost status/value, and aspect ratio. Never read a memorized or hard-coded metric.
+3. Open `http://localhost:3001/telemetry`, refresh the ledger, and select the same job ID.
+4. Ask the Data Officer:
+
+   `How many video jobs are recorded, how many succeeded, and what did they cost in total?`
+
+5. In the ClickHouse query console, choose one of the supported query presets and run it through the allowlisted `POST /api/clickhouse/query` endpoint. The endpoint accepts a `query_id`, not caller SQL. Show the returned `source`, `availability`, and rows alongside the Data Officer answer.
+6. Say "answered from live ClickHouse" only when the allowlisted response reports `source: "clickhouse_cloud"`, `availability: "available"`, and relevant rows that match the answer.
+
+**Voiceover when live data is available:**
+
+> "The audit view is reading this selected run's recorded evidence, not a sample value. The Data Officer is a separate ADK agent using the official ClickHouse MCP path. The allowlisted query endpoint reports `source: clickhouse_cloud` and `availability: available`, and these rows match the answer."
+
+**Voiceover when the endpoint uses the local fallback:**
+
+> "The allowlisted query endpoint reports `source: local_mirror`. This is local real telemetry fallback for this environment, not ClickHouse Cloud proof, so I am not making a live-cloud claim."
+
+**Voiceover when data is unavailable, times out, or returns no row:**
+
+> "The allowlisted query is unavailable or returned no rows for this run, so no live-cloud metric is claimed. The product shows the unavailable or retryable state instead of inventing a number."
+
+Do not record a green live-cloud claim unless the `source: "clickhouse_cloud"` and `availability: "available"` conditions are visible. If the source is `local_mirror`, label it **local real telemetry fallback** and do not describe it as ClickHouse Cloud evidence. A loaded page, a Data Officer answer without the allowlisted query result, or a green-looking badge alone is insufficient evidence.
+
+## Beat 5 - Closing (2:25-2:50)
+
+**Screen:** Approved video preview or a simple stack summary showing the business product name.
+
+**Voiceover:**
+
+> "Agentic Business Video Studio makes business video production reviewable from brief to approved MP4, with explicit brand controls and evidence-backed telemetry. It is powered by Google Cloud Run, Vertex AI, Gemini, Google ADK, Remotion, and ClickHouse. We are presenting it for Agentic Cinema: The Blockbuster Hackathon."
+
+## Recording checklist
+
+- [ ] Root verified the business-first labels, two-column layout, no-timeline interaction, and old Burmese Preset #1/default.
+- [ ] Root verified request propagation for `cta_text`, `retention_progress_bar`, `animated_lower_thirds`, and `aspect_ratio`.
+- [ ] The take uses an owner-approved, non-sensitive business brief and a fresh UI-created MP4.
+- [ ] The selected aspect ratio, CTA, lower thirds, retention bar, playback, and QA state match the actual run.
+- [ ] Audit values are read from the selected job; no mock, static, or hard-coded metrics appear on screen.
+- [ ] The Data Officer answer is paired with an allowlisted query response reporting `source: "clickhouse_cloud"` and `availability: "available"`, or the local-fallback/unavailable wording is used.
+- [ ] No credentials, environment values, `.env` contents, or secret-store output appear in the recording.
+- [ ] Any commit, push, deployment, public video upload, and Devpost submission has its own explicit owner approval. The canonical deploy command, if approved, is `bash scripts/deploy_cloudrun.sh`.

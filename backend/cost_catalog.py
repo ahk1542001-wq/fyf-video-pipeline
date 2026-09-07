@@ -62,13 +62,9 @@ def estimate_job_cost(
     pricing = None
 
     for key, price_map in MODEL_PRICING.items():
-        if key in clean_model or clean_model in key:
+        if clean_model and (key in clean_model or clean_model in key):
             pricing = price_map
             break
-
-    if pricing is None and not clean_model:
-        # Default to Flash pricing if standard
-        pricing = MODEL_PRICING["gemini-3.7-flash"]
 
     if pricing is None:
         return CostEstimate(

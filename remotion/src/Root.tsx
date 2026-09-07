@@ -3,6 +3,7 @@ import { VideoPipeline } from "./VideoPipeline";
 import { RenderInput } from "./types";
 import {VisualSystemV3Preview} from "./VisualSystemV3Preview";
 import {VisualSystemV3Full} from "./VisualSystemV3Full";
+import {aspectRatioDimensions, normalizeRenderControls} from "./renderControls";
 
 // Sample script data (in production this comes from the FastAPI backend)
 const sampleInput: RenderInput = {
@@ -65,9 +66,13 @@ export const RemotionRoot: React.FC = () => {
       height={1920}
       defaultProps={sampleInput}
       calculateMetadata={({ props }) => {
+        const controls = normalizeRenderControls(props);
+        const dimensions = aspectRatioDimensions(controls.aspect_ratio);
         return {
           durationInFrames: props.durationInFrames,
-          props,
+          width: dimensions.width,
+          height: dimensions.height,
+          props: {...props, ...controls, render_controls: controls},
         };
       }}
     />
@@ -87,7 +92,16 @@ export const RemotionRoot: React.FC = () => {
       width={1080}
       height={1920}
       defaultProps={sampleInput}
-      calculateMetadata={({props}) => ({durationInFrames: props.durationInFrames, props})}
+      calculateMetadata={({props}) => {
+        const controls = normalizeRenderControls(props);
+        const dimensions = aspectRatioDimensions(controls.aspect_ratio);
+        return {
+          durationInFrames: props.durationInFrames,
+          width: dimensions.width,
+          height: dimensions.height,
+          props: {...props, ...controls, render_controls: controls},
+        };
+      }}
     />
     </>
   );

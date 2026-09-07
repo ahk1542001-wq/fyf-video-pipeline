@@ -3,10 +3,10 @@ import { useCurrentFrame, useVideoConfig, spring, interpolate } from "remotion";
 import { theme } from "./theme";
 
 // Premium Entrance
-export const Entrance: React.FC<{ delay?: number; children: React.ReactNode }> = ({ delay = 0, children }) => {
+export const Entrance: React.FC<{ delay?: number; animate?: boolean; children: React.ReactNode }> = ({ delay = 0, animate = true, children }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
-  const p = spring({ frame: frame - delay, fps, config: theme.spring.smooth });
+  const p = animate ? spring({ frame: frame - delay, fps, config: theme.spring.smooth }) : 1;
   return (
     <div style={{
       opacity: p,
@@ -23,8 +23,8 @@ export const Stagger: React.FC<{ items: React.ReactNode[]; start?: number; per?:
 
 // Ultra-premium Karaoke Text
 export const WordReveal: React.FC<{
-  text: string; delay?: number; per?: number; size?: number; highlight?: boolean; style?: React.CSSProperties; startFrame?: number; emphasis?: string[];
-}> = ({ text, delay = 0, per = 3, size = 60, highlight = false, style, startFrame = 0, emphasis }) => {
+  text: string; delay?: number; per?: number; size?: number; highlight?: boolean; style?: React.CSSProperties; startFrame?: number; emphasis?: string[]; fontFamily?: string;
+}> = ({ text, delay = 0, per = 3, size = 60, highlight = false, style, startFrame = 0, emphasis, fontFamily }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
   const isKeyword = (w: string) => w.startsWith("**") && w.endsWith("**");
@@ -55,7 +55,7 @@ export const WordReveal: React.FC<{
           <span key={i} style={{
             display: "inline-block", opacity: p,
             transform: `translateY(${interpolate(p, [0, 1], [20, 0])}px) scale(${scale})`,
-            fontFamily: theme.fonts.display, fontWeight: highlightWord ? 700 : 500, fontSize: size,
+            fontFamily: fontFamily || theme.fonts.display, fontWeight: highlightWord ? 700 : 500, fontSize: size,
             lineHeight: 1.4, letterSpacing: "0", wordSpacing: "-0.05em", color,
             textShadow: highlightWord
               ? "0 3px 12px rgba(22, 133, 107, 0.35)"

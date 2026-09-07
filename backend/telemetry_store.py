@@ -35,13 +35,18 @@ def record_job_telemetry(
     target_dir.mkdir(parents=True, exist_ok=True)
     telemetry_file = target_dir / f"{job_id}.json"
 
-    model_name = str(metrics.get("model_name", "gemini-3.7-flash"))
+    raw_model_name = metrics.get("model_name")
+    model_name = (
+        raw_model_name.strip()
+        if isinstance(raw_model_name, str) and raw_model_name.strip()
+        else None
+    )
     input_tokens = int(metrics.get("input_tokens", 0))
     output_tokens = int(metrics.get("output_tokens", 0))
     tts_characters = int(metrics.get("tts_characters", 0))
 
     cost_estimate = estimate_job_cost(
-        model_name=model_name,
+        model_name=model_name or "",
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         tts_characters=tts_characters,
@@ -65,7 +70,10 @@ def record_job_telemetry(
         "cost_status": cost_estimate.cost_status,
         "cost_catalog_version": cost_estimate.catalog_version,
         "is_estimate": True,
-        "status": metrics.get("status", "completed"),
+        "status": metrics.get("status", "unknown"),
+        "studio_name": str(metrics.get("studio_name", "FYF Studio")),
+        "language": str(metrics.get("language", "my-MM")),
+        "genre": str(metrics.get("genre", "explainer")),
         "summary": {
             "total_calls": int(metrics.get("model_call_count", 0)),
             "total_input_tokens": input_tokens,
@@ -74,7 +82,7 @@ def record_job_telemetry(
             "token_status": "complete" if (input_tokens or output_tokens) else "none",
             "estimated_cost_usd": cost_estimate.estimated_cost_usd,
             "cost_status": cost_estimate.cost_status,
-            "job_status": metrics.get("status", "completed"),
+            "job_status": metrics.get("status", "unknown"),
             "retry_calls": int(metrics.get("retry_count", 0)),
             "failed_calls": 0,
         },
@@ -100,6 +108,9 @@ def record_job_telemetry(
             total_tokens_used=input_tokens + output_tokens,
             cost_usd=float(cost_estimate.estimated_cost_usd),
             qa_passed=bool(metrics.get("qa_passed", False)),
+            studio_name=str(metrics.get("studio_name", "FYF Studio")),
+            language=str(metrics.get("language", "my-MM")),
+            genre=str(metrics.get("genre", "explainer")),
         )
     except Exception as exc:  # pragma: no cover - optional sink
         logger.debug("ClickHouse telemetry mirror skipped: %s", exc)
@@ -155,7 +166,7 @@ def get_job_telemetry(
                     "completed_at": status_data.get("updated_at"),
                     "total_duration_ms": 0,
                     "stage_duration_ms": status_data.get("stage_timings", {}),
-                    "model_name": "gemini-3.7-flash",
+                    "model_name": None,
                     "model_call_count": 0,
                     "input_tokens": 0,
                     "output_tokens": 0,
@@ -192,7 +203,7 @@ def get_job_telemetry(
         "completed_at": None,
         "total_duration_ms": 0,
         "stage_duration_ms": {},
-        "model_name": "gemini-3.7-flash",
+        "model_name": None,
         "model_call_count": 0,
         "input_tokens": 0,
         "output_tokens": 0,

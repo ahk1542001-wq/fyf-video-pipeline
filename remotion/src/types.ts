@@ -167,4 +167,20 @@ export interface RenderInput extends Record<string, unknown> {
   mouthCues: MouthCue[];
   mouthCueSource?: "rhubarb-phonetic" | "burmese-text-audio" | "amplitude-fallback";
   segmentTimingSource?: "single-segment" | "text-weight-fallback" | "wav-silence-snap";
+  studio_name?: string;
+  genre?: string;
+  presenter_mode?: "on_screen" | "voiceover_only" | string;
+  voice_actor?: string;
+  cta_text?: string;
+  retention_progress_bar?: boolean;
+  animated_lower_thirds?: boolean;
+  aspect_ratio?: "9:16" | "16:9" | "1:1";
+  render_controls?: {
+    cta_text?: string;
+    retention_progress_bar?: boolean;
+    animated_lower_thirds?: boolean;
+    aspect_ratio?: "9:16" | "16:9" | "1:1";
+  };
+  width?: number;
+  height?: number;
 }

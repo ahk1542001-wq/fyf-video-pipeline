@@ -191,14 +191,25 @@ def _run_script_pipeline(job_id: str, script_jobs_root: Path, locks_root: Path) 
         from video_contract import StoryDraftScript, VideoScript
 
         request = _read_json(job_dir / "request.json")
+        studio_name = request.get("studio_name", "FYF Studio")
+        language = request.get("language", "my-MM")
+        genre = request.get("genre", "explainer")
+        presenter_mode = request.get("presenter_mode", "on_screen")
+        voice_actor = request.get("voice_actor", "Sadaltager")
+
         use_adk = request.get("use_adk_agent", True) and os.getenv("FYF_USE_ADK_AGENT", "true").lower() in ("true", "1")
         if use_adk:
             from backend.agent.runner import run_adk_pipeline
             update_script_status(job_dir, status="writing", stage="adk_producer", progress=15)
+            adk_kwargs = {"job_dir": job_dir}
+            for k in ("studio_name", "language", "genre", "presenter_mode", "voice_actor"):
+                if k in request:
+                    adk_kwargs[k] = request[k]
+
             adk_result = run_adk_pipeline(
                 request["topic"],
                 request.get("duration_mode", "short"),
-                job_dir=job_dir,
+                **adk_kwargs,
             )
             result = VideoScript.model_validate(adk_result["script"]).model_dump(
                 mode="json", exclude_none=True
@@ -216,10 +227,32 @@ def _run_script_pipeline(job_id: str, script_jobs_root: Path, locks_root: Path) 
             draft = StoryDraftScript.model_validate(_read_json(narration_path))
         else:
             update_script_status(job_dir, status="writing", stage="narration", progress=5)
-            draft = StoryDraftScript.model_validate(generate_narration_script(
-                request["topic"], request.get("duration_mode", "short")
-            ))
+            raw_draft = generate_narration_script(
+                request["topic"], request.get("duration_mode", "short"), language=language, genre=genre
+            )
+            raw_draft = {
+                **raw_draft,
+                "studio_name": studio_name,
+                "language": language,
+                "genre": genre,
+                "presenter_mode": presenter_mode,
+                "voice_actor": voice_actor,
+            }
+            draft = StoryDraftScript.model_validate(raw_draft)
             write_json_atomically(narration_path, draft.model_dump(mode="json"))
+
+        # Request metadata is authoritative even when narration.json is a
+        # checkpoint from an earlier run or a provider response used an old
+        # default. This keeps resume and the final lock aligned.
+        draft = StoryDraftScript.model_validate({
+            **draft.model_dump(mode="json"),
+            "studio_name": studio_name,
+            "language": language,
+            "genre": genre,
+            "presenter_mode": presenter_mode,
+            "voice_actor": voice_actor,
+        })
+        write_json_atomically(job_dir / "narration.json", draft.model_dump(mode="json"))
 
         segments = draft.segments
         batch_size = _script_lock_batch_size(job_dir)
@@ -247,6 +280,11 @@ def _run_script_pipeline(job_id: str, script_jobs_root: Path, locks_root: Path) 
             )
             batch_script = VideoScript.model_validate(generate_exact_lock({
                 "title": draft.title,
+                "studio_name": studio_name,
+                "language": language,
+                "genre": genre,
+                "presenter_mode": presenter_mode,
+                "voice_actor": voice_actor,
                 "approved_segments": [
                     {"id": item.id, "text": item.text}
                     for item in batch_slice
@@ -257,7 +295,11 @@ def _run_script_pipeline(job_id: str, script_jobs_root: Path, locks_root: Path) 
 
         final_script = VideoScript(
             title=draft.title,
-            language=draft.language,
+            language=language,
+            studio_name=studio_name,
+            genre=genre,
+            presenter_mode=presenter_mode,
+            voice_actor=voice_actor,
             segments=locked_segments,
         ).model_dump(mode="json")
 

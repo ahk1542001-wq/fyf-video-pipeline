@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from backend.creative_quality import enforce_attention_reset_cadence
+from video_contract import ASPECT_RATIO_DIMENSIONS, RenderControls
 
 FPS = 30
 
@@ -474,6 +475,21 @@ def build_render_input(
     rhubarb_bin: str | Path | None = None,
     rhubarb_timeout_seconds: int | None = None,
 ) -> dict[str, Any]:
+    raw_controls = script_data.get("render_controls")
+    if raw_controls is None:
+        raw_controls = {
+            name: script_data[name]
+            for name in (
+                "cta_text",
+                "retention_progress_bar",
+                "animated_lower_thirds",
+                "aspect_ratio",
+            )
+            if name in script_data
+        }
+    controls = RenderControls.model_validate(raw_controls).model_dump(mode="json")
+    width, height = ASPECT_RATIO_DIMENSIONS[controls["aspect_ratio"]]
+
     duration = read_wav_duration(wav_path)
     timed_segments, total_frames, segment_timing_source = allocate_segment_frames_from_wav(
         script_data["segments"], wav_path, fps=fps
@@ -513,16 +529,26 @@ def build_render_input(
             wav_path, timed_segments, fps=fps
         )
 
+    render_metadata = {
+        field: script_data[field]
+        for field in ("studio_name", "genre", "presenter_mode", "voice_actor")
+        if field in script_data and script_data[field] is not None
+    }
     render_input = {
         "title": script_data["title"],
         "language": script_data.get("language", "my-MM"),
         "fps": fps,
         "durationInFrames": total_frames,
+        "width": width,
+        "height": height,
         "audioSrc": audio_src,
         "segments": timed_segments,
         "mouthCues": mouth_cues,
         "mouthCueSource": mouth_cue_source,
         "segmentTimingSource": segment_timing_source,
+        **render_metadata,
+        **controls,
+        "render_controls": controls,
     }
     # Frames exist from here on, so deterministic creative QA can now be satisfied
     # before render/QA regardless of which upstream path produced the script.

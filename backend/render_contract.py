@@ -5,6 +5,8 @@ import re
 import wave
 from typing import Any
 
+from video_contract import ASPECT_RATIO_DIMENSIONS, RenderControls
+
 
 KNOWN_VISUAL_KINDS = {
     "generic",
@@ -96,6 +98,49 @@ def validate_render_input(data: dict[str, Any], job_dir: str | None = None) -> N
     """Fail closed when production render props are incomplete or contradictory."""
     if not isinstance(data, dict):
         raise ValueError("Render input must be an object")
+
+    raw_controls = data.get("render_controls")
+    if raw_controls is None:
+        raw_controls = {
+            name: data[name]
+            for name in (
+                "cta_text",
+                "retention_progress_bar",
+                "animated_lower_thirds",
+                "aspect_ratio",
+            )
+            if name in data
+        }
+    try:
+        controls = RenderControls.model_validate(raw_controls).model_dump(mode="json")
+    except ValueError as exc:
+        raise ValueError(f"render controls are invalid: {exc}") from exc
+
+    nested_controls = data.get("render_controls")
+    if nested_controls is not None and not isinstance(nested_controls, dict):
+        raise ValueError("render_controls must be an object")
+    explicit_aspect_ratio = "aspect_ratio" in data or (
+        isinstance(nested_controls, dict) and "aspect_ratio" in nested_controls
+    )
+    for name, expected in controls.items():
+        if name in data and data[name] != expected:
+            raise ValueError(f"render input {name} does not match render_controls")
+
+    width = data.get("width")
+    height = data.get("height")
+    if (width is None) != (height is None):
+        raise ValueError("width and height must be supplied together")
+    if explicit_aspect_ratio and width is None:
+        raise ValueError("width and height are required when aspect_ratio is supplied")
+    if width is not None:
+        if not _positive_int(width) or not _positive_int(height):
+            raise ValueError("width and height must be positive integers")
+        expected_width, expected_height = ASPECT_RATIO_DIMENSIONS[controls["aspect_ratio"]]
+        if (width, height) != (expected_width, expected_height):
+            raise ValueError(
+                "width and height do not match the render aspect_ratio: "
+                f"expected {expected_width}x{expected_height}"
+            )
 
     fps = data.get("fps")
     duration = data.get("durationInFrames")

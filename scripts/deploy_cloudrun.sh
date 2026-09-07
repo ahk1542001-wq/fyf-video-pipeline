@@ -3,13 +3,22 @@
 # Prereqs: gcloud auth login; billing enabled; APIs enabled (script does this).
 set -euo pipefail
 
-PROJECT="${GOOGLE_CLOUD_PROJECT:-intelligent-arc-488111-s0}"
+# PROJECT_ID is canonical; retain GOOGLE_CLOUD_PROJECT as a legacy fallback.
+PROJECT_ID="${PROJECT_ID:-${GOOGLE_CLOUD_PROJECT:-}}"
+if [[ -z "$PROJECT_ID" ]]; then
+  echo "ERROR: PROJECT_ID is required (set PROJECT_ID or GOOGLE_CLOUD_PROJECT before deployment)." >&2
+  exit 2
+fi
+if [[ ! "$PROJECT_ID" =~ ^[a-z][a-z0-9-]{4,28}[a-z0-9]$ ]]; then
+  echo "ERROR: PROJECT_ID must be a valid Google Cloud project ID (6-30 lowercase letters, digits, or hyphens)." >&2
+  exit 2
+fi
 REGION="${GOOGLE_CLOUD_REGION:-asia-southeast1}"
 REPO="fyf"
-IMAGE="$REGION-docker.pkg.dev/$PROJECT/$REPO/fyf-pipeline:latest"
+IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/$REPO/fyf-pipeline:latest"
 SERVICE="fyf-pipeline"
 
-gcloud config set project "$PROJECT"
+gcloud config set project "$PROJECT_ID"
 
 echo "== enable APIs =="
 gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com secretmanager.googleapis.com
@@ -37,13 +46,14 @@ echo "== build =="
 gcloud builds submit --tag "$IMAGE" .
 
 echo "== allow runtime SA to read secrets =="
-SA_NUM=$(gcloud projects describe "$PROJECT" --format='value(projectNumber)')
-gcloud projects add-iam-policy-binding "$PROJECT" \
+SA_NUM=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
   --member="serviceAccount:${SA_NUM}-compute@developer.gserviceaccount.com" \
   --role="roles/secretmanager.secretAccessor" --quiet >/dev/null || true
 
 echo "== deploy =="
 gcloud run deploy "$SERVICE" \
+  --project "$PROJECT_ID" \
   --image "$IMAGE" \
   --region "$REGION" \
   --port 8080 \
@@ -52,8 +62,8 @@ gcloud run deploy "$SERVICE" \
   --min-instances 0 --max-instances 1 \
   --timeout 3600 \
   --allow-unauthenticated \
-  --set-env-vars "FYF_RUNTIME_MODE=hackathon,NEXT_PUBLIC_FYF_RUNTIME_MODE=hackathon,FYF_SEGMENT_RENDER_ENABLED=1,FYF_PUBLIC_DEPLOYMENT=true,FYF_BACKEND_URL=http://127.0.0.1:8000,GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_CLOUD_PROJECT=artful-sky-501413-i4,GOOGLE_CLOUD_LOCATION=global,FYF_PUBLIC_GENERATION_ENABLED=true,FYF_DAILY_BUDGET_CAP_USD=3,FYF_LOCK_METADATA_MODE=per_segment" \
+  --set-env-vars "FYF_RUNTIME_MODE=hackathon,NEXT_PUBLIC_FYF_RUNTIME_MODE=hackathon,FYF_SEGMENT_RENDER_ENABLED=1,FYF_PUBLIC_DEPLOYMENT=true,FYF_BACKEND_URL=http://127.0.0.1:8000,GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_CLOUD_LOCATION=global,FYF_PUBLIC_GENERATION_ENABLED=true,FYF_DAILY_BUDGET_CAP_USD=3,FYF_LOCK_METADATA_MODE=per_segment" \
   "${SECRETS_FLAGS[@]}"
 
 echo "== DONE =="
-gcloud run services describe "$SERVICE" --region "$REGION" --format='value(status.url)'
+gcloud run services describe "$SERVICE" --project "$PROJECT_ID" --region "$REGION" --format='value(status.url)'

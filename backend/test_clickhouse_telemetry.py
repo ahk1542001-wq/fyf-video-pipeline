@@ -96,6 +96,56 @@ class TestClickHouseTelemetry(unittest.TestCase):
         self.assertEqual(summary["total_cost_usd"], 0.03)
         self.assertEqual(summary["avg_render_time_sec"], 75.0)
 
+    def test_record_job_telemetry_with_studio_parameters(self):
+        job_id = "cinema99"
+        record = record_job_telemetry(
+            job_id=job_id,
+            title="Global AI Tech Trailer",
+            duration_sec=45.0,
+            voice_mode="gemini",
+            status="completed",
+            total_render_time_ms=38000,
+            total_tokens_used=4200,
+            cost_usd=0.009,
+            qa_passed=True,
+            studio_name="Agentic Cinema Studio",
+            language="en-US",
+            genre="tech_explainer",
+            base_dir=self.temp_dir,
+        )
+        self.assertEqual(record["studio_name"], "Agentic Cinema Studio")
+        self.assertEqual(record["language"], "en-US")
+        self.assertEqual(record["genre"], "tech_explainer")
+
+        details = get_job_telemetry(job_id, base_dir=self.temp_dir)
+        self.assertEqual(details["job"]["studio_name"], "Agentic Cinema Studio")
+        self.assertEqual(details["job"]["language"], "en-US")
+        self.assertEqual(details["job"]["genre"], "tech_explainer")
+
+    def test_telemetry_special_characters_and_emojis(self):
+        job_id = "unicode_test_123"
+        record = record_job_telemetry(
+            job_id=job_id,
+            title="AI's Impact: မြန်မာနိုင်ငံ 🇲🇲 & O'Reilly",
+            duration_sec=30.0,
+            voice_mode="gemini",
+            status="completed",
+            total_render_time_ms=25000,
+            total_tokens_used=3000,
+            cost_usd=0.005,
+            qa_passed=True,
+            studio_name="L'Étoile Studio 🌟",
+            language="my-MM",
+            genre="cinematic_documentary",
+            base_dir=self.temp_dir,
+        )
+        self.assertEqual(record["studio_name"], "L'Étoile Studio 🌟")
+        self.assertEqual(record["title"], "AI's Impact: မြန်မာနိုင်ငံ 🇲🇲 & O'Reilly")
+
+        details = get_job_telemetry(job_id, base_dir=self.temp_dir)
+        self.assertEqual(details["job"]["studio_name"], "L'Étoile Studio 🌟")
+        self.assertEqual(details["job"]["title"], "AI's Impact: မြန်မာနိုင်ငံ 🇲🇲 & O'Reilly")
+
 
 if __name__ == "__main__":
     unittest.main()

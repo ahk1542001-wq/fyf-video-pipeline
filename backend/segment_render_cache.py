@@ -28,6 +28,7 @@ from backend.render_video import (
     REPO_ROOT,
     render_video_segment,
 )
+from video_contract import RenderControls
 
 
 CACHE_CONTRACT_VERSION = 1
@@ -186,6 +187,20 @@ def segment_render_fingerprint(
     if not isinstance(composition_id, str) or not composition_id:
         raise ValueError("composition_id must be a non-blank string")
 
+    raw_controls = render_input.get("render_controls")
+    if raw_controls is None:
+        raw_controls = {
+            name: render_input[name]
+            for name in (
+                "cta_text",
+                "retention_progress_bar",
+                "animated_lower_thirds",
+                "aspect_ratio",
+            )
+            if name in render_input
+        }
+    render_controls = RenderControls.model_validate(raw_controls).model_dump(mode="json")
+
     payload = {
         "cache_contract_version": CACHE_CONTRACT_VERSION,
         "segment_id": target_id,
@@ -196,6 +211,7 @@ def segment_render_fingerprint(
         "render_fps": render_input.get("fps"),
         "render_width": render_input.get("width"),
         "render_height": render_input.get("height"),
+        "render_controls": render_controls,
         "frame_range": [segment.get("startFrame"), segment.get("endFrame")],
         "segment": segment,
         "mouth_cues": _intersecting_mouth_cues(render_input, segment),

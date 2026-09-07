@@ -31,6 +31,10 @@ class TestGeminiTTSVertex(unittest.TestCase):
                 result_bytes = f.read()
             self.assertEqual(result_bytes, b"fake_audio_bytes")
 
+        request = mock_client.models.generate_content.call_args
+        self.assertIn("Hello world", request.kwargs["contents"])
+        self.assertIn("speaking naturally", request.kwargs["contents"])
+
         mock_client_class.assert_called_once()
         _, kwargs = mock_client_class.call_args
 

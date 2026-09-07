@@ -72,3 +72,19 @@ def test_telemetry_status_fallback_does_not_invent_fake_tokens(tmp_path: Path):
     assert job["summary"]["total_input_tokens"] == 0
     assert job["summary"]["token_status"] == "unavailable"
     assert job["cost_status"] == "unavailable"
+    assert job["model_name"] is None
+
+
+def test_missing_model_does_not_claim_a_default_model_or_cost(tmp_path: Path):
+    record_job_telemetry(
+        "99990000",
+        {"input_tokens": 1000, "output_tokens": 200},
+        base_dir=tmp_path,
+    )
+
+    job = get_job_telemetry("99990000", base_dir=tmp_path)["job"]
+
+    assert job["model_name"] is None
+    assert job["cost_status"] == "unknown"
+    assert job["estimated_cost_usd"] == 0.0
+    assert job["status"] == "unknown"

@@ -573,7 +573,12 @@ def _stage_location(stage: str, attempt: int = 0) -> str:
         return os.getenv("FYF_VERTEX_STORY_LOCATION", DEFAULT_STORY_LOCATION)
     return os.getenv("GOOGLE_CLOUD_LOCATION", DEFAULT_LOCATION)
 
-def generate_narration_script(topic_or_draft: str, duration_mode: str = "short") -> dict:
+def generate_narration_script(
+    topic_or_draft: str,
+    duration_mode: str = "short",
+    language: str = "my-MM",
+    genre: str = "explainer",
+) -> dict:
     """
     Stage 1: The Writer Agent (Vertex AI Mode)
     Uses the official Google GenAI SDK initialized with Vertex AI service account credentials.
@@ -589,11 +594,34 @@ def generate_narration_script(topic_or_draft: str, duration_mode: str = "short")
         "short": "Write 5-8 concise segments for roughly 30-60 seconds.",
         "medium": "Write 10-16 concise segments for roughly 1-2 minutes.",
         "long": "Write 18-30 concise segments for more than 2 minutes. Preserve the supplied detail; do not summarize it into a short.",
+        # The public script API uses these names. Keep the writer's original
+        # duration names as aliases so direct callers remain compatible.
+        "micro": "Write 5-8 concise segments for roughly 30-60 seconds.",
+        "standard": "Write 10-16 concise segments for roughly 1-2 minutes.",
     }
     if duration_mode not in duration_rules:
         raise ValueError("duration_mode must be short, medium, or long")
 
-    system_instruction = f"""
+    if language == "en-US":
+        system_instruction = f"""
+    You are the Executive Video Screenwriter and Content Strategist. Your job is to take a raw topic or draft and turn it into a high-retention video narration of the requested duration in the '{genre}' genre.
+
+    RULES:
+    1. The language must be English (en-US).
+    2. Tone: Engaging, punchy, cinematic spoken dialogue calibrated to natural spoken English pacing (130-150 WPM).
+    3. Output strict narration-first JSON matching the supplied schema. Use language "en-US".
+    4. Each segment contains narration plus the lightweight semantic fields
+       visual_action, scene_type, mascot_action, emotion, and emphasis words.
+    5. Never create timestamps, seconds, startFrame, or endFrame. The audio
+       timeline compiler owns timing after the approved narration WAV is generated.
+    6. Do not create typed visuals here. Production visuals are added by the
+       separate fact, storyboard, generation, and verification stages.
+    7. This schema is the production Vertex narration contract. Do not reference
+       or request output from any non-Vertex model or development worker.
+    8. Duration requirement: {duration_rules[duration_mode]}
+    """
+    else:
+        system_instruction = f"""
     You are the FYF AI Chief Content Strategist. Your job is to take a raw topic or draft and turn it into a high-retention video narration of the requested duration.
 
     RULES:
@@ -676,6 +704,11 @@ def lock_narration_in_batches(draft_data: dict, *, batch_size: int = 5) -> dict:
             "approved_segments": [
                 {"id": segment.id, "text": segment.text} for segment in batch
             ],
+            "studio_name": draft.studio_name,
+            "language": draft.language,
+            "genre": draft.genre,
+            "presenter_mode": draft.presenter_mode,
+            "voice_actor": draft.voice_actor,
         })
         return locked["segments"]
 
@@ -690,7 +723,11 @@ def lock_narration_in_batches(draft_data: dict, *, batch_size: int = 5) -> dict:
                 merged.extend(lock_batch([segment]))
     return VideoScript.model_validate({
         "title": draft.title,
-        "language": "my-MM",
+        "language": draft.language,
+        "studio_name": draft.studio_name,
+        "genre": draft.genre,
+        "presenter_mode": draft.presenter_mode,
+        "voice_actor": draft.voice_actor,
         "segments": merged,
     }).model_dump(mode="json")
 
@@ -698,16 +735,47 @@ def lock_narration_in_batches(draft_data: dict, *, batch_size: int = 5) -> dict:
 def generate_video_script(topic_or_draft: str, duration_mode: str = "short") -> dict:
     return lock_narration_in_batches(generate_narration_script(topic_or_draft, duration_mode))
 
-def generate_story_modes(topic_or_draft: str) -> dict:
+def generate_story_modes(
+    topic_or_draft: str,
+    language: str = "my-MM",
+    genre: str = "explainer",
+    presenter_mode: str = "on_screen",
+    studio_name: str = "FYF Studio",
+    voice_actor: str = "Sadaltager",
+) -> dict:
     """
-    Implements fyf_polish story mode.
-    Takes a raw topic/draft and asks Vertex for exactly 3 named, structurally distinct FYF story variants.
+    Implements story polish / story mode.
+    Takes a raw topic/draft and asks Vertex for exactly 3 named, structurally distinct story variants.
     """
     topic_or_draft = topic_or_draft.strip()
     if not topic_or_draft:
         raise ValueError("topic_or_draft must not be blank")
 
-    system_instruction = """
+    if language == "en-US":
+        presenter_clause = (
+            "Alex hosts on-screen with charismatic, natural spoken presence."
+            if presenter_mode == "on_screen"
+            else "Voiceover-only mode: Pure atmospheric cinematic B-roll without on-screen presenter cards."
+        )
+        system_instruction = f"""
+    You are the Executive Screenwriter and Content Strategist for {studio_name}. Your job is to take a raw topic or draft and return exactly 3 structurally distinct story variants in the '{genre}' genre.
+
+    Presenter Configuration: {presenter_clause}
+
+    RULES:
+    1. Each variant MUST follow this structure: scene -> wrong action/consequence -> root cause/context -> human boundary -> practical ending.
+    2. Output strict JSON matching the supplied narration-first story schema.
+    3. The language must be English (en-US).
+    4. Provide exactly 3 variants, named distinctly.
+    5. Each variant must contain at least 5 concise narration segments calibrated to natural spoken English pacing (130-150 words per minute). Do not generate typed visual objects yet; production visuals are added only after a human approves and locks one narration.
+    6. Tone: Engaging, punchy, cinematic spoken dialogue tailored for {studio_name}.
+    7. Make the three angles distinct:
+       (a) an everyday hook or practical situation,
+       (b) an investigative or analytical perspective, and
+       (c) a dynamic step-by-step breakdown.
+    """
+    else:
+        system_instruction = """
     You are the FYF AI Chief Content Strategist. Your job is to take a raw topic or draft and return exactly 3 structurally distinct FYF story variants.
 
     RULES:
@@ -763,9 +831,19 @@ def generate_story_modes(topic_or_draft: str) -> dict:
                 raise ValueError("Vertex returned an empty response")
             result_dict = json.loads(response.text)
             draft = StoryDraftModesResponse.model_validate(result_dict)
-            result = StoryModesResponse.model_validate(
-                draft.model_dump(mode="json")
-            ).model_dump(mode="json")
+            draft_dump = draft.model_dump(mode="json")
+            for variant in draft_dump.get("variants", []):
+                script = variant.get("script", {})
+                script["language"] = language
+                if studio_name:
+                    script["studio_name"] = studio_name
+                if genre:
+                    script["genre"] = genre
+                if presenter_mode:
+                    script["presenter_mode"] = presenter_mode
+                if voice_actor:
+                    script["voice_actor"] = voice_actor
+            result = StoryModesResponse.model_validate(draft_dump).model_dump(mode="json")
             result["model_used"] = model_id
             return result
         except (json.JSONDecodeError, ValueError) as exc:
@@ -803,29 +881,41 @@ def _reconcile_compact_plan(metadata: "CompactVisualPlanResponse", request) -> N
     metadata.segments[:] = [by_id[segment_id] for segment_id in approved_ids]
 
 
-def generate_exact_lock(request_data: dict) -> dict:
+def build_exact_lock_instruction(request: ExactLockRequest) -> str:
+    """Build the language- and studio-specific visual metadata contract."""
+    studio_name = request.studio_name or "FYF Studio"
+    presenter_clause = (
+        "Voiceover-only mode: do not include a presenter or mascot in any shot."
+        if request.presenter_mode == "voiceover_only"
+        else "On-screen presenter mode: use mascot presence only when it supports the locked narration."
+    )
+    if request.language in {"en-US", "en"}:
+        language_rules = """
+    All screen_text and other viewer-visible labels must be concise, natural,
+    beginner-friendly English. Keep only unavoidable product names such as AI.
+    The screen_text field MUST contain 1 or 2 strings only. Never return 3 or
+    more screen_text labels for one segment.
+    The requested presenter configuration is: {presenter_clause}
+    The requested genre is '{genre}'.
+    """.format(presenter_clause=presenter_clause, genre=request.genre or "explainer")
+    else:
+        language_rules = f"""
+    All screen_text and other viewer-visible labels must be concise, natural,
+    beginner-friendly Burmese. Keep only unavoidable product names such as AI.
+    The screen_text field MUST contain 1 or 2 strings only. Never return 3 or
+    more screen_text labels for one segment.
+    The requested presenter configuration is: {presenter_clause}
+    The requested genre is '{request.genre or "explainer"}'.
     """
-    Implements exact_lock story mode.
-    Takes user-approved narration and preserves narration text exactly while Vertex only supplies compliant scene metadata and typed visuals.
-    """
-    request = ExactLockRequest.model_validate(request_data)
-    claim_response = _extract_complete_evidence_claims(request)
-    claims_by_id = {segment.id: segment.claims for segment in claim_response.segments}
 
-    client = _stage_client("lock")
-
-    system_instruction = """
-    You are the FYF AI Video Producer. Your job is to add visual metadata to an approved script.
+    return f"""
+    You are the {studio_name} AI Video Producer. Your job is to add visual metadata to an approved script.
 
     CRITICAL RULE:
     Do not return or rewrite narration text. Your ONLY job is to return each
     supplied segment ID with compliant scene metadata (visual_action,
     scene_type, mascot_action, emotion, emphasis) and a typed visual.
-
-    All screen_text and other viewer-visible labels must be concise, natural,
-    beginner-friendly Burmese. Keep only unavoidable product names such as AI.
-    The screen_text field MUST contain 1 or 2 strings only. Never return 3 or
-    more screen_text labels for one segment.
+{language_rules}
     The motion_spec.relation_mode field may be present only when the layout is
     relationship; omit relation_mode for every other layout.
     Every non-kinetic treatment MUST include focal_object, action, and change;
@@ -855,7 +945,23 @@ def generate_exact_lock(request_data: dict) -> dict:
     types MUST leave motion_spec null.
 
     Output strict JSON matching the supplied metadata-only schema.
+    """.strip()
+
+
+def generate_exact_lock(request_data: dict) -> dict:
     """
+    Implements exact_lock story mode.
+    Takes user-approved narration and preserves narration text exactly while Vertex only supplies compliant scene metadata and typed visuals.
+    The legacy Burmese contract still requires concise viewer-visible labels for a beginner-friendly Burmese audience;
+    ``build_exact_lock_instruction`` applies that contract (or the requested English equivalent) at runtime.
+    """
+    request = ExactLockRequest.model_validate(request_data)
+    claim_response = _extract_complete_evidence_claims(request)
+    claims_by_id = {segment.id: segment.claims for segment in claim_response.segments}
+
+    client = _stage_client("lock")
+
+    system_instruction = build_exact_lock_instruction(request)
 
     prompt = f"Please supply visual metadata for the following approved script. PRESERVE THE NARRATION EXACTLY.\n\nTitle: {request.title}\nSegments:\n"
     for i, seg in enumerate(request.approved_segments):
@@ -1036,8 +1142,22 @@ def generate_exact_lock(request_data: dict) -> dict:
                 segment_data.pop("evidence_shots")
                 merged_segments.append({**segment_data, "text": approved.text, "visual": visual})
 
+            if request.presenter_mode == "voiceover_only":
+                for seg in merged_segments:
+                    vis = seg.get("visual") or {}
+                    for shot in vis.get("evidence_shots", []):
+                        shot["mascot_presence"] = "none"
+
             return VideoScript.model_validate(
-                {"title": request.title, "language": "my-MM", "segments": merged_segments}
+                {
+                    "title": request.title,
+                    "language": request.language,
+                    "studio_name": request.studio_name,
+                    "genre": request.genre,
+                    "presenter_mode": request.presenter_mode,
+                    "voice_actor": request.voice_actor,
+                    "segments": merged_segments,
+                }
             ).model_dump(mode="json")
 
         except (json.JSONDecodeError, ValueError) as exc:

@@ -42,6 +42,7 @@ from visual_evidence_vertex import (
 )
 from vertex_model_routing import model_for
 from backend.vertex_telemetry import telemetry_scope
+from video_contract import ASPECT_RATIO_DIMENSIONS, RenderControls
 
 logger = logging.getLogger(__name__)
 
@@ -243,6 +244,47 @@ def _render_fingerprint(script_dict: Dict[str, Any], audio_path: Path) -> str:
     return digest.hexdigest()
 
 
+def _script_render_controls(script_dict: Dict[str, Any]) -> dict[str, Any] | None:
+    """Return a validated control snapshot when the job carries one."""
+    raw = script_dict.get("render_controls")
+    if raw is None:
+        names = (
+            "cta_text",
+            "retention_progress_bar",
+            "animated_lower_thirds",
+            "aspect_ratio",
+        )
+        if not any(name in script_dict for name in names):
+            return None
+        raw = {name: script_dict[name] for name in names if name in script_dict}
+    return RenderControls.model_validate(raw).model_dump(mode="json")
+
+
+def _render_input_matches_controls(job_dir: Path, script_dict: Dict[str, Any]) -> bool:
+    """Prevent a resume/cache hit when persisted Remotion props drift."""
+    expected = _script_render_controls(script_dict)
+    if expected is None:
+        return True
+    try:
+        render_input = json.loads((job_dir / "render_input.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(render_input, dict):
+        return False
+    raw = render_input.get("render_controls")
+    if raw is None:
+        names = tuple(expected)
+        raw = {name: render_input[name] for name in names if name in render_input}
+    try:
+        actual = RenderControls.model_validate(raw).model_dump(mode="json")
+    except ValueError:
+        return False
+    if actual != expected:
+        return False
+    dimensions = ASPECT_RATIO_DIMENSIONS[expected["aspect_ratio"]]
+    return (render_input.get("width"), render_input.get("height")) == dimensions
+
+
 def _render_checkpoint_is_usable(job_dir: Path, script_dict: Dict[str, Any], audio_path: Path) -> bool:
     checkpoint_path = job_dir / "render_checkpoint.json"
     video_path = job_dir / "video.mp4"
@@ -278,6 +320,8 @@ def _render_checkpoint_is_usable(job_dir: Path, script_dict: Dict[str, Any], aud
         saved_manifest = saved.get("manifest_fingerprint")
         if current_manifest and saved_manifest != current_manifest:
             return False
+    if not _render_input_matches_controls(job_dir, script_dict):
+        return False
     return (
         saved.get("complete") is True
         and saved.get("fingerprint") == _render_fingerprint(script_dict, audio_path)
@@ -461,12 +505,29 @@ def _mirror_job_telemetry_to_clickhouse(job_id: str, job_dir: Path, script_dict:
         )
         qa_report = status_row.get("qa_report") or {}
         final_qa = status_row.get("final_visual_qa") or {}
+        observed_models = {
+            call.get("model", "").strip()
+            for call in (snapshot.get("calls") or [])
+            if isinstance(call, dict)
+            and isinstance(call.get("model"), str)
+            and call.get("model", "").strip()
+        }
+        observed_model = next(iter(observed_models)) if len(observed_models) == 1 else None
+        script_metadata = {
+            field: script_dict[field]
+            for field in ("studio_name", "language", "genre")
+            if field in script_dict and script_dict[field] is not None
+        }
 
         record_job_telemetry(
             job_id,
             {
                 "title": str(script_dict.get("title", "")),
-                "model_name": "gemini-3.7-flash",
+                # A job can contain multiple provider models (for example
+                # Vertex visual calls plus Gemini TTS). Keep the legacy
+                # mirror model field unknown unless telemetry observed one
+                # unambiguous model rather than inventing a default.
+                "model_name": observed_model,
                 "input_tokens": int(summary.get("total_input_tokens") or 0),
                 "output_tokens": int(summary.get("total_output_tokens") or 0),
                 "model_call_count": int(
@@ -478,6 +539,7 @@ def _mirror_job_telemetry_to_clickhouse(job_id: str, job_dir: Path, script_dict:
                 "status": str(status_row.get("status") or snapshot.get("job_status") or "completed"),
                 "qa_passed": bool(qa_report.get("passed", False) or final_qa.get("passed", False)),
                 "calls": snapshot.get("calls", []),
+                **script_metadata,
             },
         )
     except Exception:

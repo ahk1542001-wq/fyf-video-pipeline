@@ -475,6 +475,29 @@ class SegmentRenderCacheTests(unittest.TestCase):
                 ),
             )
 
+    def test_nested_render_controls_change_segment_fingerprint(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            asset = Path(temp_dir) / "one.png"
+            asset.write_bytes(b"asset-one")
+            original = render_input_fixture()
+            original["render_controls"] = {
+                "cta_text": "",
+                "retention_progress_bar": True,
+                "animated_lower_thirds": True,
+                "aspect_ratio": "9:16",
+            }
+            changed = copy.deepcopy(original)
+            changed["render_controls"]["cta_text"] = "Learn more"
+
+            self.assertNotEqual(
+                segment_render_fingerprint(
+                    original, segment_id="s1", **fingerprint_kwargs(asset)
+                ),
+                segment_render_fingerprint(
+                    changed, segment_id="s1", **fingerprint_kwargs(asset)
+                ),
+            )
+
     def test_non_intersecting_mouth_cue_does_not_invalidate_target(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             asset = Path(temp_dir) / "one.png"

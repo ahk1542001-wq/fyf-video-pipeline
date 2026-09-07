@@ -15,10 +15,15 @@ import {
   isCinematicVisual,
   shouldShowCinematicMascot,
 } from "./CinematicVisual";
-import {theme} from "./theme";
+import {getFonts, theme} from "./theme";
 import {RenderInput} from "./types";
 import {nonDuplicateStoryLabels} from "./storyLabels";
 import {selectActiveTreatment, shouldShowOverlayLabel} from "./treatmentRouting";
+import {CallToAction} from "./CallToAction";
+import {ProgressBar} from "./ProgressBar";
+import {normalizeRenderControls} from "./renderControls";
+import {presenterAllowsMascot} from "./presenterMode";
+import {studioBranding} from "./studioBranding";
 
 type V3Input = RenderInput & {
   v3SceneAssets?: string[][];
@@ -91,9 +96,13 @@ const StoryLabel: React.FC<{
   text: string;
   localFrame: number;
   warning: boolean;
-}> = ({text, localFrame, warning}) => {
+  animated?: boolean;
+  fontFamily: string;
+}> = ({text, localFrame, warning, animated = true, fontFamily}) => {
   const {fps} = useVideoConfig();
-  const enter = spring({frame: localFrame - 5, fps, config: {damping: 18, stiffness: 150}});
+  const enter = animated
+    ? spring({frame: localFrame - 5, fps, config: {damping: 18, stiffness: 150}})
+    : 1;
   return (
     <div
       style={{
@@ -116,7 +125,7 @@ const StoryLabel: React.FC<{
           background: warning ? "rgba(201,95,69,0.94)" : "rgba(247,244,235,0.94)",
           color: warning ? "#fffaf2" : theme.colors.text,
           boxShadow: "0 16px 42px rgba(35,45,38,0.18)",
-          fontFamily: theme.fonts.display,
+          fontFamily,
           fontSize: 40,
           lineHeight: 1.35,
           fontWeight: 800,
@@ -132,6 +141,10 @@ const StoryLabel: React.FC<{
 export const VisualSystemV3Full: React.FC<V3Input> = (props) => {
   const frame = useCurrentFrame();
   const {durationInFrames, fps} = useVideoConfig();
+  const renderControls = normalizeRenderControls(props);
+  const fonts = getFonts(props.language);
+  const branding = studioBranding(props.studio_name);
+  const mascotAllowed = presenterAllowsMascot(props.presenter_mode);
   const segmentIndex = Math.max(0, props.segments.findIndex((segment) => frame >= segment.startFrame && frame < segment.endFrame));
   const segment = props.segments[segmentIndex] ?? props.segments[props.segments.length - 1];
   const local = Math.max(0, frame - segment.startFrame);
@@ -156,9 +169,9 @@ export const VisualSystemV3Full: React.FC<V3Input> = (props) => {
   }
   const activeTreatment = selectActiveTreatment(passedShots, local, segmentFrames);
   const showOverlayLabel = approvedPreset || (evidenceLabels.length === 0 && shouldShowOverlayLabel(activeTreatment));
-  const showMascot = approvedPreset
+  const showMascot = mascotAllowed && (approvedPreset
     ? (props.v3MascotSegments ?? []).includes(segmentIndex) && beatIndex === 0
-    : activeTreatment?.treatment_type === "mascot_performance" || shouldShowCinematicMascot(segment.visual, local, fps, segmentFrames);
+    : activeTreatment?.treatment_type === "mascot_performance" || shouldShowCinematicMascot(segment.visual, local, fps, segmentFrames));
   const progress = frame / Math.max(1, durationInFrames);
 
   return (
@@ -178,7 +191,7 @@ export const VisualSystemV3Full: React.FC<V3Input> = (props) => {
           endFrame={segment.endFrame}
         />
       )}
-      {showOverlayLabel && label && <StoryLabel text={label} localFrame={beatLocal} warning={warning} />}
+      {showOverlayLabel && label && <StoryLabel text={label} localFrame={beatLocal} warning={warning} animated={renderControls.animated_lower_thirds} fontFamily={fonts.display} />}
 
       {showMascot && (
         <MascotAnimator
@@ -191,12 +204,11 @@ export const VisualSystemV3Full: React.FC<V3Input> = (props) => {
         />
       )}
 
-      <div style={{position: "absolute", top: 62, left: 80, right: 80, height: 5, borderRadius: 4, background: "rgba(168,183,162,0.62)", overflow: "hidden", zIndex: 40}}>
-        <div style={{height: "100%", width: `${progress * 100}%`, background: theme.colors.primary}} />
-      </div>
-      <div style={{position: "absolute", right: 64, bottom: 58, zIndex: 40, color: theme.colors.text, fontFamily: theme.fonts.display, textAlign: "right"}}>
-        <div style={{fontWeight: 850, fontSize: 26}}>FYF</div>
-        <div style={{fontSize: 13, opacity: 0.62}}>Understand AI. Build Real Systems.</div>
+      {renderControls.retention_progress_bar && <ProgressBar position="top" />}
+      {renderControls.cta_text && <CallToAction text={renderControls.cta_text} />}
+      <div style={{position: "absolute", right: 64, bottom: 58, zIndex: 40, color: theme.colors.text, fontFamily: fonts.display, textAlign: "right"}}>
+        <div style={{fontWeight: 850, fontSize: 26}}>{branding.name}</div>
+        <div style={{fontSize: 13, opacity: 0.62}}>{branding.tagline}</div>
       </div>
     </AbsoluteFill>
   );

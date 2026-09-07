@@ -73,6 +73,17 @@ class RenderContractTests(unittest.TestCase):
     def test_valid_input(self):
         validate_render_input(valid_input())
 
+    def test_explicit_aspect_ratio_requires_canonical_dimensions(self):
+        data = valid_input()
+        data["render_controls"] = {
+            "cta_text": "",
+            "retention_progress_bar": True,
+            "animated_lower_thirds": True,
+            "aspect_ratio": "16:9",
+        }
+        with self.assertRaisesRegex(ValueError, "width and height"):
+            validate_render_input(data)
+
     def test_positive_integer_top_level_fields(self):
         self.assert_invalid(lambda d: d.update(fps=True), "fps")
         self.assert_invalid(lambda d: d.update(durationInFrames=0), "durationInFrames")

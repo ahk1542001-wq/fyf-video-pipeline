@@ -72,6 +72,39 @@ HUMAN_STYLE_PROMPTS = {
     ),
 }
 
+# Studio Voices for Agentic Cinema
+STUDIO_VOICES = {
+    "Sadaltager": "Sadaltager",  # Deep Narrator
+    "Puck": "Puck",              # Dynamic Creator
+    "Aoede": "Aoede",            # Warm Storyteller
+    "Fenrir": "Fenrir",          # Authoritative
+}
+
+ENGLISH_STYLE_PROMPTS = {
+    "natural": (
+        "You are an English narrator speaking naturally and conversationally, "
+        "with clear articulation, steady rhythm, and engaging delivery."
+    ),
+    "storyteller": (
+        "You are a cinematic documentary narrator speaking in English. "
+        "Use deep, evocative pacing with natural pauses, conveying grandeur and curiosity."
+    ),
+    "cinematic": (
+        "You are a cinematic film voice actor delivering high-impact narration. "
+        "Maintain authoritative, dynamic pacing calibrated to 130-150 words per minute."
+    ),
+    "tech": (
+        "You are a knowledgeable tech explainer speaking clearly and concisely. "
+        "Use crisp articulation, modern cadence, and confident pacing."
+    ),
+    "mascot": (
+        "You are an energetic, friendly co-host speaking cheerfully and clearly in English."
+    ),
+    "news": (
+        "You are an authoritative broadcast news anchor delivering factual reporting with measured cadence."
+    ),
+}
+
 # Available male voices
 MALE_VOICES = {
     "casual": "Zubenelgenubi",       # Casual - best for general
@@ -91,38 +124,52 @@ def generate_gemini_tts(
     prompt: Optional[str] = None,
     output_path: str = "output/voice.mp3",
     model: str = "gemini-2.5-flash-preview-tts",
+    language: str = "my-MM",
 ) -> str:
-    """Generate Burmese speech using Gemini-TTS.
+    """Generate speech using Gemini-TTS across Burmese and English.
 
     Args:
-        text: Burmese text to speak
-        voice: Male voice name from MALE_VOICES or a full voice name
-        style: Human-style preset from HUMAN_STYLE_PROMPTS (natural, storyteller, teacher, news, excited)
+        text: Text to synthesize into speech
+        voice: Voice name (e.g. Sadaltager, Puck, Aoede, Fenrir, casual, friendly)
+        style: Style preset (natural, cinematic, storyteller, tech, mascot, news)
         prompt: Custom natural language style instruction (overrides style)
         output_path: Where to save the audio
         model: Gemini TTS model ID
+        language: Language code ('my-MM' or 'en-US')
     """
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
-    voice_name = MALE_VOICES.get(voice, voice)
+    voice_name = STUDIO_VOICES.get(voice) or MALE_VOICES.get(voice, voice)
 
     # Default prompt if none given
     if not prompt:
-        if style == "fyf":
-            prompt = FYF_BRAND_PROMPT
-        elif style == "mascot":
-            prompt = MASCOT_CUTE_PROMPT
+        if language in ("en-US", "en"):
+            if style == "mascot":
+                prompt = ENGLISH_STYLE_PROMPTS["mascot"]
+            elif style in ENGLISH_STYLE_PROMPTS:
+                prompt = ENGLISH_STYLE_PROMPTS[style]
+            else:
+                prompt = ENGLISH_STYLE_PROMPTS["cinematic"]
         else:
-            prompt = HUMAN_STYLE_PROMPTS.get(style, HUMAN_STYLE_PROMPTS["natural"])
+            if style == "fyf":
+                prompt = FYF_BRAND_PROMPT
+            elif style == "mascot":
+                prompt = MASCOT_CUTE_PROMPT
+            else:
+                prompt = HUMAN_STYLE_PROMPTS.get(style, HUMAN_STYLE_PROMPTS["natural"])
 
     from backend.vertex_client import vertex_client_kwargs
 
     kwargs = vertex_client_kwargs(location=os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1"))
     client = track_client(genai.Client(**kwargs), stage="tts")
 
+    # Gemini TTS receives style direction as part of the natural-language
+    # content. Computing a preset without sending it leaves every style and
+    # language path with the provider's default delivery.
+    tts_contents = f"{prompt}\n\n{text}" if prompt else text
     response = client.models.generate_content(
         model=model,
-        contents=text,
+        contents=tts_contents,
         config={
             "response_modalities": ["AUDIO"],
             "speech_config": {

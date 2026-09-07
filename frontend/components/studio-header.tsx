@@ -12,16 +12,16 @@ type StudioHeaderProps = {
 
 export default function StudioHeader({ runtime, runtimeSource }: StudioHeaderProps) {
   const pathname = usePathname();
-  const isCreate = pathname === "/";
+  const isCreate = pathname === "/" || pathname === "/create";
   const isLibrary = pathname === "/library" || pathname.startsWith("/library/");
-  const isTelemetry = pathname === "/telemetry" || pathname.startsWith("/telemetry/");
+  const isTelemetry = pathname === "/telemetry" || pathname.startsWith("/telemetry/") || pathname === "/insights";
 
   return (
     <header className="studio-header">
       <div className="studio-header__inner">
-        <Link href="/" className="studio-brand" aria-label="FYF Create workspace">
-          <span className="studio-brand__mark">FYF</span>
-          <span className="studio-brand__subline">Video workspace</span>
+        <Link href="/" className="studio-brand" aria-label="FYF Agentic Business Studio workspace">
+          <span className="studio-brand__mark">FYF Agentic Business Studio</span>
+          <span className="studio-brand__subline">by FYF</span>
         </Link>
 
         <nav className="studio-nav" aria-label="Primary navigation">

@@ -21,7 +21,7 @@ from typing import Any, Literal, Optional
 from fastapi import BackgroundTasks, Body, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from dotenv import load_dotenv
 
 # Set up logging
@@ -52,7 +52,7 @@ from backend.telemetry_store import get_all_telemetry_summary, get_job_telemetry
 from backend.video_director import apply_director_pass
 from backend.video_styles import apply_video_style, get_available_styles
 from vertex_model_routing import model_for
-from video_contract import ExactLockRequest, StoryModesResponse, VideoScript
+from video_contract import ExactLockRequest, RenderControls, StoryModesResponse, VideoScript
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 JOBS_ROOT = REPO_ROOT / "output" / "jobs"
@@ -77,9 +77,14 @@ app.add_middleware(
 
 class ScriptRequest(BaseModel):
     topic: str = Field(min_length=1, max_length=6000)
-    duration_mode: Literal["short"] = "short"
+    duration_mode: Literal["short", "micro", "standard"] = "short"
     style: str | None = "fyf_explainer"
     use_adk_agent: bool = True
+    studio_name: str = "FYF Studio"
+    language: str = "my-MM"
+    genre: str = "explainer"
+    presenter_mode: str = "on_screen"
+    voice_actor: str = "Sadaltager"
 
     @field_validator("topic")
     @classmethod
@@ -110,6 +115,11 @@ class StoryLockResponse(ScriptResponse):
 
 class StoryPolishRequest(BaseModel):
     topic_or_draft: str = Field(min_length=1, max_length=6000)
+    studio_name: str = "FYF Studio"
+    language: str = "my-MM"
+    genre: str = "explainer"
+    presenter_mode: str = "on_screen"
+    voice_actor: str = "Sadaltager"
 
     @field_validator("topic_or_draft")
     @classmethod
@@ -126,17 +136,26 @@ class StoryPolishResponse(BaseModel):
     model_used: str | None = None
 
 
-class VideoRequest(BaseModel):
+class VideoRequest(RenderControls):
+    model_config = ConfigDict(extra="ignore")
+
     lock_id: str = Field(pattern=r"^[0-9a-f]{8}$")
     voice_provider: Literal["gemini"] = "gemini"
     style: str | None = "fyf_explainer"
+    studio_name: str = "FYF Studio"
+    language: str = "my-MM"
+    genre: str = "explainer"
+    presenter_mode: str = "on_screen"
+    voice_actor: str = "Sadaltager"
 
     @field_validator("style")
     @classmethod
     def validate_style(cls, v: str | None) -> str:
         if v is None or v == "":
             return "fyf_explainer"
-        valid_ids = {s["id"] for s in get_available_styles()}
+        valid_ids = {s["id"] for s in get_available_styles()} | {
+            "cinematic_documentary", "tech_explainer", "investigative", "narrative", "explainer"
+        }
         if v not in valid_ids:
             raise ValueError(f"Unknown video style '{v}'. Valid styles: {sorted(valid_ids)}")
         return v
@@ -262,23 +281,34 @@ def _generation_runtime_state() -> dict[str, bool | str]:
     }
 
 
+def _enforce_public_access_token(request: Request) -> None:
+    """Require the operator token on public sensitive endpoints when configured."""
+    if not _is_public_deployment():
+        return
+
+    expected_token = os.getenv("FYF_GENERATION_ACCESS_TOKEN", "")
+    if not expected_token:
+        # Preserve the documented open demonstration mode when no token is set.
+        return
+
+    submitted_token = request.headers.get("x-fyf-access-token", "")
+    if not submitted_token or not hmac.compare_digest(submitted_token, expected_token):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Private generation access is required.",
+        )
+
+
 def _enforce_public_generation_access(request: Request) -> None:
     """Fail closed before quota reservation or provider work on the public deployment."""
     if not _is_public_deployment():
         return
 
+    _enforce_public_access_token(request)
+
     runtime = _generation_runtime_state()
     if not runtime["generation_available"]:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=runtime["generation_message"])
-
-    expected_token = os.getenv("FYF_GENERATION_ACCESS_TOKEN", "")
-    if not expected_token:
-        # Open demonstration mode: no token configured; budget caps and the
-        # concurrency guard are the protection layer.
-        return
-    submitted_token = request.headers.get("x-fyf-access-token", "")
-    if not submitted_token or not hmac.compare_digest(submitted_token, expected_token):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Private generation access is required.")
 
 
 def _should_resume_script_job(data: dict) -> bool:
@@ -299,6 +329,9 @@ def _create_video_job(
     output_dir = JOBS_ROOT / job_id
     initialize_job_status(output_dir, job_id, voice_provider)
     write_json_atomically(output_dir / "script.json", script_data)
+    controls = script_data.get("render_controls")
+    if isinstance(controls, dict):
+        update_job_status(output_dir, {"render_controls": controls})
     return VideoJobItem(
         voice_provider=voice_provider,
         job_id=job_id,
@@ -333,6 +366,20 @@ def _queue_video_job(
     return job
 
 
+def _with_render_controls(script_data: dict[str, Any], controls: RenderControls) -> dict[str, Any]:
+    """Attach one immutable control snapshot to the job-local script."""
+    control_fields = set(RenderControls.model_fields.keys())
+    dumped = controls.model_dump(mode="json")
+    snapshot = {k: v for k, v in dumped.items() if k in control_fields}
+    result = dict(script_data)
+    # Keep the explicit nested snapshot and the flat Remotion props in sync so
+    # old readers can continue to consume script.json while new readers can
+    # validate a single render contract.
+    result["render_controls"] = snapshot
+    result.update(snapshot)
+    return result
+
+
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "fyf-video-pipeline"}
@@ -358,7 +405,9 @@ def get_runtime():
 
 @app.get("/api/video-styles")
 def list_video_styles():
-    return {"styles": get_available_styles()}
+    from backend.video_styles import get_available_genres
+    return {"styles": get_available_styles() + get_available_genres()}
+
 
 
 @app.post("/api/generate-script", status_code=status.HTTP_202_ACCEPTED, response_model=ScriptJobResponse)
@@ -657,7 +706,14 @@ async def story_polish(req: StoryPolishRequest, request: Request):
         from backend.vertex_telemetry import telemetry_scope
         with telemetry_scope(op_id, "story_polish", SCRIPT_JOBS_ROOT / op_id) as collector:
             from writer_agent_vertex import generate_story_modes
-            generated = generate_story_modes(req.topic_or_draft)
+            generated = generate_story_modes(
+                req.topic_or_draft,
+                language=req.language,
+                genre=req.genre,
+                presenter_mode=req.presenter_mode,
+                studio_name=req.studio_name,
+                voice_actor=req.voice_actor,
+            )
             result = StoryModesResponse.model_validate({"variants": generated["variants"]})
             summary = collector.summary()
             actual_cost = float(summary.get("estimated_cost_usd") or 0.0) if summary.get("cost_status") in ("exact", "partial") else 0.0
@@ -720,6 +776,24 @@ async def generate_video(req: VideoRequest, request: Request, background_tasks: 
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     styled_script = apply_video_style(script_data, req.style)
+    if isinstance(styled_script, dict):
+        if req.studio_name:
+            styled_script["studio_name"] = req.studio_name
+        if req.language:
+            styled_script["language"] = req.language
+        if req.genre:
+            styled_script["genre"] = req.genre
+        if req.presenter_mode:
+            styled_script["presenter_mode"] = req.presenter_mode
+        if req.voice_actor:
+            styled_script["voice_actor"] = req.voice_actor
+        if req.presenter_mode == "voiceover_only":
+            for seg in styled_script.get("segments", []):
+                vis = seg.get("visual") or {}
+                for shot in vis.get("evidence_shots", []):
+                    shot["mascot_presence"] = "none"
+        styled_script = _with_render_controls(styled_script, req)
+
     job_id = uuid.uuid4().hex[:8]
 
     # Guardrail check happens BEFORE any disk creation!
@@ -784,6 +858,7 @@ def get_recent_approved_videos():
             final_visual_qa = status_data.get("final_visual_qa")
             if (
                 status_data.get("status") != "completed"
+                or status_data.get("archived") is True
                 or not isinstance(qa_report, dict)
                 or qa_report.get("passed") is not True
                 or not isinstance(final_visual_qa, dict)
@@ -851,6 +926,38 @@ def get_job_status(job_id: str):
         raise HTTPException(status_code=500, detail="Job status corrupted")
 
 
+@app.delete("/api/jobs/{job_id}")
+def delete_or_archive_job(job_id: str, request: Request):
+    """Archive or delete a video job from the library."""
+    _enforce_public_generation_access(request)
+    if not is_valid_job_id(job_id):
+        raise HTTPException(status_code=400, detail="Invalid job ID")
+
+    job_dir = JOBS_ROOT / job_id
+    try:
+        resolved_job_dir = job_dir.resolve()
+        resolved_job_dir.relative_to(JOBS_ROOT.resolve())
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Forbidden path")
+
+    if not resolved_job_dir.is_dir():
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    status_file = resolved_job_dir / "status.json"
+    if not status_file.is_file():
+        raise HTTPException(status_code=500, detail="Job status missing")
+    try:
+        status_data = json.loads(status_file.read_text(encoding="utf-8"))
+        status_data["archived"] = True
+        status_data["status"] = "archived"
+        write_json_atomically(status_file, status_data)
+    except Exception as exc:
+        logger.warning("Failed to update status.json for job %s: %s", job_id, exc)
+        raise HTTPException(status_code=500, detail="Failed to archive job") from exc
+
+    return {"success": True, "job_id": job_id, "archived": True}
+
+
 @app.post("/api/jobs/{job_id}/resume", status_code=status.HTTP_202_ACCEPTED, response_model=VideoResponse)
 async def resume_job(job_id: str, request: Request, background_tasks: BackgroundTasks):
     """Resume a failed or interrupted resumable video job."""
@@ -858,7 +965,9 @@ async def resume_job(job_id: str, request: Request, background_tasks: Background
     if not is_valid_job_id(job_id):
         raise HTTPException(status_code=400, detail="Invalid job ID")
 
-    job_dir = JOBS_ROOT / job_id
+    job_dir = _safe_job_path(JOBS_ROOT / job_id)
+    if job_dir is None:
+        raise HTTPException(status_code=403, detail="Forbidden path")
     if not job_dir.is_dir():
         raise HTTPException(status_code=404, detail="Job not found")
 
@@ -881,6 +990,32 @@ async def resume_job(job_id: str, request: Request, background_tasks: Background
         script_data = json.loads(script_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         raise HTTPException(status_code=400, detail="Job script corrupt")
+
+    persisted_controls = status_data.get("render_controls")
+    if persisted_controls is not None:
+        try:
+            controls = RenderControls.model_validate(persisted_controls)
+            script_controls = script_data.get("render_controls")
+            if script_controls is None:
+                script_controls = {
+                    name: script_data[name]
+                    for name in RenderControls.model_fields
+                    if name in script_data
+                }
+            if script_controls:
+                script_snapshot = RenderControls.model_validate(script_controls)
+                if script_snapshot != controls:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Job render controls do not match persisted status",
+                    )
+            else:
+                script_data = _with_render_controls(script_data, controls)
+                write_json_atomically(script_path, script_data)
+        except HTTPException:
+            raise
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Job render controls corrupt") from exc
 
     resume_count = int(status_data.get("resume_count", 0)) + 1
     if resume_count > 3:
@@ -930,7 +1065,9 @@ def get_job_video(job_id: str):
     if not is_valid_job_id(job_id):
         raise HTTPException(status_code=400, detail="Invalid job ID")
 
-    job_dir = JOBS_ROOT / job_id
+    job_dir = _safe_job_path(JOBS_ROOT / job_id)
+    if job_dir is None:
+        raise HTTPException(status_code=403, detail="Forbidden path")
     video_path = job_dir / "video.mp4"
     if not video_path.exists():
         raise HTTPException(status_code=404, detail="Video file not found")
@@ -972,9 +1109,10 @@ def get_job_telemetry_alias(job_id: str):
 
 
 @app.post("/api/insights")
-def ask_data_insights(payload: dict = Body(...)):
+def ask_data_insights(request: Request, payload: dict = Body(...)):
     """Ask the FYF Data Officer (ADK agent + mcp-clickhouse) a question about
     production telemetry. Read-only; answers from ClickHouse Cloud."""
+    _enforce_public_generation_access(request)
     question = str(payload.get("question", "")).strip()
     if not question:
         raise HTTPException(status_code=400, detail="question is required")
@@ -1015,3 +1153,34 @@ def ask_data_insights(payload: dict = Body(...)):
         logger.exception("Data Officer failed for question")
         raise HTTPException(status_code=502, detail="Data Officer failed unexpectedly")
     return {"success": True, "question": question, **result}
+
+
+@app.post("/api/clickhouse/query")
+def execute_clickhouse_query(request: Request, payload: dict = Body(...)):
+    """Execute a server-owned telemetry query by identifier."""
+    _enforce_public_access_token(request)
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="JSON object body is required")
+    if "query" in payload:
+        raise HTTPException(
+            status_code=400,
+            detail="Caller SQL is not accepted; provide one of the supported query_id values.",
+        )
+    query_id = payload.get("query_id")
+    from backend.telemetry_queries import QUERY_SQL, execute_telemetry_query
+
+    if not isinstance(query_id, str) or query_id not in QUERY_SQL:
+        raise HTTPException(
+            status_code=400,
+            detail=f"query_id must be one of: {', '.join(sorted(QUERY_SQL.keys()))}",
+        )
+    try:
+        return execute_telemetry_query(
+            query_id,
+            jobs_root=JOBS_ROOT,
+            script_jobs_root=SCRIPT_JOBS_ROOT,
+            repo_root=REPO_ROOT,
+        )
+    except Exception as exc:
+        logger.warning("Telemetry query %s failed: %s", query_id, exc)
+        raise HTTPException(status_code=503, detail="Telemetry query unavailable") from exc

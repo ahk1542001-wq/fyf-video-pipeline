@@ -40,6 +40,47 @@ VIDEO_STYLES: dict[str, dict[str, Any]] = {
     },
 }
 
+GENRE_STYLES: dict[str, dict[str, Any]] = {
+    "cinematic_documentary": {
+        "id": "cinematic_documentary",
+        "name": "Cinematic Documentary",
+        "description": "Atmospheric visuals, natural lighting, deep investigative pacing, and wide establishing shots.",
+        "preferred_cameras": ["wide", "push_in", "over_shoulder"],
+        "preferred_motion_presets": ["slow_push", "drift", "pan_left"],
+        "color_theme": "documentary_sepia",
+        "badge_accent": "#854D0E",
+    },
+    "tech_explainer": {
+        "id": "tech_explainer",
+        "name": "Tech & Product Explainer",
+        "description": "Crisp isometric diagrams, blueprint grids, high-contrast typography, and dynamic product breakdown.",
+        "preferred_cameras": ["close_up", "push_in", "wide"],
+        "preferred_motion_presets": ["pan_right", "slow_push", "static"],
+        "color_theme": "tech_cyan",
+        "badge_accent": "#0284C7",
+    },
+    "investigative": {
+        "id": "investigative",
+        "name": "Evidence & Investigative Cinema",
+        "description": "Document inspection, forensic data points, high-contrast evidence reveals, and intense camera focus.",
+        "preferred_cameras": ["close_up", "over_shoulder", "push_in"],
+        "preferred_motion_presets": ["static", "slow_push", "pan_left"],
+        "color_theme": "investigative_crimson",
+        "badge_accent": "#DC2626",
+    },
+    "narrative": {
+        "id": "narrative",
+        "name": "Narrative Short",
+        "description": "Character-driven emotional depth, shallow depth of field, dramatic shadows, and evocative pacing.",
+        "preferred_cameras": ["close_up", "push_in", "wide"],
+        "preferred_motion_presets": ["drift", "slow_push", "pan_right"],
+        "color_theme": "narrative_purple",
+        "badge_accent": "#7C3AED",
+    },
+}
+
+ALL_STYLES_AND_GENRES: dict[str, dict[str, Any]] = {**VIDEO_STYLES, **GENRE_STYLES}
+
 
 def list_available_styles() -> list[dict[str, Any]]:
     """Return all available video style definitions."""
@@ -49,11 +90,25 @@ def list_available_styles() -> list[dict[str, Any]]:
 get_available_styles = list_available_styles
 
 
+def list_available_genres() -> list[dict[str, Any]]:
+    """Return all available cinematic genres."""
+    return list(GENRE_STYLES.values())
+
+
+get_available_genres = list_available_genres
+
+
 def get_style_config(style_id: str | None = None) -> dict[str, Any]:
-    """Retrieve configuration for a specific video style, falling back to default."""
-    if not style_id or style_id not in VIDEO_STYLES:
+    """Retrieve configuration for a specific video style or genre, falling back to default."""
+    if not style_id:
         return VIDEO_STYLES[DEFAULT_STYLE_ID]
-    return VIDEO_STYLES[style_id]
+    if style_id in VIDEO_STYLES:
+        return VIDEO_STYLES[style_id]
+    if style_id in GENRE_STYLES:
+        return GENRE_STYLES[style_id]
+    if style_id == "explainer":
+        return VIDEO_STYLES["fyf_explainer"]
+    return VIDEO_STYLES[DEFAULT_STYLE_ID]
 
 
 def apply_video_style(

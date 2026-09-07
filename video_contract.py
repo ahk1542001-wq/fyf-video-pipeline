@@ -3,7 +3,43 @@
 import re
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator, model_validator
+
+
+AspectRatio = Literal["9:16", "16:9", "1:1"]
+
+
+ASPECT_RATIO_DIMENSIONS: dict[str, tuple[int, int]] = {
+    "9:16": (1080, 1920),
+    "16:9": (1920, 1080),
+    "1:1": (1080, 1080),
+}
+
+
+class RenderControls(BaseModel):
+    """Server-owned controls that are part of the immutable render contract."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # An empty value intentionally disables the optional CTA.  Keeping the
+    # default empty preserves the pre-business-studio Burmese renderer.
+    cta_text: str = ""
+    # These controls default to the legacy renderer's existing visible layers.
+    retention_progress_bar: StrictBool = True
+    animated_lower_thirds: StrictBool = True
+    aspect_ratio: AspectRatio = "9:16"
+
+    @field_validator("cta_text")
+    @classmethod
+    def validate_cta_text(cls, value: str) -> str:
+        if not isinstance(value, str):
+            raise ValueError("cta_text must be a string")
+        stripped = value.strip()
+        if value and not stripped:
+            raise ValueError("cta_text must not be whitespace only")
+        if len(stripped) > 80:
+            raise ValueError("cta_text must be at most 80 characters")
+        return stripped
 
 
 def _contains_number_label(screen_text: list[str], value: int) -> bool:
@@ -348,15 +384,68 @@ class ScriptSegment(BaseModel):
         return value
 
 
+class ScriptGenerationRequest(BaseModel):
+    """Client request for script generation across languages, genres, and styles."""
+
+    model_config = ConfigDict(extra="ignore")
+    topic: str = Field(min_length=1, max_length=6000)
+    duration_mode: Literal["short", "micro", "standard"] = "short"
+    style: str | None = "fyf_explainer"
+    use_adk_agent: bool = True
+    studio_name: str = "FYF Studio"
+    language: str = "my-MM"
+    genre: str = "explainer"
+    presenter_mode: str = "on_screen"
+    voice_actor: str = "Sadaltager"
+
+
 class VideoScript(BaseModel):
     """Vertex-owned script and visual intent, without media timing."""
 
     model_config = ConfigDict(extra="forbid")
 
     title: str = Field(min_length=1)
-    language: Literal["my-MM"] = "my-MM"
+    language: str = "my-MM"
     segments: list[ScriptSegment] = Field(min_length=1)
     style_applied: str | None = None
+    studio_name: str | None = None
+    genre: str | None = None
+    presenter_mode: str | None = None
+    voice_actor: str | None = None
+    # Render controls are persisted in script.json so every downstream stage
+    # (including visual planning and final QA) can validate the same contract.
+    # Exclude absent optional fields to keep legacy script serialization stable.
+    render_controls: RenderControls | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    cta_text: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    retention_progress_bar: bool | None = Field(default=None, exclude_if=lambda value: value is None)
+    animated_lower_thirds: bool | None = Field(default=None, exclude_if=lambda value: value is None)
+    aspect_ratio: AspectRatio | None = Field(default=None, exclude_if=lambda value: value is None)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_render_controls(cls, value: object) -> object:
+        """Accept and canonicalize the nested and legacy flat control forms."""
+        if not isinstance(value, dict):
+            return value
+
+        control_names = tuple(RenderControls.model_fields)
+        nested = value.get("render_controls")
+        flat = {name: value[name] for name in control_names if name in value}
+        if nested is None and not flat:
+            return value
+
+        controls = RenderControls.model_validate(nested if nested is not None else flat)
+        canonical = controls.model_dump(mode="json")
+        for name, expected in canonical.items():
+            if name in value and value[name] != expected:
+                raise ValueError(f"{name} does not match render_controls")
+
+        normalized = dict(value)
+        normalized["render_controls"] = canonical
+        normalized.update(canonical)
+        return normalized
 
     @field_validator("title")
     @classmethod
@@ -393,8 +482,12 @@ class StoryDraftScript(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     title: str = Field(min_length=1)
-    language: Literal["my-MM"] = "my-MM"
+    language: str = "my-MM"
     segments: list[StoryDraftSegment] = Field(min_length=5)
+    studio_name: str | None = None
+    genre: str | None = None
+    presenter_mode: str | None = None
+    voice_actor: str | None = None
 
 
 class StoryDraftVariant(BaseModel):
@@ -462,6 +555,11 @@ class ExactLockRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     title: str = Field(min_length=1)
     approved_segments: list[ApprovedNarrationSegment] = Field(min_length=1)
+    studio_name: str | None = None
+    language: str = "my-MM"
+    genre: str | None = None
+    presenter_mode: str | None = None
+    voice_actor: str | None = None
 
     @field_validator("approved_segments")
     @classmethod

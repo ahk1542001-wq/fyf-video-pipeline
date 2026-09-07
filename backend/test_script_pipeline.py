@@ -137,6 +137,41 @@ class ScriptPipelineTests(unittest.TestCase):
             self.assertEqual(len(list(job.glob("locked-batch-*.json"))), 10)
             self.assertEqual(status["batch_size"], 2)
 
+    def test_direct_writer_path_persists_requested_studio_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            jobs, locks = self.make_job(root)
+            job = jobs / "abcd1234"
+            (job / "request.json").write_text(
+                json.dumps({
+                    "topic": "Cinema topic",
+                    "duration_mode": "standard",
+                    "use_adk_agent": False,
+                    "studio_name": "Cinema Lab",
+                    "language": "en-US",
+                    "genre": "cinematic_documentary",
+                    "presenter_mode": "voiceover_only",
+                    "voice_actor": "Kore",
+                }),
+                encoding="utf-8",
+            )
+            with (
+                patch("writer_agent_vertex.generate_narration_script", return_value=draft(12)) as narration,
+                patch("writer_agent_vertex.generate_exact_lock", side_effect=lock_batch) as exact,
+            ):
+                run_script_pipeline("abcd1234", jobs, locks)
+
+            result = json.loads((job / "result.json").read_text(encoding="utf-8"))
+            self.assertEqual(result["studio_name"], "Cinema Lab")
+            self.assertEqual(result["language"], "en-US")
+            self.assertEqual(result["genre"], "cinematic_documentary")
+            self.assertEqual(result["presenter_mode"], "voiceover_only")
+            self.assertEqual(result["voice_actor"], "Kore")
+            narration.assert_called_once_with(
+                "Cinema topic", "standard", language="en-US", genre="cinematic_documentary"
+            )
+            self.assertEqual(exact.call_args.args[0]["language"], "en-US")
+
     def test_job_retry_has_a_bounded_cooldown(self):
         with (
             patch.dict("os.environ", {}, clear=True),

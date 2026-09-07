@@ -7,6 +7,8 @@ from pathlib import Path
 from datetime import datetime, timezone
 from typing import Dict, Any, Literal
 
+from video_contract import RenderControls
+
 
 JOB_LEASE_FILENAME = "pipeline.lease"
 _RENDER_PROGRESS_STRATEGIES = {
@@ -235,6 +237,15 @@ def read_job_status(job_dir: Path) -> Dict[str, Any]:
             "stage_timings": data.get("stage_timings", {}),
             "paired_source_job_id": data.get("paired_source_job_id"),
         }
+        if data.get("render_controls") is not None:
+            try:
+                result["render_controls"] = RenderControls.model_validate(
+                    data["render_controls"]
+                ).model_dump(mode="json")
+            except ValueError as exc:
+                raise ValueError(f"Invalid render_controls: {exc}") from exc
+        if "archived" in data:
+            result["archived"] = bool(data["archived"])
         raw_render_progress = data.get("render_progress")
         if raw_render_progress is not None:
             result["render_progress"] = _validate_render_progress(raw_render_progress)
@@ -284,8 +295,16 @@ def update_job_status(job_dir: Path, updates: Dict[str, Any]) -> Dict[str, Any]:
         "status", "video_url", "error", "qa_report", "creative_qa", "final_visual_qa",
         "voice_provider", "resume_count", "restart_resumable",
         "attempt_count", "visual_artifact_key", "visual_cache_state", "stage_timings",
-        "paired_source_job_id", "render_progress", "qa_progress",
+        "paired_source_job_id", "render_progress", "qa_progress", "render_controls",
     }
+    if "render_controls" in updates:
+        try:
+            updates = dict(updates)
+            updates["render_controls"] = RenderControls.model_validate(
+                updates["render_controls"]
+            ).model_dump(mode="json")
+        except ValueError as exc:
+            raise ValueError(f"Invalid render_controls: {exc}") from exc
     if "render_progress" in updates:
         _validate_render_progress(updates["render_progress"])
     if "qa_progress" in updates:

@@ -125,6 +125,10 @@ class ADKAgentTests(unittest.TestCase):
         self.assertIn("target_audience", result)
         self.assertEqual(result["suggested_segments"], 4)
 
+    def test_research_topic_treats_micro_as_short_duration(self):
+        result = research_topic("Quantum Computing", duration_mode="micro")
+        self.assertEqual(result["suggested_segments"], 4)
+
     def test_draft_story_segments_validates_schema(self):
         with patch(
             "writer_agent_vertex.generate_narration_script",
@@ -133,6 +137,23 @@ class ADKAgentTests(unittest.TestCase):
             draft = draft_story_segments("စိုက်ပျိုးရေး", "short")
             self.assertEqual(draft["title"], "လယ်ယာကဏ္ဍ အခွင့်အလမ်းများ")
             self.assertEqual(len(draft["segments"]), 5)
+
+    def test_draft_story_segments_persists_requested_language_and_genre(self):
+        with patch(
+            "writer_agent_vertex.generate_narration_script",
+            return_value=_mock_draft(),
+        ):
+            draft = draft_story_segments(
+                "Quantum Computing",
+                "standard",
+                language="en-US",
+                genre="tech_explainer",
+                studio_name="Cinema Lab",
+            )
+
+        self.assertEqual(draft["language"], "en-US")
+        self.assertEqual(draft["genre"], "tech_explainer")
+        self.assertEqual(draft["studio_name"], "Cinema Lab")
 
     def test_audit_story_quality_passes_valid_draft(self):
         draft = _mock_draft()
@@ -291,6 +312,47 @@ class ADKAgentTests(unittest.TestCase):
                 result = run_adk_pipeline("စမ်းသပ်ချက်", "short", job_dir=job_dir)
                 self.assertTrue(mock_run_async.called, "ADK Runner.run_async MUST be called during pipeline execution")
                 self.assertEqual(result["script"]["title"], "လယ်ယာကဏ္ဍ အခွင့်အလမ်းများ")
+
+    def test_run_adk_pipeline_persists_requested_studio_metadata(self):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        generated_script = _mock_exact_lock()
+        generated_script["language"] = "my-MM"
+
+        async def fake_events(*args, **kwargs):
+            event = MagicMock()
+            event.get_function_responses.return_value = [
+                MagicMock(response=generated_script),
+            ]
+            yield event
+
+        with (
+            patch(
+                "backend.agent.runner.create_fyf_producer_agent",
+                return_value=SimpleNamespace(name="test_agent", model="test_model"),
+            ),
+            patch("backend.agent.runner.Runner") as runner_factory,
+        ):
+            runner_factory.return_value.run_async.side_effect = fake_events
+            with tempfile.TemporaryDirectory() as temp_dir:
+                result = run_adk_pipeline(
+                    "စမ်းသပ်ချက်",
+                    "standard",
+                    job_dir=Path(temp_dir),
+                    studio_name="Cinema Lab",
+                    language="en-US",
+                    genre="cinematic_documentary",
+                    presenter_mode="voiceover_only",
+                    voice_actor="Kore",
+                )
+
+        script = result["script"]
+        self.assertEqual(script["studio_name"], "Cinema Lab")
+        self.assertEqual(script["language"], "en-US")
+        self.assertEqual(script["genre"], "cinematic_documentary")
+        self.assertEqual(script["presenter_mode"], "voiceover_only")
+        self.assertEqual(script["voice_actor"], "Kore")
 
     def test_runner_failure_raises_and_cannot_return_success(self):
         with patch(
