@@ -38,8 +38,16 @@ from backend.job_store import (
     update_job_status,
     write_json_atomically,
 )
-from backend.budget_store import release_reservation
-from backend.lock_store import create_script_lock, read_script_lock
+from backend.budget_store import get_budget_status, release_reservation
+from backend.lock_store import (
+    GRANULAR_LOCK_SCOPES,
+    create_script_lock,
+    granular_lock_checker,
+    locked_scopes,
+    read_scope_locks,
+    read_script_lock,
+    set_scope_lock,
+)
 from backend.projects.commands import (
     ApprovalRequiredError,
     CommandValidationError,
@@ -47,12 +55,19 @@ from backend.projects.commands import (
     StaleVersionError,
     apply_command,
     create_project_with_script,
+    utc_now_iso,
 )
 from backend.projects.models import (
     PROJECT_ID_PATTERN,
+    AssetReference,
     PinnedProductionConfig,
     ProjectCommand,
+    ProjectVersion,
+    RenderManifest,
+    Selection,
+    WorkflowEvent,
 )
+from backend.projects import chat
 from backend.projects.store import (
     FileProjectStore,
     InvalidProjectIdError,
@@ -1612,7 +1627,9 @@ def apply_project_command(
         raise HTTPException(status_code=400, detail="Body project_id does not match the path")
     store = _project_store()
     try:
-        changeset = apply_command(store, command, rebase=rebase)
+        changeset = apply_command(
+            store, command, rebase=rebase, lock_checker=granular_lock_checker(LOCKS_ROOT)
+        )
     except InvalidProjectIdError as exc:
         raise HTTPException(status_code=400, detail=f"Invalid project id: {exc}") from exc
     except ProjectNotFoundError as exc:
@@ -1658,3 +1675,527 @@ def apply_project_command(
         "status": changeset.status,
         "changeset": changeset.model_dump(mode="json"),
     }
+
+
+# ---------------------------------------------------------------------------
+# Stage C-II (Task 9): shared chat/canvas Studio seam.
+#
+# Additive HTTP routes over the SAME versioned spine (backend.projects). Design
+# rules honoured here:
+#   * Chat is a COMMAND EMITTER: backend.projects.chat maps one message +
+#     selection to ONE ProjectCommand and performs no I/O; the command is then
+#     applied through apply_command (the single mutating seam) with the granular
+#     lock_checker injected. Chat never writes state directly.
+#   * Undo / named variants APPEND a new immutable version (no destructive
+#     rollback: an existing version is never mutated or deleted). The spine
+#     enforces a linear parent (parent_version == version_no - 1), so an undo to
+#     version T appends head+1 whose CONTENT is restored from T and whose
+#     semantic source is recorded in applied_operations / event artifact_refs.
+#   * Generation results attach ONLY to the version they were dispatched
+#     against; a stale result is isolated (no write) and never mutates a newer
+#     draft (C7).
+#   * Events expose progress_source verbatim so the UI can show an actual
+#     percentage or an honestly-labelled estimate (C9).
+#   * Every route reuses _enforce_public_access_token and the existing error map.
+# ---------------------------------------------------------------------------
+
+
+def _granular_checker():
+    """The granular lock_checker hook injected into apply_command.
+
+    Widens - never narrows - the default: with an empty registry it behaves
+    exactly like default_lock_checker (the version's own LockState).
+    """
+    return granular_lock_checker(LOCKS_ROOT)
+
+
+def _version_summary(version: ProjectVersion) -> dict:
+    """A lightweight, honest version-history row (no full script payload)."""
+    return {
+        "version_no": version.version_no,
+        "parent_version": version.parent_version,
+        "variant_name": version.variant_name,
+        "actor": version.actor,
+        "created_at": version.created_at,
+        "applied_operations": list(version.applied_operations),
+        "source_command_operation": version.source_command_operation,
+        "segment_ids": version.segment_ids(),
+        "locks": version.locks.model_dump(mode="json"),
+    }
+
+
+def _load_head_or_404(store: "FileProjectStore", project_id: str) -> tuple[int, ProjectVersion]:
+    head_no = store.current_version_no(project_id)
+    if head_no < 1:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return head_no, store.load_version(project_id, head_no)
+
+
+def _append_derived_version(
+    store: "FileProjectStore",
+    project_id: str,
+    source: ProjectVersion,
+    head_no: int,
+    *,
+    actor: str,
+    stage: str,
+    idempotency_key: Optional[str],
+    variant_name: Optional[str] = None,
+    overrides: Optional[dict] = None,
+    artifact_refs: Optional[list[str]] = None,
+) -> ProjectVersion:
+    """Append head+1 derived from ``source`` content (linear parent = head).
+
+    Used by undo / named-variant / result-attach. Never mutates ``source``.
+    """
+    now = utc_now_iso()
+    data = source.model_dump(mode="json")
+    data["version_no"] = head_no + 1
+    data["parent_version"] = head_no
+    data["actor"] = actor
+    data["created_at"] = now
+    data["idempotency_key"] = idempotency_key
+    data["applied_operations"] = [stage]
+    data["source_command_operation"] = None
+    if variant_name is not None:
+        data["variant_name"] = variant_name
+    if overrides:
+        data.update(overrides)
+    new_version = ProjectVersion.model_validate(data)
+    store.append_version(new_version)
+    store.append_event(
+        WorkflowEvent(
+            event_id=uuid.uuid4().hex,
+            project_id=project_id,
+            version_no=head_no + 1,
+            event_type="version_appended",
+            stage=stage,
+            status="completed",
+            sequence=store.next_sequence(project_id),
+            progress_source="actual",
+            artifact_refs=list(artifact_refs or []),
+            actor=actor,
+            idempotency_key=idempotency_key,
+            timestamp=now,
+        )
+    )
+    return new_version
+
+
+class ChatRequest(BaseModel):
+    """Body for ``POST /api/projects/{id}/chat``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    message: str = Field(min_length=1)
+    selection: Optional[Selection] = None
+    actor: str = "creative-director"
+    base_version: Optional[int] = Field(default=None, ge=0)
+    idempotency_key: Optional[str] = Field(default=None, min_length=1, max_length=128)
+
+
+class UndoRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_version: int = Field(ge=1)
+    actor: str = "creative-director"
+    idempotency_key: Optional[str] = Field(default=None, min_length=1, max_length=128)
+
+
+class VariantRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    variant_name: str = Field(min_length=1, max_length=80)
+    actor: str = "creative-director"
+    base_version: Optional[int] = Field(default=None, ge=1)
+    idempotency_key: Optional[str] = Field(default=None, min_length=1, max_length=128)
+
+
+class ScopeLockRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    scope: str = Field(min_length=1)
+    locked: bool
+    locked_by: Optional[str] = None
+    reason: Optional[str] = None
+
+
+class ResultRequest(BaseModel):
+    """A generation result dispatched against one specific version (C7)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    dispatched_version: int = Field(ge=1)
+    actor: str = "generation"
+    asset_references: list[AssetReference] = Field(default_factory=list)
+    render_manifest: Optional[RenderManifest] = None
+    idempotency_key: Optional[str] = Field(default=None, min_length=1, max_length=128)
+
+
+@app.get("/api/projects/{project_id}/versions")
+def list_project_versions(project_id: str):
+    """Persistent version history: every committed version, newest last."""
+    if not is_valid_job_id(project_id):
+        raise HTTPException(status_code=400, detail="Invalid project ID")
+    store = _project_store()
+    if not store.project_exists(project_id):
+        raise HTTPException(status_code=404, detail="Project not found")
+    numbers = store.list_versions(project_id)
+    versions = [_version_summary(store.load_version(project_id, n)) for n in numbers]
+    return {
+        "success": True,
+        "project_id": project_id,
+        "head": numbers[-1] if numbers else 0,
+        "versions": versions,
+    }
+
+
+@app.get("/api/projects/{project_id}/events")
+def list_project_events(project_id: str, after_sequence: int = 0):
+    """Append-only workflow events (honest progress_source for the UI)."""
+    if not is_valid_job_id(project_id):
+        raise HTTPException(status_code=400, detail="Invalid project ID")
+    store = _project_store()
+    if not store.project_exists(project_id):
+        raise HTTPException(status_code=404, detail="Project not found")
+    events = store.read_events(project_id, after_sequence=after_sequence)
+    return {
+        "success": True,
+        "project_id": project_id,
+        "events": [event.model_dump(mode="json") for event in events],
+    }
+
+
+@app.post("/api/projects/{project_id}/chat")
+def project_chat(project_id: str, req: ChatRequest, request: Request):
+    """Map ONE chat message + selection to ONE command, then apply it.
+
+    Chat never writes state directly: backend.projects.chat produces a
+    ProjectCommand which is applied through apply_command - the exact seam the
+    canvas uses - so chat and canvas edit the SAME canonical version.
+    """
+    _enforce_public_access_token(request)
+    if not is_valid_job_id(project_id):
+        raise HTTPException(status_code=400, detail="Invalid project ID")
+    store = _project_store()
+    try:
+        head_no, head = _load_head_or_404(store, project_id)
+    except InvalidProjectIdError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid project id: {exc}") from exc
+    base_version = req.base_version if req.base_version is not None else head_no
+    try:
+        mapping = chat.map_message_to_command(
+            project_id=project_id,
+            base_version=base_version,
+            message=req.message,
+            version=head,
+            selection=req.selection,
+            actor=req.actor,
+            idempotency_key=req.idempotency_key,
+        )
+    except chat.ChatMappingError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "chat_mapping_failed", "reason": str(exc)},
+        ) from exc
+    try:
+        changeset = apply_command(
+            store, mapping.command, rebase=False, lock_checker=_granular_checker()
+        )
+    except StaleVersionError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "stale_version",
+                "project_id": exc.project_id,
+                "base_version": exc.base_version,
+                "current_version": exc.current_version,
+                "hint": "the canvas moved the head; re-send against the current version",
+            },
+        ) from exc
+    except LockConflictError as exc:
+        scopes = read_scope_locks(LOCKS_ROOT, project_id)
+        reasons = {
+            scope: (scopes.get(scope) or {}).get("reason")
+            for scope in exc.conflicts
+        }
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "lock_conflict",
+                "project_id": exc.project_id,
+                "conflicts": exc.conflicts,
+                "reasons": reasons,
+                "hint": "this scope is locked; unlock it or edit a different scope",
+            },
+        ) from exc
+    except CommandValidationError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "validation_failed",
+                "changeset": exc.changeset.model_dump(mode="json"),
+            },
+        ) from exc
+    except Exception:
+        logger.exception("Chat command application failed")
+        raise HTTPException(status_code=500, detail="Failed to apply chat command")
+    new_version = (
+        store.load_version(project_id, changeset.target_version)
+        if changeset.target_version is not None
+        else head
+    )
+    return {
+        "success": True,
+        "operation": mapping.operation,
+        "summary": mapping.summary,
+        "affected_segment_ids": mapping.affected_segment_ids,
+        "command": mapping.command.model_dump(mode="json"),
+        "status": changeset.status,
+        "changeset": changeset.model_dump(mode="json"),
+        "version": new_version.model_dump(mode="json"),
+    }
+
+
+@app.post("/api/projects/{project_id}/undo")
+def undo_project_version(project_id: str, req: UndoRequest, request: Request):
+    """Undo = append a NEW version restoring ``target_version``'s content.
+
+    No destructive rollback: the target version is never mutated or deleted. The
+    spine's linear-parent rule means the new head's parent is the current head,
+    while the restored content and its provenance (``undo_to_v{T}``) are recorded
+    on the version and its event.
+    """
+    _enforce_public_access_token(request)
+    if not is_valid_job_id(project_id):
+        raise HTTPException(status_code=400, detail="Invalid project ID")
+    store = _project_store()
+    try:
+        with store.transaction(project_id):
+            if not store.project_exists(project_id):
+                raise HTTPException(status_code=404, detail="Project not found")
+            head_no = store.current_version_no(project_id)
+            if head_no < 1:
+                raise HTTPException(status_code=404, detail="Project not found")
+            if req.target_version > head_no:
+                raise HTTPException(status_code=404, detail="Target version not found")
+            if req.idempotency_key:
+                existing = store.find_by_idempotency_key(project_id, req.idempotency_key)
+                if existing is not None:
+                    return {
+                        "success": True,
+                        "status": "replayed",
+                        "restored_from": req.target_version,
+                        "version": existing.model_dump(mode="json"),
+                    }
+            target = store.load_version(project_id, req.target_version)
+            head = store.load_version(project_id, head_no)
+            new_version = _append_derived_version(
+                store,
+                project_id,
+                target,
+                head_no,
+                actor=req.actor,
+                stage=f"undo_to_v{req.target_version}",
+                idempotency_key=req.idempotency_key,
+                artifact_refs=[f"undo:v{req.target_version}", f"from_head:v{head.version_no}"],
+            )
+    except HTTPException:
+        raise
+    except (ProjectNotFoundError, ProjectVersionNotFoundError):
+        raise HTTPException(status_code=404, detail="Project version not found")
+    except Exception:
+        logger.exception("Undo failed")
+        raise HTTPException(status_code=500, detail="Failed to undo")
+    return {
+        "success": True,
+        "status": "applied",
+        "restored_from": req.target_version,
+        "previous_head": head_no,
+        "version": new_version.model_dump(mode="json"),
+    }
+
+
+@app.post("/api/projects/{project_id}/variants")
+def create_project_variant(project_id: str, req: VariantRequest, request: Request):
+    """Persist a NAMED variant as a new server-side version (survives reload)."""
+    _enforce_public_access_token(request)
+    if not is_valid_job_id(project_id):
+        raise HTTPException(status_code=400, detail="Invalid project ID")
+    store = _project_store()
+    try:
+        with store.transaction(project_id):
+            if not store.project_exists(project_id):
+                raise HTTPException(status_code=404, detail="Project not found")
+            head_no = store.current_version_no(project_id)
+            if head_no < 1:
+                raise HTTPException(status_code=404, detail="Project not found")
+            if req.idempotency_key:
+                existing = store.find_by_idempotency_key(project_id, req.idempotency_key)
+                if existing is not None:
+                    return {
+                        "success": True,
+                        "status": "replayed",
+                        "variant_name": existing.variant_name,
+                        "version": existing.model_dump(mode="json"),
+                    }
+            base_no = req.base_version if req.base_version is not None else head_no
+            if base_no > head_no:
+                raise HTTPException(status_code=404, detail="Base version not found")
+            base = store.load_version(project_id, base_no)
+            new_version = _append_derived_version(
+                store,
+                project_id,
+                base,
+                head_no,
+                actor=req.actor,
+                stage=f"variant:{req.variant_name}",
+                idempotency_key=req.idempotency_key,
+                variant_name=req.variant_name,
+                artifact_refs=[f"variant:{req.variant_name}", f"from:v{base_no}"],
+            )
+    except HTTPException:
+        raise
+    except (ProjectNotFoundError, ProjectVersionNotFoundError):
+        raise HTTPException(status_code=404, detail="Project version not found")
+    except Exception:
+        logger.exception("Variant creation failed")
+        raise HTTPException(status_code=500, detail="Failed to create variant")
+    return {
+        "success": True,
+        "status": "applied",
+        "variant_name": new_version.variant_name,
+        "version": new_version.model_dump(mode="json"),
+    }
+
+
+@app.get("/api/projects/{project_id}/locks")
+def get_project_locks(project_id: str):
+    """Current granular scope locks (content / visual / timing) for a project."""
+    if not is_valid_job_id(project_id):
+        raise HTTPException(status_code=400, detail="Invalid project ID")
+    return {
+        "success": True,
+        "project_id": project_id,
+        "scopes": read_scope_locks(LOCKS_ROOT, project_id),
+        "locked": locked_scopes(LOCKS_ROOT, project_id),
+        "available_scopes": list(GRANULAR_LOCK_SCOPES),
+    }
+
+
+@app.post("/api/projects/{project_id}/locks")
+def set_project_lock(project_id: str, req: ScopeLockRequest, request: Request):
+    """Set or clear ONE granular scope lock. The whole-script ``story`` lock
+    (``/api/story-lock``) is untouched; this governs content/visual/timing."""
+    _enforce_public_access_token(request)
+    if not is_valid_job_id(project_id):
+        raise HTTPException(status_code=400, detail="Invalid project ID")
+    if req.scope not in GRANULAR_LOCK_SCOPES:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "unknown_lock_scope",
+                "scope": req.scope,
+                "available_scopes": list(GRANULAR_LOCK_SCOPES),
+            },
+        )
+    record = set_scope_lock(
+        LOCKS_ROOT,
+        project_id,
+        req.scope,
+        locked=req.locked,
+        locked_by=req.locked_by,
+        reason=req.reason,
+    )
+    return {
+        "success": True,
+        "project_id": project_id,
+        "scope": req.scope,
+        "record": record,
+        "locked": locked_scopes(LOCKS_ROOT, project_id),
+    }
+
+
+@app.post("/api/projects/{project_id}/results")
+def attach_project_result(project_id: str, req: ResultRequest, request: Request):
+    """Attach a generation result ONLY to the version it was dispatched against.
+
+    C7 stale-result isolation: when the head has advanced past
+    ``dispatched_version`` (an edit landed during the render), the result is
+    isolated - NOTHING is written and the newer draft is untouched. Otherwise a
+    new version is appended carrying the result's asset references / manifest.
+    """
+    _enforce_public_access_token(request)
+    if not is_valid_job_id(project_id):
+        raise HTTPException(status_code=400, detail="Invalid project ID")
+    store = _project_store()
+    try:
+        with store.transaction(project_id):
+            if not store.project_exists(project_id):
+                raise HTTPException(status_code=404, detail="Project not found")
+            head_no = store.current_version_no(project_id)
+            if head_no < 1:
+                raise HTTPException(status_code=404, detail="Project not found")
+            if req.dispatched_version != head_no:
+                # Stale: isolate. No write, newer draft preserved exactly.
+                return {
+                    "success": True,
+                    "status": "stale_isolated",
+                    "applied": False,
+                    "dispatched_version": req.dispatched_version,
+                    "current_version": head_no,
+                    "reason": "stale_result",
+                    "hint": (
+                        f"result was dispatched against v{req.dispatched_version} but the "
+                        f"head is v{head_no}; nothing was written and v{head_no} is unchanged"
+                    ),
+                }
+            if req.idempotency_key:
+                existing = store.find_by_idempotency_key(project_id, req.idempotency_key)
+                if existing is not None:
+                    return {
+                        "success": True,
+                        "status": "replayed",
+                        "applied": False,
+                        "target_version": existing.version_no,
+                        "version": existing.model_dump(mode="json"),
+                    }
+            head = store.load_version(project_id, head_no)
+            merged = {a["asset_id"]: a for a in head.model_dump(mode="json")["asset_references"]}
+            for asset in req.asset_references:
+                merged[asset.asset_id] = asset.model_dump(mode="json")
+            overrides: dict = {"asset_references": list(merged.values())}
+            if req.render_manifest is not None:
+                overrides["render_manifest"] = req.render_manifest.model_dump(mode="json")
+            new_version = _append_derived_version(
+                store,
+                project_id,
+                head,
+                head_no,
+                actor=req.actor,
+                stage="attach_result",
+                idempotency_key=req.idempotency_key,
+                overrides=overrides,
+                artifact_refs=[a.asset_id for a in req.asset_references],
+            )
+    except HTTPException:
+        raise
+    except (ProjectNotFoundError, ProjectVersionNotFoundError):
+        raise HTTPException(status_code=404, detail="Project version not found")
+    except Exception:
+        logger.exception("Result attachment failed")
+        raise HTTPException(status_code=500, detail="Failed to attach result")
+    return {
+        "success": True,
+        "status": "attached",
+        "applied": True,
+        "dispatched_version": req.dispatched_version,
+        "target_version": new_version.version_no,
+        "version": new_version.model_dump(mode="json"),
+    }
+
+
+@app.get("/api/budget")
+def get_budget():
+    """Fail-closed budget status. Unknown cost stays ``None``, never ``0``."""
+    return {"success": True, "budget": get_budget_status()}

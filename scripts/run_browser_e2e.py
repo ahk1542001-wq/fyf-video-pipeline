@@ -60,9 +60,21 @@ def wait_for_url(url: str, timeout_sec: int = 30) -> bool:
 
 
 def main() -> int:
+    import shutil
+    import tempfile
+
+    # Hermetic persistence roots (Stage C-II): the real FileProjectStore +
+    # budget ledger used by the studio E2E live in a temp dir so they never
+    # touch the repo's gitignored output/ tree and each run is isolated.
+    # Provider generation stays stubbed via hackathon mode, so cost is $0.
+    e2e_state = tempfile.mkdtemp(prefix="fyf-e2e-state-")
     backend_env = dict(os.environ)
     backend_env["FYF_RUNTIME_MODE"] = "hackathon"
     backend_env["PYTHONUNBUFFERED"] = "1"
+    backend_env["FYF_PROJECTS_ROOT"] = os.path.join(e2e_state, "projects")
+    backend_env["FYF_BUDGET_LEDGER_PATH"] = os.path.join(
+        e2e_state, "budget", ".budget_ledger.json"
+    )
 
     frontend_env = dict(os.environ)
     frontend_env["FYF_BACKEND_URL"] = "http://127.0.0.1:8000"
@@ -131,6 +143,7 @@ def main() -> int:
                 print(f"  ✓ {name} stopped.")
         # Final cleanup to ensure ports are released
         _kill_stale_port_listeners(3001, 8000)
+        shutil.rmtree(e2e_state, ignore_errors=True)
 
 
 if __name__ == "__main__":

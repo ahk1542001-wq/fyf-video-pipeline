@@ -229,3 +229,65 @@ def plan_visual_shots(
 
     directed_script = apply_director_pass(video_script)
     return directed_script
+
+
+def propose_project_command(
+    project_id: str,
+    base_version: int,
+    message: str,
+    version: dict[str, Any],
+    selection: dict[str, Any] | None = None,
+    actor: str = "creative-director",
+) -> dict[str, Any]:
+    """Map ONE Creative-Director chat message + current selection to ONE command.
+
+    Stage C-II (Task 9) chat->command tool. This tool NEVER writes project state
+    and NEVER calls a provider: it delegates to the pure mapper
+    ``backend.projects.chat.map_message_to_command``, which emits a single
+    ``ProjectCommand``. That command is applied elsewhere through
+    ``backend.projects.commands.apply_command`` (the one mutating seam), so chat
+    stays a command emitter, not a state writer.
+
+    Args:
+        project_id: 8-hex project id whose canonical head version is edited.
+        base_version: the head version number the command rebases from.
+        message: the operator's natural-language edit instruction.
+        version: the current head ProjectVersion (dict) the message edits.
+        selection: optional canvas selection (scene / object / time_range / all).
+        actor: attribution for the proposed command.
+
+    Returns:
+        ``{"operation", "summary", "affected_segment_ids", "command"}`` on success,
+        or ``{"error", "reason"}`` when the message/selection/version cannot be
+        mapped to one unambiguous command (chat never guesses silently).
+    """
+    from pydantic import TypeAdapter
+
+    from backend.projects import chat
+    from backend.projects.models import ProjectVersion, Selection
+
+    try:
+        head = ProjectVersion.model_validate(version)
+    except Exception as exc:  # surfaced honestly, never swallowed
+        return {"error": "invalid_version", "reason": str(exc)}
+    try:
+        sel = TypeAdapter(Selection).validate_python(selection) if selection else None
+    except Exception as exc:
+        return {"error": "invalid_selection", "reason": str(exc)}
+    try:
+        mapping = chat.map_message_to_command(
+            project_id=project_id,
+            base_version=base_version,
+            message=message,
+            version=head,
+            selection=sel,
+            actor=actor,
+        )
+    except chat.ChatMappingError as exc:
+        return {"error": "chat_mapping_failed", "reason": str(exc)}
+    return {
+        "operation": mapping.operation,
+        "summary": mapping.summary,
+        "affected_segment_ids": mapping.affected_segment_ids,
+        "command": mapping.command.model_dump(mode="json"),
+    }
