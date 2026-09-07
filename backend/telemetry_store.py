@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from backend.budget_store import record_cost
 from backend.cost_catalog import estimate_job_cost
 from backend.job_store import is_valid_job_id, read_job_status, write_json_atomically
+from backend.telemetry_reconcile import audience_metrics, separate_quality_signals
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +88,13 @@ def record_job_telemetry(
             "failed_calls": 0,
         },
         "calls": metrics.get("calls", []),
+        # Stage E7: AI quality, human approval and undo are stored as three
+        # DISTINCT signals and never collapsed into one number (document 156).
+        "quality_signals": separate_quality_signals(
+            ai_quality_score=metrics.get("ai_quality_score"),
+            human_approved=metrics.get("human_approved"),
+            undo_count=metrics.get("undo_count"),
+        ),
     }
 
     write_json_atomically(telemetry_file, sanitized)
@@ -305,6 +313,21 @@ def get_all_telemetry_summary(
     else:
         computed_budget_status = "healthy"
 
+    # Best-effort outbox delivery visibility (document line 149/151).  Never
+    # raises and never fabricates: unknown lag stays None, not 0.
+    delivery: Dict[str, Any] = {
+        "pending": None, "failed": None, "delivered": None,
+        "schema_ready": None, "cloud_connected": False,
+        "drain_blocked_reason": None, "ingestion_lag_seconds": None,
+        "last_delivered_at": None,
+    }
+    try:
+        from backend.clickhouse_telemetry import get_telemetry_delivery_status
+
+        delivery = get_telemetry_delivery_status()
+    except Exception:  # pragma: no cover - optional visibility
+        pass
+
     return {
         "total_jobs": total_jobs,
         "total_tokens_used": total_tokens,
@@ -317,4 +340,9 @@ def get_all_telemetry_summary(
         "jobs": job_records[:10],
         "recent_jobs": job_records[:10],
         "budget_status": computed_budget_status,
+        "delivery": delivery,
+        "ingestion_lag_seconds": delivery.get("ingestion_lag_seconds"),
+        # Audience retention/conversion is never captured by this pipeline and
+        # is reported unavailable rather than invented (document line 158).
+        "audience": audience_metrics(),
     }

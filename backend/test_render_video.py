@@ -202,7 +202,7 @@ class TestRenderVideo(unittest.TestCase):
                     main_module, "SCRIPT_JOBS_ROOT", Path(script_jobs)
                 ), patch.object(main_module, "LOCKS_ROOT", Path(locks)), patch.object(
                     main_module, "run_pipeline", new_callable=AsyncMock
-                ) as pipeline, patch.dict("os.environ", {"FYF_MAX_CONCURRENT_JOBS": "5"}):
+                ) as pipeline, patch.dict("os.environ", {"FYF_MAX_CONCURRENT_JOBS": "5", "FYF_DAILY_BUDGET_CAP_USD": "10.0", "FYF_TOTAL_BUDGET_CAP_USD": "50.0", "FYF_BUDGET_LEDGER_PATH": str(root / ".budget_ledger.json")}):
                     await main_module.resume_interrupted_script_jobs()
                     await __import__("asyncio").sleep(0)
                     return pipeline
@@ -399,7 +399,7 @@ class TestRenderVideo(unittest.TestCase):
             lock_path = __import__("pathlib").Path(locks_dir) / lock_id
             lock_path.mkdir()
             (lock_path / "script.json").write_text(json.dumps(locked_script))
-            with patch("backend.main.JOBS_ROOT", __import__("pathlib").Path(temp_dir)), patch("backend.main.LOCKS_ROOT", __import__("pathlib").Path(locks_dir)):
+            with patch.dict("os.environ", {"FYF_DAILY_BUDGET_CAP_USD": "10.0", "FYF_TOTAL_BUDGET_CAP_USD": "50.0", "FYF_BUDGET_LEDGER_PATH": str(__import__("pathlib").Path(temp_dir) / ".budget_ledger.json")}), patch("backend.main.JOBS_ROOT", __import__("pathlib").Path(temp_dir)), patch("backend.main.LOCKS_ROOT", __import__("pathlib").Path(locks_dir)):
                 req_data = {
                     "lock_id": lock_id,
                     "voice_provider": "gemini"

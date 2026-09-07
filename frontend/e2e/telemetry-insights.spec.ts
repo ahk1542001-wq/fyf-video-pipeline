@@ -77,6 +77,23 @@ test.describe('Telemetry & Insights / Data Officer (/telemetry and /insights)', 
     await expect(runBtn).toBeVisible();
     await expect(consoleSection.locator('textarea')).toHaveCount(0);
 
+    // The approved six-capability analytics set (creation timeline, cost intelligence,
+    // quality tracking, editing friction, version comparison, grounded recommendations)
+    // is rendered as bounded preset pills. These are visibility-only checks and do NOT
+    // click, so the sequential /api/clickhouse/query body-count assertions below stay
+    // intact. Added to reconcile the intentional capability extension; no existing
+    // assertion is removed or weakened.
+    for (const capability of [
+      'Creation Timeline',
+      'Cost Intelligence',
+      'Quality Tracking',
+      'Editing Friction',
+      'Version Comparison',
+      'Grounded Recommendations',
+    ]) {
+      await expect(consoleSection.getByRole('button', { name: capability })).toBeVisible();
+    }
+
     // Each preset is a bounded query id; no arbitrary SQL is accepted by this UI.
     const jobsPreset = consoleSection.getByRole('button', { name: 'Jobs Summary' });
     await jobsPreset.click();
@@ -105,8 +122,11 @@ test.describe('Telemetry & Insights / Data Officer (/telemetry and /insights)', 
     await expect.poll(() => queryBodies).toHaveLength(3);
     expect(queryBodies[2]).toEqual({ query_id: 'scene_latency' });
 
-    // 4. Cost summary preset
-    const costPreset = consoleSection.getByRole('button', { name: 'Cost Summary' });
+    // 4. Cost intelligence preset
+    // label renamed Cost Summary -> Cost Intelligence to match the approved six-capability
+    // set (cost intelligence); product code (frontend/app/telemetry/page.tsx) is authoritative.
+    // The underlying bounded query id remains 'cost_summary'.
+    const costPreset = consoleSection.getByRole('button', { name: 'Cost Intelligence' });
     await costPreset.click();
     await expect(querySelector).toHaveValue('cost_summary');
     await expect(resultsTable).toBeVisible({ timeout: 10000 });

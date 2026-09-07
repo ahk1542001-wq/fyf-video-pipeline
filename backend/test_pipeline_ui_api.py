@@ -564,7 +564,7 @@ class PipelineUIAPITests(unittest.TestCase):
                 }),
                 encoding="utf-8",
             )
-            with patch("backend.main.JOBS_ROOT", jobs_root), patch(
+            with patch.dict("os.environ", {"FYF_DAILY_BUDGET_CAP_USD": "10.0", "FYF_TOTAL_BUDGET_CAP_USD": "50.0", "FYF_BUDGET_LEDGER_PATH": str(Path(temp_dir) / ".budget_ledger.json")}), patch("backend.main.JOBS_ROOT", jobs_root), patch(
                 "backend.main.SCRIPT_JOBS_ROOT", Path(temp_dir) / "script-jobs"
             ), patch("backend.main.run_pipeline", return_value=None):
                 with TestClient(app) as client:

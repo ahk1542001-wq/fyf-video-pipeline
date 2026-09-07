@@ -1,0 +1,63 @@
+.field-group {
+  display: grid;
+  gap: 7px;
+}
+
+.field-label {
+  color: var(--foreground);
+  font-size: 0.76rem;
+  font-weight: 700;
+}
+
+.field-label--muted {
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 400;
+}
+
+.field-control {
+  width: 100%;
+  min-height: 44px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius);
+  background: var(--surface-soft);
+  color: var(--foreground);
+  outline: none;
+  padding: 10px 12px;
+}
+
+.field-control:focus {
+  border-color: var(--focus);
+}
+
+.field-control--textarea {
+  min-height: 132px;
+  resize: vertical;
+  line-height: 1.55;
+}
+
+.field-control--narration {
+  min-height: 74px;
+  resize: vertical;
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+.control-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.action-stack,
+.render-actions {
+  display: grid;
+  gap: 9px;
+}
+
+.action-hint {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--muted, #6b7280);
+}
+

@@ -135,7 +135,7 @@ class TestIndependentReviewBlockers(unittest.TestCase):
         """When disk writing fails during generate-script, lease must be released and no orphan directory remains."""
         with tempfile.TemporaryDirectory() as script_jobs_dir, tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            with patch.dict("os.environ", {"FYF_BUDGET_LEDGER_PATH": str(root / ".budget_ledger.json")}), \
+            with patch.dict("os.environ", {"FYF_BUDGET_LEDGER_PATH": str(root / ".budget_ledger.json"), "FYF_DAILY_BUDGET_CAP_USD": "10.0", "FYF_TOTAL_BUDGET_CAP_USD": "50.0"}), \
                  patch("backend.main.SCRIPT_JOBS_ROOT", Path(script_jobs_dir)), \
                  patch("backend.main.write_json_atomically", side_effect=OSError("Disk full")):
 
@@ -158,7 +158,7 @@ class TestIndependentReviewBlockers(unittest.TestCase):
             lock_path.mkdir()
             (lock_path / "script.json").write_text(json.dumps(_valid_video_script_data()))
 
-            with patch.dict("os.environ", {"FYF_BUDGET_LEDGER_PATH": str(root / ".budget_ledger.json")}), \
+            with patch.dict("os.environ", {"FYF_BUDGET_LEDGER_PATH": str(root / ".budget_ledger.json"), "FYF_DAILY_BUDGET_CAP_USD": "10.0", "FYF_TOTAL_BUDGET_CAP_USD": "50.0"}), \
                  patch("backend.main.JOBS_ROOT", Path(jobs_dir)), \
                  patch("backend.main.LOCKS_ROOT", Path(locks_dir)), \
                  patch("backend.main._create_video_job", side_effect=OSError("Disk permission error")):
@@ -189,7 +189,7 @@ class TestIndependentReviewBlockers(unittest.TestCase):
             }))
             (job_dir / "request.json").write_text(json.dumps({"topic": "T"}))
 
-            with patch.dict("os.environ", {"FYF_BUDGET_LEDGER_PATH": str(root / ".budget_ledger.json")}), \
+            with patch.dict("os.environ", {"FYF_BUDGET_LEDGER_PATH": str(root / ".budget_ledger.json"), "FYF_DAILY_BUDGET_CAP_USD": "10.0", "FYF_TOTAL_BUDGET_CAP_USD": "50.0"}), \
                  patch("backend.main.SCRIPT_JOBS_ROOT", Path(script_jobs_dir)), \
                  patch("backend.main.update_script_status", side_effect=[OSError("State write error"), None]):
 
@@ -252,6 +252,8 @@ class TestIndependentReviewBlockers(unittest.TestCase):
             async def exercise():
                 with patch.dict("os.environ", {
                     "FYF_BUDGET_LEDGER_PATH": str(root / ".budget_ledger.json"),
+                    "FYF_DAILY_BUDGET_CAP_USD": "10.0",
+                    "FYF_TOTAL_BUDGET_CAP_USD": "50.0",
                     "FYF_MAX_CONCURRENT_JOBS": "1",
                 }), patch.object(main_module, "JOBS_ROOT", Path(jobs_dir)), \
                      patch.object(main_module, "SCRIPT_JOBS_ROOT", Path(script_jobs_dir)), \
@@ -294,6 +296,8 @@ class TestIndependentReviewBlockers(unittest.TestCase):
             async def exercise():
                 with patch.dict("os.environ", {
                     "FYF_BUDGET_LEDGER_PATH": str(root / ".budget_ledger.json"),
+                    "FYF_DAILY_BUDGET_CAP_USD": "10.0",
+                    "FYF_TOTAL_BUDGET_CAP_USD": "50.0",
                     "FYF_MAX_CONCURRENT_JOBS": "1",
                 }), patch.object(main_module, "JOBS_ROOT", Path(jobs_dir)), \
                      patch.object(main_module, "SCRIPT_JOBS_ROOT", Path(script_jobs_dir)), \
@@ -376,6 +380,8 @@ class TestIndependentReviewBlockers(unittest.TestCase):
             root = Path(temp_dir)
             with patch.dict("os.environ", {
                 "FYF_BUDGET_LEDGER_PATH": str(root / ".budget_ledger.json"),
+                "FYF_DAILY_BUDGET_CAP_USD": "10.0",
+                "FYF_TOTAL_BUDGET_CAP_USD": "50.0",
             }), patch("backend.main.JOBS_ROOT", Path(jobs_dir)), \
                  patch("backend.main.SCRIPT_JOBS_ROOT", Path(script_jobs_dir)), \
                  patch("backend.main.LOCKS_ROOT", Path(locks_dir)), \
@@ -397,7 +403,7 @@ class TestIndependentReviewBlockers(unittest.TestCase):
         """Story polish and lock must not hardcode 0.015 / 0.025 USD; if unavailable, record 0 spend and release reservation."""
         with tempfile.TemporaryDirectory() as temp_dir, tempfile.TemporaryDirectory() as locks_dir:
             root = Path(temp_dir)
-            with patch.dict("os.environ", {"FYF_BUDGET_LEDGER_PATH": str(root / ".budget_ledger.json")}), \
+            with patch.dict("os.environ", {"FYF_BUDGET_LEDGER_PATH": str(root / ".budget_ledger.json"), "FYF_DAILY_BUDGET_CAP_USD": "10.0", "FYF_TOTAL_BUDGET_CAP_USD": "50.0"}), \
                  patch("backend.main.LOCKS_ROOT", Path(locks_dir)), \
                  patch("writer_agent_vertex.generate_story_modes", return_value=_valid_story_modes_data()), \
                  patch("writer_agent_vertex.generate_exact_lock", return_value=_valid_video_script_data()):
@@ -469,14 +475,14 @@ class TestIndependentReviewBlockers(unittest.TestCase):
             )
 
             # 1. Healthy budget
-            with patch.dict("os.environ", {"FYF_BUDGET_LEDGER_PATH": str(root / ".budget_ledger.json")}):
+            with patch.dict("os.environ", {"FYF_BUDGET_LEDGER_PATH": str(root / ".budget_ledger.json"), "FYF_DAILY_BUDGET_CAP_USD": "10.0", "FYF_TOTAL_BUDGET_CAP_USD": "50.0"}):
                 summary = get_all_telemetry_summary(base_dir=Path(tmp_path))
                 self.assertEqual(summary["jobs"][0]["summary"]["total_calls"], 0)
                 self.assertEqual(summary["budget_status"], "healthy")
 
             # 2. Corrupt budget ledger -> budget_status must NOT claim 'healthy'
             (root / ".budget_ledger.json").write_text("invalid json content")
-            with patch.dict("os.environ", {"FYF_BUDGET_LEDGER_PATH": str(root / ".budget_ledger.json")}):
+            with patch.dict("os.environ", {"FYF_BUDGET_LEDGER_PATH": str(root / ".budget_ledger.json"), "FYF_DAILY_BUDGET_CAP_USD": "10.0", "FYF_TOTAL_BUDGET_CAP_USD": "50.0"}):
                 summary = get_all_telemetry_summary(base_dir=Path(tmp_path))
                 self.assertIn(summary["budget_status"], ["corrupted", "cap_exceeded"])
                 self.assertNotEqual(summary["budget_status"], "healthy", "Corrupted ledger must never be reported healthy")

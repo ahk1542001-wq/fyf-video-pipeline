@@ -108,7 +108,7 @@ class RuntimeLimitsTests(unittest.TestCase):
     def test_enforce_guardrails_raises_http_exception_on_budget_exceeded(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            with patch.dict("os.environ", {"FYF_DAILY_BUDGET_CAP_USD": "0.05"}):
+            with patch.dict("os.environ", {"FYF_DAILY_BUDGET_CAP_USD": "0.05", "FYF_TOTAL_BUDGET_CAP_USD": "50.0"}):
                 record_cost(0.06, root)
                 with self.assertRaises(HTTPException) as ctx:
                     enforce_generation_guardrails(client_ip="127.0.0.1", estimated_charge_usd=0.05, root_dir=root)
@@ -121,7 +121,7 @@ class RuntimeLimitsTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            with patch.dict("os.environ", {"FYF_MAX_CONCURRENT_JOBS": "1", "FYF_DAILY_BUDGET_CAP_USD": "10.0"}):
+            with patch.dict("os.environ", {"FYF_MAX_CONCURRENT_JOBS": "1", "FYF_DAILY_BUDGET_CAP_USD": "10.0", "FYF_TOTAL_BUDGET_CAP_USD": "50.0"}):
                 # Occupy the only slot
                 register_active_job("job_occupying")
 

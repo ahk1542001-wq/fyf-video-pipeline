@@ -73,7 +73,7 @@ most in production:
 ## Testing
 
 ```bash
-uv run pytest -q             # 412 tests + subtests, no network needed
+uv run pytest -q             # 471 tests + 85 subtests, no network needed
 uv run pytest -q -k lock     # focused subset
 ```
 

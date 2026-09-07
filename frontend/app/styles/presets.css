@@ -1,0 +1,27 @@
+.studio-preset-pill {
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 5px 12px;
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  background: var(--surface-soft);
+  color: var(--foreground);
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+
+.studio-preset-pill:hover {
+  border-color: var(--focus);
+  background: var(--surface);
+}
+
+.studio-preset-pill--active {
+  background: var(--focus);
+  border-color: var(--focus);
+  color: #FFFFFF;
+}
+
+.studio-preset-pill--active:hover {
+  background: #116854;
+  border-color: #116854;
+}

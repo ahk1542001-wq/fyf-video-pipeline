@@ -195,12 +195,78 @@ class ScriptPipelineTests(unittest.TestCase):
         self.assertEqual([call.args[0] for call in sleep.call_args_list], [60, 120, 300])
 
     def test_script_retry_limit_is_bounded_and_configurable(self):
+        # B3 (document line 110): at most TWO automatic transient retries, matching
+        # writer_agent_vertex.DEFAULT_MAX_ATTEMPTS = 2, and the value is clamped to
+        # the 0-2 range. The previous expectation of 3 asserted the pre-fix defect
+        # (a retry ceiling inconsistent with the writer agent and the documented
+        # limit), so it is corrected here rather than weakened.
         with patch.dict("os.environ", {}, clear=True):
-            self.assertEqual(_script_max_retries(), 3)
+            self.assertEqual(_script_max_retries(), 2)
         with patch.dict("os.environ", {"FYF_SCRIPT_MAX_RETRIES": "1"}, clear=True):
             self.assertEqual(_script_max_retries(), 1)
+        with patch.dict("os.environ", {"FYF_SCRIPT_MAX_RETRIES": "0"}, clear=True):
+            self.assertEqual(_script_max_retries(), 0)
         with patch.dict("os.environ", {"FYF_SCRIPT_MAX_RETRIES": "99"}, clear=True):
-            self.assertEqual(_script_max_retries(), 3)
+            self.assertEqual(_script_max_retries(), 2)
+        with patch.dict("os.environ", {"FYF_SCRIPT_MAX_RETRIES": "-5"}, clear=True):
+            self.assertEqual(_script_max_retries(), 0)
+
+    def test_transient_retry_is_withheld_when_budget_unavailable(self):
+        """B3: a transient failure must NOT dispatch an automatic retry that the
+        approved budget does not allow; the checkpoint stays resumable instead."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            jobs, locks = self.make_job(root)
+            job = jobs / "abcd1234"
+            with (
+                patch.dict("os.environ", {"FYF_BUDGET_LEDGER_PATH": str(root / ".budget_ledger.json")}),
+                patch("backend.agent.runner.run_adk_pipeline", side_effect=TimeoutError("Connection timed out")) as adk,
+                patch("backend.script_pipeline.time.sleep") as sleep,
+                patch("backend.budget_store.is_budget_available", return_value=False),
+            ):
+                run_script_pipeline("abcd1234", jobs, locks)
+
+            self.assertEqual(adk.call_count, 1, "No automatic retry when the approved budget is unavailable")
+            self.assertFalse(sleep.called, "No retry cooldown is incurred when the retry is withheld")
+            status = json.loads((job / "status.json").read_text(encoding="utf-8"))
+            self.assertEqual(status["status"], "needs_attention")
+            self.assertTrue(status["restart_resumable"])
+            self.assertIn("approved budget", status["error"])
+
+    def test_transient_retry_proceeds_when_budget_available(self):
+        """B3: when the approved budget allows it, a transient failure retries with
+        the bounded cooldown and the job can still complete."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            jobs, locks = self.make_job(root)
+            job = jobs / "abcd1234"
+            completed = {
+                "script": {
+                    "title": "\u1015\u103c\u1014\u103a\u101c\u100a\u103a\u1000\u103c\u102d\u102f\u1038\u101b\u103e\u1014\u103e\u102c\u1019\u103e\u102f",
+                    "language": "my-MM",
+                    "segments": [
+                        {
+                            "id": "s1", "text": "\u1005\u102c\u101e\u102c\u1038", "visual_action": "explain",
+                            "scene_type": "whiteboard", "mascot_action": "explain",
+                            "emotion": "focused", "emphasis": [],
+                        }
+                    ],
+                },
+                "draft": {},
+                "audit": {"passed": True},
+            }
+            with (
+                patch.dict("os.environ", {"FYF_BUDGET_LEDGER_PATH": str(root / ".budget_ledger.json")}),
+                patch("backend.agent.runner.run_adk_pipeline", side_effect=[TimeoutError("Connection timed out"), completed]) as adk,
+                patch("backend.script_pipeline.time.sleep") as sleep,
+                patch("backend.budget_store.is_budget_available", return_value=True),
+            ):
+                run_script_pipeline("abcd1234", jobs, locks)
+
+            self.assertEqual(adk.call_count, 2, "Transient failure retries once when the budget allows it")
+            self.assertEqual(sleep.call_count, 1, "Bounded cooldown is applied before the retry")
+            status = json.loads((job / "status.json").read_text(encoding="utf-8"))
+            self.assertEqual(status["status"], "completed")
 
     def test_transient_error_sets_needs_attention_when_retries_exhausted(self):
         with tempfile.TemporaryDirectory() as directory:

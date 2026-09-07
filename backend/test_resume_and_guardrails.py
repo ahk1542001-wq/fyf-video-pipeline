@@ -189,7 +189,7 @@ class TestResumeAndGuardrails(unittest.TestCase):
         """Story polish must reconcile/release budget and release concurrency slot on both success and failure."""
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            with patch.dict("os.environ", {"FYF_BUDGET_LEDGER_PATH": str(root / ".budget_ledger.json")}), \
+            with patch.dict("os.environ", {"FYF_BUDGET_LEDGER_PATH": str(root / ".budget_ledger.json"), "FYF_DAILY_BUDGET_CAP_USD": "10.0", "FYF_TOTAL_BUDGET_CAP_USD": "50.0"}), \
                  patch("writer_agent_vertex.generate_story_modes", return_value=_valid_story_modes_data()):
 
                 # 1. Successful polish
@@ -200,7 +200,7 @@ class TestResumeAndGuardrails(unittest.TestCase):
                 self.assertEqual(get_active_job_count(), 0, "Active slot must be released after polish")
 
             # 2. Failing polish
-            with patch.dict("os.environ", {"FYF_BUDGET_LEDGER_PATH": str(root / ".budget_ledger.json")}), \
+            with patch.dict("os.environ", {"FYF_BUDGET_LEDGER_PATH": str(root / ".budget_ledger.json"), "FYF_DAILY_BUDGET_CAP_USD": "10.0", "FYF_TOTAL_BUDGET_CAP_USD": "50.0"}), \
                  patch("writer_agent_vertex.generate_story_modes", side_effect=RuntimeError("Vertex API Error")):
 
                 resp = client.post("/api/story-polish", json={"topic_or_draft": "စမ်းသပ်ချက်"})
@@ -217,7 +217,7 @@ class TestResumeAndGuardrails(unittest.TestCase):
                 "title": "Title",
                 "approved_segments": [{"id": "s1", "text": "Segment text"}],
             }
-            with patch.dict("os.environ", {"FYF_BUDGET_LEDGER_PATH": str(root / ".budget_ledger.json")}), \
+            with patch.dict("os.environ", {"FYF_BUDGET_LEDGER_PATH": str(root / ".budget_ledger.json"), "FYF_DAILY_BUDGET_CAP_USD": "10.0", "FYF_TOTAL_BUDGET_CAP_USD": "50.0"}), \
                  patch("backend.main.LOCKS_ROOT", Path(locks_dir)), \
                  patch("writer_agent_vertex.generate_exact_lock", return_value=_valid_video_script_data()):
 
@@ -229,7 +229,7 @@ class TestResumeAndGuardrails(unittest.TestCase):
                 self.assertEqual(get_active_job_count(), 0, "Active slot must be released after lock")
 
             # 2. Failing lock
-            with patch.dict("os.environ", {"FYF_BUDGET_LEDGER_PATH": str(root / ".budget_ledger.json")}), \
+            with patch.dict("os.environ", {"FYF_BUDGET_LEDGER_PATH": str(root / ".budget_ledger.json"), "FYF_DAILY_BUDGET_CAP_USD": "10.0", "FYF_TOTAL_BUDGET_CAP_USD": "50.0"}), \
                  patch("backend.main.LOCKS_ROOT", Path(locks_dir)), \
                  patch("writer_agent_vertex.generate_exact_lock", side_effect=RuntimeError("Vertex lock failure")):
 
@@ -248,6 +248,8 @@ class TestResumeAndGuardrails(unittest.TestCase):
                  patch.dict("os.environ", {
                      "FYF_MAX_CONCURRENT_JOBS": "5",
                      "FYF_BUDGET_LEDGER_PATH": str(Path(script_jobs_dir) / ".budget_ledger.json"),
+                     "FYF_DAILY_BUDGET_CAP_USD": "10.0",
+                     "FYF_TOTAL_BUDGET_CAP_USD": "50.0",
                  }):
 
                 # Case A: Completed job -> rejected

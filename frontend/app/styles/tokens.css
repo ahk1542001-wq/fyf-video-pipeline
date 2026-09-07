@@ -1,0 +1,23 @@
+
+/* FYF brand tokens — one calm radius keeps the product surface coherent. */
+@theme {
+  --color-fyf-ivory: #F4F0E6;
+  --color-fyf-olive: #30382C;
+  --color-fyf-viridian: #16856B;
+  --color-fyf-sage: #A8B7A2;
+}
+
+:root {
+  --canvas: #F4F0E6;
+  --surface: #FCFBF7;
+  --surface-soft: #F7F6F1;
+  --foreground: #30382C;
+  --muted: #687066;
+  --hairline: #D9DFD7;
+  --focus: #16856B;
+  --status: #346538;
+  --error: #9F2F2D;
+  --radius: 14px;
+  --shadow-raised: 0 12px 32px rgba(48, 56, 44, 0.07);
+}
+

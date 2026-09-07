@@ -1,0 +1,19 @@
+/* Library Item Action Buttons */
+.library-item__actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.library-item__archive {
+  background: #FEE2E2 !important;
+  color: #991B1B !important;
+  border-color: #FCA5A5 !important;
+}
+
+.library-item__archive:hover {
+  background: #FCA5A5 !important;
+}
+

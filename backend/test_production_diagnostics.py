@@ -158,6 +158,8 @@ class TestProductionDiagnostics(unittest.TestCase):
             with patch.dict("os.environ", {
                 "FYF_RATE_LIMIT_PER_MINUTE": "1",
                 "FYF_BUDGET_LEDGER_PATH": str(root / ".budget_ledger.json"),
+                "FYF_DAILY_BUDGET_CAP_USD": "10.0",
+                "FYF_TOTAL_BUDGET_CAP_USD": "50.0",
             }), \
                  patch("backend.main.SCRIPT_JOBS_ROOT", root / "script-jobs"), \
                  patch("backend.main.JOBS_ROOT", root / "jobs"), \
@@ -190,7 +192,7 @@ class TestProductionDiagnostics(unittest.TestCase):
         """Diagnostic 3: Story polish and lock leave active_reserved_usd=0.0 and active_slots=0."""
         with tempfile.TemporaryDirectory() as temp_dir, tempfile.TemporaryDirectory() as locks_dir:
             root = Path(temp_dir)
-            with patch.dict("os.environ", {"FYF_BUDGET_LEDGER_PATH": str(root / ".budget_ledger.json")}), \
+            with patch.dict("os.environ", {"FYF_BUDGET_LEDGER_PATH": str(root / ".budget_ledger.json"), "FYF_DAILY_BUDGET_CAP_USD": "10.0", "FYF_TOTAL_BUDGET_CAP_USD": "50.0"}), \
                  patch("backend.main.LOCKS_ROOT", Path(locks_dir)), \
                  patch("backend.main.SCRIPT_JOBS_ROOT", root / "script-jobs"), \
                  patch("writer_agent_vertex.generate_story_modes", return_value=_valid_story_modes_data()), \
@@ -208,7 +210,7 @@ class TestProductionDiagnostics(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             job_id = "resum001"
-            with patch.dict("os.environ", {"FYF_BUDGET_LEDGER_PATH": str(root / ".budget_ledger.json")}):
+            with patch.dict("os.environ", {"FYF_BUDGET_LEDGER_PATH": str(root / ".budget_ledger.json"), "FYF_DAILY_BUDGET_CAP_USD": "10.0", "FYF_TOTAL_BUDGET_CAP_USD": "50.0"}):
                 lease = acquire_guardrail_lease(
                     operation_id=job_id,
                     client_ip="127.0.0.1",

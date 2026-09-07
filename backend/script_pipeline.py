@@ -25,7 +25,10 @@ from backend.vertex_telemetry import (
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_SCRIPT_MAX_RETRIES = 3
+# B3 (document line 110): at most TWO automatic transient retries. This matches
+# writer_agent_vertex.DEFAULT_MAX_ATTEMPTS = 2 and the documented retry ceiling;
+# the previous default of 3 was inconsistent with both.
+DEFAULT_SCRIPT_MAX_RETRIES = 2
 DEFAULT_SCRIPT_RETRY_BASE_SECONDS = 30.0
 DEFAULT_SCRIPT_RETRY_MAX_SECONDS = 120.0
 DEFAULT_SCRIPT_QUOTA_RETRY_BASE_SECONDS = 60.0
@@ -71,7 +74,11 @@ def _terminal_error_message(error: BaseException) -> str:
 
 
 def _script_max_retries() -> int:
-    """Keep script retries bounded to 0-3 (never permit above 3)."""
+    """Keep automatic transient retries bounded to 0-2 (never permit above 2).
+
+    B3 (document line 110): the pipeline allows at most two automatic transient
+    retries, consistent with writer_agent_vertex.DEFAULT_MAX_ATTEMPTS = 2.
+    """
     try:
         configured = int(os.getenv(
             "FYF_SCRIPT_MAX_RETRIES",
@@ -79,7 +86,7 @@ def _script_max_retries() -> int:
         ))
     except ValueError:
         configured = DEFAULT_SCRIPT_MAX_RETRIES
-    return max(0, min(3, configured))
+    return max(0, min(2, configured))
 
 
 def _sleep_before_script_retry(attempt: int, *, rate_limited: bool = False) -> None:
@@ -332,6 +339,29 @@ def _run_script_pipeline(job_id: str, script_jobs_root: Path, locks_root: Path) 
         )
 
         if is_transient and retry_count < max_retries:
+            # B3: re-check the approved budget before spending on another automatic
+            # retry. A retry that would exceed the approved budget -- or that would
+            # run while paid production is disabled (no explicit account ceiling) --
+            # must NOT be dispatched blindly on the same failure. The checkpoint
+            # stays resumable so an operator can top up the budget and resume.
+            from backend.budget_store import is_budget_available
+            if not is_budget_available():
+                logger.warning(
+                    "Script pipeline job %s transient retry withheld: approved budget unavailable",
+                    job_id,
+                )
+                update_script_status(
+                    job_dir,
+                    status="needs_attention",
+                    stage="needs_attention",
+                    retry_count=retry_count,
+                    error=(
+                        "Transient provider issue, but the approved budget does not allow another "
+                        "automatic retry. Checkpoint preserved for manual resume."
+                    ),
+                    restart_resumable=True,
+                )
+                return
             update_script_status(
                 job_dir,
                 status="retrying",

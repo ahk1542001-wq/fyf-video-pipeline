@@ -1,0 +1,112 @@
+/* Segment Cards in Story Options */
+.segment-card {
+  padding: 14px;
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.segment-card__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.segment-tags {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.segment-badge {
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: var(--canvas);
+  border: 1px solid var(--hairline);
+  color: var(--muted);
+}
+
+.segment-badge--mascot {
+  background: rgba(22, 133, 107, 0.1);
+  border-color: rgba(22, 133, 107, 0.2);
+  color: var(--focus);
+}
+
+.segment-badge--emotion {
+  background: rgba(48, 56, 44, 0.06);
+  border-color: rgba(48, 56, 44, 0.12);
+  color: var(--foreground);
+}
+
+.field-label-sm {
+  display: block;
+  font-size: 0.72rem;
+  font-weight: 700;
+  margin-bottom: 4px;
+  color: var(--muted);
+}
+
+.segment-card__controls {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(48, 56, 44, 0.08);
+}
+
+.segment-control-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.segment-control-label {
+  font-size: 0.72rem;
+  font-weight: 700;
+  min-width: 90px;
+  color: var(--muted);
+}
+
+.pill-group {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.pill-btn {
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 3px 8px;
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  background: var(--surface-soft);
+  color: var(--foreground);
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+
+.pill-btn:hover {
+  border-color: var(--focus);
+  background: var(--surface);
+}
+
+.pill-btn--active {
+  background: var(--focus);
+  border-color: var(--focus);
+  color: #FFFFFF;
+}
+
+.pill-btn--active:hover {
+  background: #116854;
+  border-color: #116854;
+}
+

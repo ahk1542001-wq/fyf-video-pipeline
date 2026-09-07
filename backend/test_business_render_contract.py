@@ -112,7 +112,7 @@ class BusinessRenderContractTests(unittest.TestCase):
             lock_path.write_text(json.dumps(_legacy_script()), encoding="utf-8")
             jobs_root = root / "jobs"
 
-            with patch("backend.main.LOCKS_ROOT", lock_path.parent), patch(
+            with patch.dict("os.environ", {"FYF_DAILY_BUDGET_CAP_USD": "10.0", "FYF_TOTAL_BUDGET_CAP_USD": "50.0", "FYF_BUDGET_LEDGER_PATH": str(root / ".budget_ledger.json")}), patch("backend.main.LOCKS_ROOT", lock_path.parent), patch(
                 "backend.main.JOBS_ROOT", jobs_root
             ), patch("backend.main.SCRIPT_JOBS_ROOT", root / "script-jobs"), patch(
                 "backend.main.apply_video_style", side_effect=lambda script, _style: script
