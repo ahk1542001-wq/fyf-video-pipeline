@@ -37,6 +37,13 @@ ALLOWED_TERM_EXCLUSIONS: Set[str] = {
     "docs/COMPLIANCE_BASELINE.md",
     # ADRs must name rejected alternatives by their real vendor names.
     "docs/decisions/ADR-001-clickhouse-partner-track.md",
+    # A compliance/coverage matrix whose purpose is to document scope exclusions
+    # must name the excluded vendor by its real name to remain auditable (same
+    # justification as the ADR exclusion above). Its "Grafana" mentions occur only
+    # in exclusion-documenting rows ("no Grafana/NLE/...", "scope exclusions
+    # documented"), never as a scope claim. Path-scoped: this does not weaken the
+    # guard for any other tracked file.
+    "docs/COMPLIANCE_MATRIX.md",
     "backend/public_compliance.py",
     "backend/test_public_compliance.py",
 }

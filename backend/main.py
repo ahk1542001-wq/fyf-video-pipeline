@@ -40,6 +40,26 @@ from backend.job_store import (
 )
 from backend.budget_store import release_reservation
 from backend.lock_store import create_script_lock, read_script_lock
+from backend.projects.commands import (
+    ApprovalRequiredError,
+    CommandValidationError,
+    LockConflictError,
+    StaleVersionError,
+    apply_command,
+    create_project_with_script,
+)
+from backend.projects.models import (
+    PROJECT_ID_PATTERN,
+    PinnedProductionConfig,
+    ProjectCommand,
+)
+from backend.projects.store import (
+    FileProjectStore,
+    InvalidProjectIdError,
+    ProjectNotFoundError,
+    ProjectVersionNotFoundError,
+    VersionAlreadyExistsError,
+)
 from backend.pipeline import run_pipeline
 from backend.runtime_limits import (
     acquire_guardrail_lease,
@@ -58,6 +78,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 JOBS_ROOT = REPO_ROOT / "output" / "jobs"
 LOCKS_ROOT = REPO_ROOT / "output" / "locks"
 SCRIPT_JOBS_ROOT = REPO_ROOT / "output" / "script-jobs"
+# Versioned project spine root (Stage B-II). Honours FYF_PROJECTS_ROOT so tests
+# can point it at a temp dir; the default is anchored under the gitignored
+# output/ tree exactly like JOBS_ROOT.
+PROJECTS_ROOT = REPO_ROOT / "output" / "projects"
 
 app = FastAPI(title="FYF Video Pipeline API", version="0.1.0")
 
@@ -1184,3 +1208,159 @@ def execute_clickhouse_query(request: Request, payload: dict = Body(...)):
     except Exception as exc:
         logger.warning("Telemetry query %s failed: %s", query_id, exc)
         raise HTTPException(status_code=503, detail="Telemetry query unavailable") from exc
+
+
+# ---------------------------------------------------------------------------
+# Project spine (Stage B-II / B12): versioned projects + atomic commands.
+#
+# These routes are a THIN HTTP seam over backend.projects. Every durability,
+# concurrency (exactly-one-winner), idempotency, stale-version reject/rebase and
+# validate-ALL / zero-partial-edit guarantee lives in backend.projects.commands
+# and backend.projects.store, NOT here. Existing routes above are untouched.
+# ---------------------------------------------------------------------------
+
+
+def _project_store() -> FileProjectStore:
+    """FileProjectStore rooted at ``FYF_PROJECTS_ROOT`` or ``output/projects``."""
+    override = os.getenv("FYF_PROJECTS_ROOT")
+    return FileProjectStore(Path(override) if override else PROJECTS_ROOT)
+
+
+class CreateProjectRequest(BaseModel):
+    """Body for ``POST /api/projects``: wrap a Vertex ``VideoScript`` as version 1."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    script: VideoScript
+    actor: str = Field(min_length=1)
+    # Optional client-chosen id; when omitted the server generates a unique one.
+    project_id: Optional[str] = Field(default=None, pattern=PROJECT_ID_PATTERN)
+    variant_name: Optional[str] = None
+    idempotency_key: Optional[str] = Field(default=None, min_length=1, max_length=128)
+    pinned_production_config: Optional[PinnedProductionConfig] = None
+
+
+@app.post("/api/projects", status_code=status.HTTP_201_CREATED)
+def create_project(req: CreateProjectRequest, request: Request):
+    """Create a project and commit immutable version 1 wrapping the VideoScript.
+
+    Idempotent: replaying the same ``idempotency_key`` returns the existing
+    version 1 rather than committing a duplicate.
+    """
+    _enforce_public_access_token(request)
+    store = _project_store()
+    # Server-generated ids reuse create_job_dir's bounded-uniqueness guarantee.
+    project_id = req.project_id or create_job_dir(store.root)
+    try:
+        version = create_project_with_script(
+            store,
+            project_id,
+            req.script,
+            req.actor,
+            variant_name=req.variant_name,
+            idempotency_key=req.idempotency_key,
+            pinned_production_config=req.pinned_production_config,
+        )
+    except InvalidProjectIdError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid project id: {exc}") from exc
+    except VersionAlreadyExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception:
+        logger.exception("Project creation failed")
+        raise HTTPException(status_code=500, detail="Failed to create project")
+    return {
+        "success": True,
+        "project_id": project_id,
+        "version_no": version.version_no,
+        "version": version.model_dump(mode="json"),
+    }
+
+
+@app.get("/api/projects/{project_id}/versions/{version_no}")
+def get_project_version(project_id: str, version_no: int):
+    """Return one immutable project version (404 when the project/version is absent)."""
+    if not is_valid_job_id(project_id):
+        raise HTTPException(status_code=400, detail="Invalid project ID")
+    if version_no < 1:
+        raise HTTPException(status_code=400, detail="version_no must be >= 1")
+    store = _project_store()
+    try:
+        version = store.load_version(project_id, version_no)
+    except InvalidProjectIdError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid project id: {exc}") from exc
+    except (ProjectNotFoundError, ProjectVersionNotFoundError):
+        raise HTTPException(status_code=404, detail="Project version not found")
+    return {
+        "success": True,
+        "project_id": project_id,
+        "version_no": version.version_no,
+        "version": version.model_dump(mode="json"),
+    }
+
+
+@app.post("/api/projects/{project_id}/commands")
+def apply_project_command(
+    project_id: str, command: ProjectCommand, request: Request, rebase: bool = False
+):
+    """Atomically validate + apply ONE command against the project spine.
+
+    Concurrency / staleness: a ``base_version`` that no longer matches the
+    committed head is rejected with 409 (never silently overwritten); the client
+    may pass ``?rebase=true`` to rebase explicitly. Paid operations
+    (``request_render``) are refused server-side (402) unless a persisted
+    approval exists and budget is available - cost is never rendered as 0.
+    Validation failures reject the WHOLE command (422) with zero partial edits.
+    """
+    _enforce_public_access_token(request)
+    if not is_valid_job_id(project_id):
+        raise HTTPException(status_code=400, detail="Invalid project ID")
+    if command.project_id != project_id:
+        raise HTTPException(status_code=400, detail="Body project_id does not match the path")
+    store = _project_store()
+    try:
+        changeset = apply_command(store, command, rebase=rebase)
+    except InvalidProjectIdError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid project id: {exc}") from exc
+    except ProjectNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Project not found") from exc
+    except StaleVersionError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "stale_version",
+                "project_id": exc.project_id,
+                "base_version": exc.base_version,
+                "current_version": exc.current_version,
+                "hint": "re-fetch head and retry, or pass ?rebase=true to rebase explicitly",
+            },
+        ) from exc
+    except LockConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "lock_conflict", "project_id": exc.project_id, "conflicts": exc.conflicts},
+        ) from exc
+    except ApprovalRequiredError as exc:
+        # 402 Payment Required: a paid op lacks an approval / available budget.
+        # budget_status is surfaced verbatim so unknown cost stays None, never 0.
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "error": "approval_required",
+                "operation": exc.operation,
+                "reason": exc.reason,
+                "budget_status": exc.budget_status,
+            },
+        ) from exc
+    except CommandValidationError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "validation_failed", "changeset": exc.changeset.model_dump(mode="json")},
+        ) from exc
+    except Exception:
+        logger.exception("Command application failed")
+        raise HTTPException(status_code=500, detail="Failed to apply command")
+    return {
+        "success": True,
+        "status": changeset.status,
+        "changeset": changeset.model_dump(mode="json"),
+    }
