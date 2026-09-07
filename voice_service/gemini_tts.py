@@ -159,6 +159,12 @@ def generate_gemini_tts(
                 prompt = HUMAN_STYLE_PROMPTS.get(style, HUMAN_STYLE_PROMPTS["natural"])
 
     from backend.vertex_client import vertex_client_kwargs
+    # B8: provider-operation IDs gate paid retries (already-billed => no second call).
+    from backend.runtime_limits import (
+        begin_provider_operation,
+        provider_operation_key,
+        settle_provider_operation,
+    )
 
     kwargs = vertex_client_kwargs(location=os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1"))
     client = track_client(genai.Client(**kwargs), stage="tts")
@@ -167,6 +173,12 @@ def generate_gemini_tts(
     # content. Computing a preset without sending it leaves every style and
     # language path with the provider's default delivery.
     tts_contents = f"{prompt}\n\n{text}" if prompt else text
+    op_key = provider_operation_key("tts", text, voice_name, model, language)
+    guard = begin_provider_operation(op_key)
+    if guard.blocked and guard.prior_result_json:
+        # B8: this exact TTS operation was already completed/billed; reuse the
+        # prior audio path instead of paying for a second synthesis.
+        return guard.prior_result_json
     response = client.models.generate_content(
         model=model,
         contents=tts_contents,
@@ -191,6 +203,10 @@ def generate_gemini_tts(
             mime_type = part.inline_data.mime_type
 
     if not audio_data:
+        settle_provider_operation(
+            op_key, outcome="failed", billed=False,
+            provider_operation_id=guard.provider_operation_id,
+        )
         raise RuntimeError(f"No audio in Gemini-TTS response: {response}")
 
     # Convert raw PCM to WAV if needed
@@ -205,11 +221,19 @@ def generate_gemini_tts(
             w.setframerate(rate)
             w.writeframes(audio_data)
         print(f"✅ Gemini-TTS voice ({voice_name}) saved to {wav_path}")
+        settle_provider_operation(
+            op_key, outcome="succeeded", billed=True,
+            provider_operation_id=guard.provider_operation_id, result_json=wav_path,
+        )
         return wav_path
     else:
         with open(output_path, "wb") as f:
             f.write(audio_data)
         print(f"✅ Gemini-TTS voice ({voice_name}) saved to {output_path}")
+        settle_provider_operation(
+            op_key, outcome="succeeded", billed=True,
+            provider_operation_id=guard.provider_operation_id, result_json=output_path,
+        )
         return output_path
 
 

@@ -98,8 +98,16 @@ class PipelineUIAPITests(unittest.TestCase):
                 response = client.get("/api/runtime")
 
         self.assertEqual(response.status_code, 200)
+        # Stage B-III (B11) SETUP-ONLY migration. Reason: this test previously
+        # pinned the EXACT public /api/runtime shape. B11 requires /api/runtime to
+        # ADDITIONALLY return the typed deployment capacity limits (single source:
+        # backend.capacity_config) that Task 13 renders. Every pre-existing field
+        # assertion below is preserved VERBATIM (nothing weakened); the new
+        # `limits` object is asserted separately for exact field names + types.
+        payload = response.json()
+        limits = payload.pop("limits")
         self.assertEqual(
-            response.json(),
+            payload,
             {
                 "runtime_mode": "hackathon",
                 "allowed_voice_providers": ["gemini"],
@@ -111,6 +119,29 @@ class PipelineUIAPITests(unittest.TestCase):
                 "generation_message": "Local generation controls are available.",
             },
         )
+        self.assertEqual(
+            set(limits),
+            {
+                "max_upload_bytes",
+                "max_input_duration_seconds",
+                "max_output_duration_seconds",
+                "worker_cpu",
+                "worker_memory_mb",
+                "worker_wall_time_seconds",
+                "queue_depth",
+                "max_concurrent_jobs",
+                "rate_limit_per_minute",
+            },
+        )
+        self.assertIsInstance(limits["max_upload_bytes"], int)
+        self.assertIsInstance(limits["max_input_duration_seconds"], float)
+        self.assertIsInstance(limits["max_output_duration_seconds"], float)
+        self.assertIsInstance(limits["worker_cpu"], float)
+        self.assertIsInstance(limits["worker_memory_mb"], int)
+        self.assertIsInstance(limits["worker_wall_time_seconds"], float)
+        self.assertIsInstance(limits["queue_depth"], int)
+        self.assertIsInstance(limits["max_concurrent_jobs"], int)
+        self.assertIsInstance(limits["rate_limit_per_minute"], int)
 
     def test_public_runtime_fails_closed_without_vertex_credential(self):
         with patch.dict(os.environ, {"FYF_PUBLIC_DEPLOYMENT": "true"}, clear=True), patch(
@@ -728,6 +759,35 @@ class PipelineUIAPITests(unittest.TestCase):
                     self.assertEqual(data["rows"][0][1], "S1")
                     self.assertEqual(data["rows"][0][2], "diorama")
 
+    def test_over_limit_submission_is_rejected_naming_the_specific_limit(self):
+        """Stage B-III (B11) EXIT GATE: an over-limit submission is rejected with a
+        422 that NAMES the specific capacity limit (not a bare 429) and carries the
+        machine-readable rejection-reason header. A non-public deployment bypasses
+        the public access gate, so the capacity check is reached directly."""
+        from backend.runtime_limits import REASON_CAPACITY_LIMIT, REJECTION_HEADER
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FYF_MAX_UPLOAD_BYTES": "1024",
+                "FYF_QUEUE_ROOT": str(Path(temp_dir) / "queue"),
+            },
+        ), patch("backend.main.JOBS_ROOT", Path(temp_dir) / "jobs"), patch(
+            "backend.main.SCRIPT_JOBS_ROOT", Path(temp_dir) / "script-jobs"
+        ):
+            with TestClient(app) as client:
+                response = client.post(
+                    "/api/generate-script",
+                    json={"topic": "x" * 1500},
+                )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.headers.get(REJECTION_HEADER), REASON_CAPACITY_LIMIT)
+        detail = response.json()["detail"]
+        self.assertEqual(detail["error"], "capacity_limit_exceeded")
+        self.assertIn("max_upload_bytes", detail["message"])
+        self.assertEqual(detail["limits"][0]["limit"], "max_upload_bytes")
+        self.assertEqual(detail["limits"][0]["allowed"], 1024.0)
 
 if __name__ == "__main__":
     unittest.main()

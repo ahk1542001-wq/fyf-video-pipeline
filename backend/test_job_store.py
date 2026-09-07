@@ -384,5 +384,71 @@ class TestJobStore(unittest.TestCase):
             self.assertIsNotNone(replacement)
             release_job_lease(job_dir, replacement)
 
+class TestCancellationStatuses(unittest.TestCase):
+    """Stage B-III (B9): cancelling/cancelled are valid additive statuses and the
+    persisted cancellation snapshot round-trips and survives later status writes."""
+
+    def _seed(self, temp_dir: str) -> Path:
+        job_dir = Path(temp_dir) / "1234abcd"
+        job_dir.mkdir()
+        initialize_job_status(job_dir, job_dir.name, "gemini")
+        return job_dir
+
+    def test_cancelling_and_cancelled_are_valid_additive_statuses(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            job_dir = self._seed(temp_dir)
+
+            cancelling = update_job_status(job_dir, {"status": "cancelling"})
+            self.assertEqual(cancelling["status"], "cancelling")
+            self.assertEqual(read_job_status(job_dir)["status"], "cancelling")
+
+            cancelled = update_job_status(job_dir, {"status": "cancelled"})
+            self.assertEqual(cancelled["status"], "cancelled")
+            self.assertEqual(read_job_status(job_dir)["status"], "cancelled")
+
+    def test_cancellation_snapshot_persists_and_survives_later_status_write(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            job_dir = self._seed(temp_dir)
+            snapshot = {
+                "state": "cancelling",
+                "reason": "user_requested",
+                "requested_at": "2026-09-08T00:00:00Z",
+                "boundary": "pre_render_dispatch",
+            }
+
+            updated = update_job_status(job_dir, {"cancellation": snapshot})
+            self.assertEqual(updated["cancellation"], snapshot)
+            self.assertEqual(read_job_status(job_dir)["cancellation"], snapshot)
+
+            # A later, unrelated status write must not drop the snapshot.
+            after = update_job_status(job_dir, {"status": "cancelled"})
+            self.assertEqual(after["status"], "cancelled")
+            self.assertEqual(read_job_status(job_dir)["cancellation"], snapshot)
+
+    def test_existing_statuses_still_validate_after_cancellation_addition(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            job_dir = self._seed(temp_dir)
+            for status in (
+                "queued", "visuals", "voice", "rendering", "qa", "creative_qa",
+                "retrying", "needs_attention", "needs_human_review",
+                "completed", "failed",
+            ):
+                with self.subTest(status=status):
+                    updated = update_job_status(job_dir, {"status": status})
+                    self.assertEqual(updated["status"], status)
+
+    def test_job_without_cancellation_omits_snapshot_key(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            job_dir = self._seed(temp_dir)
+            update_job_status(job_dir, {"status": "voice"})
+            self.assertNotIn("cancellation", read_job_status(job_dir))
+
+    def test_invalid_status_still_raises(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            job_dir = self._seed(temp_dir)
+            with self.assertRaises(ValueError):
+                update_job_status(job_dir, {"status": "not_a_real_status"})
+
+
 if __name__ == "__main__":
     unittest.main()

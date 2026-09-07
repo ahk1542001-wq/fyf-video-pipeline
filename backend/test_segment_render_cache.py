@@ -13,10 +13,12 @@ from backend.segment_render_cache import (
     _segment_render_concurrency,
     load_reusable_segment,
     render_segments_and_assemble,
+    segment_cache_path,
     segment_render_fingerprint,
     validate_segment_media,
     write_segment_checkpoint,
 )
+from backend import cancellation
 
 
 def render_input_fixture() -> dict:
@@ -622,6 +624,108 @@ class SegmentRenderCacheTests(unittest.TestCase):
             unsafe = SegmentRenderResult("../escape", "b" * 64, first, False, 1)
             with self.assertRaisesRegex(ValueError, "segment ID"):
                 write_segment_checkpoint(job_dir, [unsafe], complete=False)
+
+
+class SegmentRenderCancellationTests(unittest.TestCase):
+    """Stage B-III (B9): cooperative cancellation halts queued work before any
+    segment dispatch and stops in-flight work at the next safe boundary between
+    fully-written segments -- never mid-write."""
+
+    def setUp(self):
+        cancellation.reset_cancellation_state()
+
+    def tearDown(self):
+        cancellation.reset_cancellation_state()
+
+    @patch("backend.segment_render_cache.validate_render_input")
+    @patch("backend.segment_render_cache._validate_final_output")
+    @patch("backend.segment_render_cache.validate_segment_media", return_value={"frame_count": 30})
+    @patch("backend.segment_render_cache.segment_render_fingerprint")
+    @patch("backend.segment_render_cache.render_video_segment")
+    def test_cancellation_halts_before_any_segment_dispatch(
+        self,
+        mock_render,
+        mock_fingerprint,
+        mock_validate_media,
+        mock_validate_input,
+        mock_validate_output,
+    ):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            job_dir = Path(temp_dir)
+            seed_assembly_job(job_dir)
+            fingerprints = {f"s{i}": f"{i}" * 64 for i in (1, 2, 3)}
+            mock_fingerprint.side_effect = lambda _data, *, segment_id, **_kwargs: fingerprints[segment_id]
+
+            def render_side_effect(_job_dir, *, segment_id, output_path, **_kwargs):
+                Path(output_path).write_bytes(segment_id.encode())
+                return str(Path(output_path).resolve())
+
+            mock_render.side_effect = render_side_effect
+
+            # Cancel while the job is still queued, before render is invoked.
+            cancellation.request_cancellation(job_dir.name, job_dir=job_dir, reason="user_requested")
+
+            with self.assertRaises(cancellation.JobCancelledError) as ctx:
+                render_segments_and_assemble(str(job_dir))
+
+            self.assertEqual(ctx.exception.boundary, "pre_render_dispatch")
+            self.assertEqual(ctx.exception.job_id, job_dir.name)
+            # Queued work halts BEFORE dispatch: not a single segment rendered.
+            self.assertEqual(mock_render.call_count, 0)
+            self.assertFalse((job_dir / "video.mp4").exists())
+
+    @patch.dict(os.environ, {"FYF_SEGMENT_RENDER_CONCURRENCY": "1"})
+    @patch("backend.segment_render_cache.validate_render_input")
+    @patch("backend.segment_render_cache._validate_final_output")
+    @patch("backend.segment_render_cache.validate_segment_media", return_value={"frame_count": 30})
+    @patch("backend.segment_render_cache.segment_render_fingerprint")
+    @patch("backend.segment_render_cache.render_video_segment")
+    def test_cancellation_stops_at_segment_boundary_not_mid_write(
+        self,
+        mock_render,
+        mock_fingerprint,
+        mock_validate_media,
+        mock_validate_input,
+        mock_validate_output,
+    ):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            job_dir = Path(temp_dir)
+            seed_assembly_job(job_dir)
+            fingerprints = {f"s{i}": f"{i}" * 64 for i in (1, 2, 3)}
+            mock_fingerprint.side_effect = lambda _data, *, segment_id, **_kwargs: fingerprints[segment_id]
+            written: dict[str, Path] = {}
+            full_payload = b"segment-payload" * 40  # 600 bytes; unmistakable if truncated
+
+            def render_side_effect(_job_dir, *, segment_id, output_path, **_kwargs):
+                path = Path(output_path)
+                path.write_bytes(full_payload)
+                written[segment_id] = path
+                if segment_id == "s1":
+                    # Request cancellation only AFTER the first segment is fully
+                    # written, so the halt must land on the boundary after s1.
+                    cancellation.request_cancellation(
+                        job_dir.name, job_dir=job_dir, reason="user_requested"
+                    )
+                return str(path.resolve())
+
+            mock_render.side_effect = render_side_effect
+
+            with self.assertRaises(cancellation.JobCancelledError) as ctx:
+                render_segments_and_assemble(str(job_dir))
+
+            # Halted at the safe boundary immediately after the first completed segment.
+            self.assertEqual(ctx.exception.boundary, "segment:s1")
+            # s1 was rendered then atomically promoted (temp -> final via os.replace),
+            # so the completed segment is whole; the transient temp path is consumed.
+            s1_final = segment_cache_path(job_dir, "s1", fingerprints["s1"])
+            self.assertTrue(s1_final.is_file())
+            self.assertEqual(s1_final.read_bytes(), full_payload)
+            self.assertIn("s1", written)
+            self.assertFalse(written["s1"].exists())
+            # Only s1 was checkpointed complete; the job never assembled a final video.
+            checkpoint = json.loads((job_dir / "segment_render_checkpoint.json").read_text())
+            self.assertEqual(checkpoint["segment_ids"], ["s1"])
+            self.assertFalse((job_dir / "video.mp4").exists())
 
 
 if __name__ == "__main__":

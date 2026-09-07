@@ -26,6 +26,11 @@ from backend.creative_quality import (
 from backend.director_context import DirectorPolicy, build_director_context
 from backend.vertex_client import vertex_client_kwargs
 from backend.vertex_telemetry import telemetry_retry_attempt, track_client
+from backend.runtime_limits import (
+    begin_provider_operation,
+    provider_operation_key,
+    settle_provider_operation,
+)
 from backend.vertex_thinking import generation_config_for
 
 DEFAULT_LOCATION = "global"
@@ -399,7 +404,7 @@ def plan_visual_treatments(script_data: dict, job_dir: str, policy: Optional[Dir
                         response_mime_type="application/json",
                         response_json_schema=TreatmentBatchResponse.model_json_schema(),
                     ),
-                ), label=f"director treatment batch {batch_start // batch_size + 1}")
+                ), label=f"director treatment batch {batch_start // batch_size + 1}", provider_op_key=provider_operation_key("treatment_batch", batch_start, attempt, model_route))
                 batch_had_transient = batch_had_transient or _quota_retry_had_transient.get()
                 accepted, validation_errors = _validate_treatment_batch(
                     response.text or "", pending_expected
@@ -529,7 +534,7 @@ def _classify_relation_mode(client: genai.Client, claims: list[dict], spec: dict
             response_mime_type="application/json",
             response_json_schema=RelationModeDecision.model_json_schema(),
         ),
-    ), label="relationship mode classification")
+    ), label="relationship mode classification", provider_op_key=provider_operation_key("relation_mode", json.dumps(claims, ensure_ascii=False, sort_keys=True), json.dumps(spec, ensure_ascii=False, sort_keys=True)))
     return RelationModeDecision.model_validate_json(response.text or "").relation_mode
 
 
@@ -623,7 +628,7 @@ def _plan_final_visual_repair(
             response_mime_type="application/json",
             response_json_schema=FinalVisualRepairPlan.model_json_schema(),
         ),
-    ), label=f"final visual repair plan {segment['id']}")
+    ), label=f"final visual repair plan {segment['id']}", provider_op_key=provider_operation_key("final_repair_plan", segment.get("id"), model_stage, json.dumps(repair_feedback or [], ensure_ascii=False)))
     return FinalVisualRepairPlan.model_validate_json(response.text or "").model_dump(mode="json")
 
 
@@ -740,7 +745,7 @@ def _verify_motion_spec_semantics(client: genai.Client, required: list[dict], sh
             response_mime_type="application/json",
             response_json_schema=EvidenceVerification.model_json_schema(),
         ),
-    ), label=f"motion evidence verification {shot['shot_id']}")
+    ), label=f"motion evidence verification {shot['shot_id']}", provider_op_key=provider_operation_key("motion_spec_verify", shot["shot_id"], json.dumps(shot.get("motion_spec"), ensure_ascii=False)))
     verification = EvidenceVerification.model_validate_json(response.text or "")
     if not verification.passed or set(verification.proved_claim_ids) != set(shot["proves_claim_ids"]):
         raise RuntimeError(
@@ -777,8 +782,17 @@ def _video_generation_enabled() -> bool:
     return os.getenv("FYF_ENABLE_VERTEX_VIDEO", "1").strip().lower() not in {"0", "false", "no", "off"}
 
 
-def _quota_retry(call, *, label: str, attempts: int = QUOTA_RETRY_ATTEMPTS):
-    """Retry transient Vertex quota, availability, and deadline failures."""
+def _quota_retry(call, *, label: str, attempts: int = QUOTA_RETRY_ATTEMPTS, provider_op_key: str | None = None):
+    """Retry transient Vertex quota, availability, and deadline failures.
+
+    B8: when ``provider_op_key`` is supplied the paid dispatch is gated by the
+    provider-operation registry. Before each (re)dispatch the prior attempt's
+    provider operation ID is reconciled; if the provider already reported the
+    operation succeeded/was billed, NO second paid call is issued (the prior
+    result is reused when serializable, otherwise the duplicate is refused).
+    With no active telemetry scope the registry is a pure passthrough, so
+    callers that do not opt in keep their exact current behaviour.
+    """
     _quota_retry_had_transient.set(False)
     try:
         base_delay = float(os.getenv(
@@ -798,11 +812,32 @@ def _quota_retry(call, *, label: str, attempts: int = QUOTA_RETRY_ATTEMPTS):
     max_delay = max(0, max_delay)
     attempts = max(1, min(attempts, QUOTA_RETRY_ATTEMPTS))
     for attempt in range(attempts):
+        guard = None
+        if provider_op_key is not None:
+            guard = begin_provider_operation(provider_op_key, attempt=attempt)
+            if guard.blocked:
+                if guard.prior_result_json is not None:
+                    return json.loads(guard.prior_result_json)
+                raise RuntimeError(
+                    f"Provider operation already billed for {label}; "
+                    "refusing duplicate paid dispatch"
+                )
         try:
             with telemetry_retry_attempt(label, attempt + 1):
-                return call()
+                result = call()
+            if guard is not None:
+                settle_provider_operation(
+                    provider_op_key, outcome="succeeded", billed=True,
+                    provider_operation_id=guard.provider_operation_id,
+                )
+            return result
         except genai_errors.APIError as exc:
             code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+            if guard is not None:
+                settle_provider_operation(
+                    provider_op_key, outcome="retryable_error", billed=False,
+                    provider_operation_id=guard.provider_operation_id,
+                )
             if code not in {429, 500, 502, 503, 504} or attempt + 1 == attempts:
                 raise
             _quota_retry_had_transient.set(True)
@@ -853,7 +888,7 @@ def _generate_verified_video(
             generate_audio=False,
             enhance_prompt=False,
         ),
-    ), label="video generation")
+    ), label="video generation", provider_op_key=provider_operation_key("visual_video", shot["shot_id"], str(still_path)))
     deadline = time.monotonic() + VIDEO_TIMEOUT_SECONDS
     while not getattr(operation, "done", False):
         if time.monotonic() >= deadline:
@@ -874,7 +909,7 @@ def _generate_verified_video(
             response_mime_type="application/json",
             response_json_schema=EvidenceVerification.model_json_schema(),
         ),
-    ), label="video evidence verification")
+    ), label="video evidence verification", provider_op_key=provider_operation_key("visual_video_verify", shot["shot_id"]))
     verification = EvidenceVerification.model_validate_json(verify_response.text or "")
     if not verification.passed or set(verification.proved_claim_ids) != set(shot["proves_claim_ids"]):
         raise RuntimeError(
@@ -1019,7 +1054,7 @@ def _repair_as_motion_graphic(client: genai.Client, required: list[dict], shot: 
                 response_mime_type="application/json",
                 response_json_schema=MotionRepair.model_json_schema(),
             ),
-        ), label=f"motion repair {shot['shot_id']}")
+        ), label=f"motion repair {shot['shot_id']}", provider_op_key=provider_operation_key("motion_repair", shot["shot_id"], attempt))
         try:
             repair = MotionRepair.model_validate_json(response.text or "")
         except ValidationError as exc:
@@ -1054,7 +1089,7 @@ def _repair_as_motion_graphic(client: genai.Client, required: list[dict], shot: 
                 response_mime_type="application/json",
                 response_json_schema=EvidenceVerification.model_json_schema(),
             ),
-        ), label=f"motion repair verification {shot['shot_id']}")
+        ), label=f"motion repair verification {shot['shot_id']}", provider_op_key=provider_operation_key("motion_repair_verify", shot["shot_id"], attempt))
         verification = EvidenceVerification.model_validate_json(verify.text or "")
         if verification.passed and set(verification.proved_claim_ids) == set(shot["proves_claim_ids"]):
             break
@@ -1165,7 +1200,8 @@ def generate_and_verify_visual_evidence(script_data: dict, job_dir: str) -> dict
                             image_config=types.ImageConfig(aspect_ratio="9:16"),
                         ),
                     ), label=f"image generation {segment['id']}/{shot['shot_id']}",
-                        attempts=(QUOTA_RETRY_ATTEMPTS if attempt == 0 else QUALITY_ROUTE_RETRY_ATTEMPTS))
+                        attempts=(QUOTA_RETRY_ATTEMPTS if attempt == 0 else QUALITY_ROUTE_RETRY_ATTEMPTS),
+                        provider_op_key=provider_operation_key("visual_image", segment["id"], shot["shot_id"], attempt))
                 except Exception as exc:
                     last_issues = [f"media generation unavailable: {exc}"]
                     if _is_transient_vertex_error(exc):
@@ -1208,7 +1244,7 @@ def generate_and_verify_visual_evidence(script_data: dict, job_dir: str) -> dict
                         response_mime_type="application/json",
                         response_json_schema=EvidenceVerification.model_json_schema(),
                     ),
-                ), label=f"image evidence verification {segment['id']}/{shot['shot_id']}")
+                ), label=f"image evidence verification {segment['id']}/{shot['shot_id']}", provider_op_key=provider_operation_key("visual_image_verify", segment["id"], shot["shot_id"], attempt))
                 verification = EvidenceVerification.model_validate_json(verify_response.text or "")
                 expected_ids = set(shot["proves_claim_ids"])
                 if verification.passed and set(verification.proved_claim_ids) == expected_ids:

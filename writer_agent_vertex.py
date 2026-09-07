@@ -8,6 +8,12 @@ from video_contract import ClaimCoverageResponse, CompactVisualPlanResponse, Com
 from vertex_model_routing import model_for
 from backend.vertex_telemetry import telemetry_retry_attempt, track_client
 from backend.vertex_thinking import generation_config_for
+# B8: provider-operation IDs gate paid retries (already-billed => no second call).
+from backend.runtime_limits import (
+    begin_provider_operation,
+    provider_operation_key,
+    settle_provider_operation,
+)
 
 DEFAULT_LOCATION = "global"
 DEFAULT_STORY_LOCATION = "global"
@@ -235,15 +241,33 @@ def _extract_complete_evidence_claims(request: ExactLockRequest) -> EvidenceClai
     last_error: ValueError | None = None
     last_request_error: Exception | None = None
     attempts = _max_attempts()
+    op_key = provider_operation_key("fact_claims", request.model_dump_json())
     for attempt in range(attempts):
+        guard = begin_provider_operation(op_key, attempt=attempt)
+        if guard.blocked and guard.prior_result_json:
+            # B8: already completed/billed on a prior attempt or redelivery.
+            return EvidenceClaimsResponse.model_validate_json(guard.prior_result_json)
         try:
             claims = _extract_evidence_claims(request, feedback, attempt)
             _verify_claim_completeness(request, claims, attempt)
+            settle_provider_operation(
+                op_key, outcome="succeeded", billed=True,
+                provider_operation_id=guard.provider_operation_id,
+                result_json=claims.model_dump_json(),
+            )
             return claims
         except ValueError as exc:
+            settle_provider_operation(
+                op_key, outcome="retryable_error", billed=False,
+                provider_operation_id=guard.provider_operation_id,
+            )
             last_error = exc
             feedback = str(exc)
         except Exception as exc:
+            settle_provider_operation(
+                op_key, outcome="retryable_error", billed=False,
+                provider_operation_id=guard.provider_operation_id,
+            )
             last_request_error = exc
             if attempt + 1 == attempts:
                 raise RuntimeError(f"Vertex AI fact verification failed: {exc}") from exc
@@ -654,6 +678,10 @@ def generate_narration_script(
                 "entire JSON from scratch and correct this contract error:\n"
                 f"{last_validation_error[:600]}"
             )
+        op_key = provider_operation_key("script_narration", topic_or_draft)
+        guard = begin_provider_operation(op_key, attempt=attempt)
+        if guard.blocked and guard.prior_result_json:
+            return json.loads(guard.prior_result_json)
         try:
             with telemetry_retry_attempt("script_narration", attempt + 1):
                 response = client.models.generate_content(
@@ -667,7 +695,13 @@ def generate_narration_script(
                 )
             if not response.text:
                 raise ValueError("Vertex returned an empty response")
-            return StoryDraftScript.model_validate_json(response.text).model_dump(mode="json")
+            result_dump = StoryDraftScript.model_validate_json(response.text).model_dump(mode="json")
+            settle_provider_operation(
+                op_key, outcome="succeeded", billed=True,
+                provider_operation_id=guard.provider_operation_id,
+                result_json=json.dumps(result_dump),
+            )
+            return result_dump
         except (json.JSONDecodeError, ValueError) as exc:
             last_validation_error = str(exc)
         except Exception as exc:
@@ -816,6 +850,10 @@ def generate_story_modes(
                 "entire JSON from scratch and correct this contract error:\n"
                 f"{last_validation_error[:600]}"
             )
+        op_key = provider_operation_key("story_modes", topic_or_draft)
+        guard = begin_provider_operation(op_key, attempt=attempt)
+        if guard.blocked and guard.prior_result_json:
+            return json.loads(guard.prior_result_json)
         try:
             with telemetry_retry_attempt("story_modes", attempt + 1):
                 response = client.models.generate_content(
@@ -845,6 +883,11 @@ def generate_story_modes(
                     script["voice_actor"] = voice_actor
             result = StoryModesResponse.model_validate(draft_dump).model_dump(mode="json")
             result["model_used"] = model_id
+            settle_provider_operation(
+                op_key, outcome="succeeded", billed=True,
+                provider_operation_id=guard.provider_operation_id,
+                result_json=json.dumps(result),
+            )
             return result
         except (json.JSONDecodeError, ValueError) as exc:
             last_validation_error = str(exc)
@@ -975,7 +1018,12 @@ def generate_exact_lock(request_data: dict) -> dict:
     last_request_error: Exception | None = None
     metadata: CompactVisualPlanResponse | None = None
     metadata_by_id: dict[str, object] | None = None
+    op_key = provider_operation_key("lock_metadata", request.model_dump_json())
     for attempt in range(attempts):
+        guard = begin_provider_operation(op_key, attempt=attempt)
+        if guard.blocked and guard.prior_result_json:
+            # B8: lock metadata already produced/billed on a prior attempt or redelivery.
+            return json.loads(guard.prior_result_json)
         repair_context = ""
         if last_validation_error:
             repair_context = (
@@ -1148,7 +1196,7 @@ def generate_exact_lock(request_data: dict) -> dict:
                     for shot in vis.get("evidence_shots", []):
                         shot["mascot_presence"] = "none"
 
-            return VideoScript.model_validate(
+            result = VideoScript.model_validate(
                 {
                     "title": request.title,
                     "language": request.language,
@@ -1159,10 +1207,24 @@ def generate_exact_lock(request_data: dict) -> dict:
                     "segments": merged_segments,
                 }
             ).model_dump(mode="json")
+            settle_provider_operation(
+                op_key, outcome="succeeded", billed=True,
+                provider_operation_id=guard.provider_operation_id,
+                result_json=json.dumps(result),
+            )
+            return result
 
         except (json.JSONDecodeError, ValueError) as exc:
+            settle_provider_operation(
+                op_key, outcome="retryable_error", billed=False,
+                provider_operation_id=guard.provider_operation_id,
+            )
             last_validation_error = str(exc)
         except Exception as exc:
+            settle_provider_operation(
+                op_key, outcome="retryable_error", billed=False,
+                provider_operation_id=guard.provider_operation_id,
+            )
             last_request_error = exc
             if attempt + 1 == attempts:
                 raise RuntimeError(f"Vertex AI request failed: {exc}") from exc

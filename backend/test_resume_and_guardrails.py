@@ -149,7 +149,18 @@ class TestResumeAndGuardrails(unittest.TestCase):
 
             with patch("backend.main.JOBS_ROOT", Path(jobs_dir)), \
                  patch("backend.main.LOCKS_ROOT", Path(locks_dir)), \
-                 patch.dict("os.environ", {"FYF_MAX_CONCURRENT_JOBS": "1"}):
+                 patch.dict("os.environ", {
+                     "FYF_MAX_CONCURRENT_JOBS": "1",
+                     # Stage B-III setup-only migration: the old setup omitted the
+                     # budget ceiling, so the fail-closed budget gate fired instead
+                     # of the intended concurrency-slot guardrail and the bare 429
+                     # was only coincidentally satisfied. Enable paid production
+                     # (ledger isolated to a temp file) so the occupied slot is the
+                     # genuine cause, then pin that guardrail explicitly below.
+                     "FYF_DAILY_BUDGET_CAP_USD": "10.0",
+                     "FYF_TOTAL_BUDGET_CAP_USD": "50.0",
+                     "FYF_BUDGET_LEDGER_PATH": str(Path(locks_dir) / ".budget_ledger.json"),
+                 }):
 
                 # Occupy the concurrency slot
                 register_active_job("occupying_job")
@@ -161,6 +172,10 @@ class TestResumeAndGuardrails(unittest.TestCase):
                 })
 
                 self.assertEqual(response.status_code, 429)
+                self.assertEqual(
+                    response.headers.get("X-FYF-Rejection-Reason"), "queue_full",
+                    "the intended concurrency-slot guardrail must be the one that fires",
+                )
 
                 # Verify NO job directory or status file was created in JOBS_ROOT!
                 created_dirs = [d for d in Path(jobs_dir).iterdir() if d.is_dir()]
@@ -171,7 +186,15 @@ class TestResumeAndGuardrails(unittest.TestCase):
         with tempfile.TemporaryDirectory() as script_jobs_dir, tempfile.TemporaryDirectory() as locks_dir:
             with patch("backend.main.SCRIPT_JOBS_ROOT", Path(script_jobs_dir)), \
                  patch("backend.main.LOCKS_ROOT", Path(locks_dir)), \
-                 patch.dict("os.environ", {"FYF_MAX_CONCURRENT_JOBS": "1"}):
+                 patch.dict("os.environ", {
+                     "FYF_MAX_CONCURRENT_JOBS": "1",
+                     # Stage B-III setup-only migration (see the video case above):
+                     # enable paid production so the occupied concurrency slot is
+                     # the genuine rejection cause, then pin it explicitly.
+                     "FYF_DAILY_BUDGET_CAP_USD": "10.0",
+                     "FYF_TOTAL_BUDGET_CAP_USD": "50.0",
+                     "FYF_BUDGET_LEDGER_PATH": str(Path(locks_dir) / ".budget_ledger.json"),
+                 }):
 
                 register_active_job("occupying_job")
 
@@ -181,6 +204,10 @@ class TestResumeAndGuardrails(unittest.TestCase):
                 })
 
                 self.assertEqual(response.status_code, 429)
+                self.assertEqual(
+                    response.headers.get("X-FYF-Rejection-Reason"), "queue_full",
+                    "the intended concurrency-slot guardrail must be the one that fires",
+                )
 
                 created_dirs = [d for d in Path(script_jobs_dir).iterdir() if d.is_dir()]
                 self.assertEqual(len(created_dirs), 0, "Rejected script generation must not leave orphan script job dirs")

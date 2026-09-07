@@ -64,4 +64,25 @@ if [[ "$output" != *'PROJECT_ID is required'* ]]; then
 fi
 echo 'PASS: missing project configuration rejected before gcloud invocation'
 
+# --- Stage B-III: fail-closed paid-production budget envelope contract ---
+# budget_store is fail-closed: paid dispatch is enabled ONLY when BOTH a daily
+# AND a total ceiling are present. The deploy env must therefore set both caps,
+# sourced from the single clearly-marked owner-approved envelope block so that
+# raising the ceiling stays a deliberate single-place decision (no drift).
+assert_contains 'OWNER-APPROVED PAID-PRODUCTION BUDGET ENVELOPE' \
+  'the budget envelope must be a clearly-marked single place to change'
+assert_contains '^FYF_DAILY_BUDGET_CAP_USD="' \
+  'the owner-approved envelope block must define the daily ceiling'
+assert_contains '^FYF_TOTAL_BUDGET_CAP_USD="' \
+  'the owner-approved envelope block must define the total ceiling'
+assert_contains 'FYF_DAILY_BUDGET_CAP_USD=\$FYF_DAILY_BUDGET_CAP_USD' \
+  'the deploy env must set the daily cap from the single envelope block'
+assert_contains 'FYF_TOTAL_BUDGET_CAP_USD=\$FYF_TOTAL_BUDGET_CAP_USD' \
+  'the deploy env must set the total cap (fail-closed paid production requires BOTH caps)'
+assert_not_contains 'FYF_DAILY_BUDGET_CAP_USD=[0-9]' \
+  'the deploy --set-env-vars must not hard-code a divergent daily cap literal'
+assert_not_contains 'FYF_TOTAL_BUDGET_CAP_USD=[0-9]' \
+  'the deploy --set-env-vars must not hard-code a divergent total cap literal'
+echo 'PASS: deploy_cloudrun.sh fail-closed budget envelope contract (daily + total caps present and single-sourced)'
+
 echo "PASS: deploy_cloudrun.sh project configuration contract"

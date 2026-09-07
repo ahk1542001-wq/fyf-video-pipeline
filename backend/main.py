@@ -62,6 +62,10 @@ from backend.projects.store import (
 )
 from backend.pipeline import run_pipeline
 from backend.runtime_limits import (
+    QUEUE_DEPTH_HEADER,
+    QUEUE_POSITION_HEADER,
+    REASON_CAPACITY_LIMIT,
+    REJECTION_HEADER,
     acquire_guardrail_lease,
     enforce_generation_guardrails,
     register_active_job,
@@ -74,6 +78,12 @@ from backend.video_styles import apply_video_style, get_available_styles
 from vertex_model_routing import model_for
 from video_contract import ExactLockRequest, RenderControls, StoryModesResponse, VideoScript
 
+# Stage B-III: durable idempotent queue (B7), cooperative cancellation (B9), and
+# the single validated capacity-limit source (B11).
+from backend import cancellation
+from backend.capacity_config import load_capacity_config, validate_submission
+from backend.job_queue import JobQueue, default_queue_root
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 JOBS_ROOT = REPO_ROOT / "output" / "jobs"
 LOCKS_ROOT = REPO_ROOT / "output" / "locks"
@@ -82,6 +92,10 @@ SCRIPT_JOBS_ROOT = REPO_ROOT / "output" / "script-jobs"
 # can point it at a temp dir; the default is anchored under the gitignored
 # output/ tree exactly like JOBS_ROOT.
 PROJECTS_ROOT = REPO_ROOT / "output" / "projects"
+# Durable idempotent job queue root (Stage B-III / B7). Honours FYF_QUEUE_ROOT so
+# tests and deployments can relocate it; the default sits under the gitignored
+# output/ tree exactly like JOBS_ROOT / PROJECTS_ROOT.
+QUEUE_ROOT = REPO_ROOT / "output" / "queue"
 
 app = FastAPI(title="FYF Video Pipeline API", version="0.1.0")
 
@@ -211,6 +225,10 @@ class RuntimeResponse(BaseModel):
         "private_access_required",
     ]
     generation_message: str
+    # B11: the complete, typed deployment capacity limits (single source:
+    # backend.capacity_config). Task 13 renders this panel; the field names and
+    # types returned here are that contract.
+    limits: dict[str, Any]
 
 
 class RecentApprovedVideo(BaseModel):
@@ -369,9 +387,26 @@ async def _run_video_pipeline_tracked(
     voice_provider: Literal["gemini"],
     jobs_root: Path,
 ):
+    job_dir = Path(jobs_root) / job_id
     register_active_job(job_id)
     try:
+        # B9: queued work halts BEFORE any provider dispatch when a cancel landed
+        # while the job was still queued. Cheap no-op when nothing is cancelled.
+        cancellation.checkpoint(job_id, job_dir=job_dir, boundary="pre_dispatch")
         await run_pipeline(job_id, script_data, voice_provider, jobs_root)
+    except cancellation.JobCancelledError as exc:
+        # In-flight work stopped at a safe boundary. Mark terminal ``cancelled``;
+        # late costs already incurred are still reconciled by the ledger because
+        # reconcile_budget always debits actual_usd > 0 (including cancelled).
+        cancellation.mark_cancelled(job_id, job_dir=job_dir, boundary=exc.boundary)
+        try:
+            update_job_status(job_dir, {
+                "status": "cancelled",
+                "error": None,
+                "cancellation": cancellation.cancellation_status(job_id, job_dir=job_dir).to_dict(),
+            })
+        except Exception:
+            logger.exception("Could not persist cancelled status for job %s", job_id)
     finally:
         release_active_job(job_id)
         from backend.budget_store import release_reservation
@@ -382,11 +417,19 @@ def _queue_video_job(
     background_tasks: BackgroundTasks,
     script_data: dict,
     voice_provider: Literal["gemini"] = "gemini",
+    request: Request | None = None,
 ) -> VideoJobItem:
     job = _create_video_job(script_data, voice_provider)
-    background_tasks.add_task(
-        _run_video_pipeline_tracked, job.job_id, script_data, voice_provider, JOBS_ROOT
+    client_key = _client_idempotency_key(request) if request is not None else None
+    queue, message = _submit_to_queue(
+        kind="video",
+        target="_run_video_pipeline_tracked",
+        args=[job.job_id, script_data, voice_provider, JOBS_ROOT],
+        job_id=job.job_id,
+        client_key=client_key,
     )
+    if not message.is_duplicate:
+        background_tasks.add_task(queue.dispatch, message.message_id)
     return job
 
 
@@ -402,6 +445,85 @@ def _with_render_controls(script_data: dict[str, Any], controls: RenderControls)
     result["render_controls"] = snapshot
     result.update(snapshot)
     return result
+
+
+# ---------------------------------------------------------------------------
+# Stage B-III helpers: durable queue access (B7), idempotency (B7), and
+# server-side capacity validation on submit (B11).
+# ---------------------------------------------------------------------------
+def _job_queue() -> JobQueue:
+    """Durable queue rooted at ``FYF_QUEUE_ROOT`` or ``output/queue`` (B7)."""
+    return JobQueue(default_queue_root())
+
+
+def _client_idempotency_key(request: Request) -> str | None:
+    """Return the client-supplied idempotency key, or None when not provided.
+
+    Deduplication is OPT-IN via this header. Without it every submission mints a
+    unique queue key (uuid-suffixed) so behaviour is identical to the previous
+    in-process ``BackgroundTasks`` enqueue: one job, one dispatch, no dedup.
+    """
+    supplied = request.headers.get("x-fyf-idempotency-key")
+    if supplied and supplied.strip():
+        return supplied.strip()
+    return None
+
+
+def _submit_to_queue(
+    *,
+    kind: str,
+    target: str,
+    args: list,
+    job_id: str,
+    client_key: str | None,
+    attempt_suffix: str = "",
+) -> "object":
+    """Durably enqueue work, deduplicating only on a client-supplied key (B7).
+
+    * Client key present  -> stable key ``kind:key`` so a replayed submission
+      returns the EXISTING message/job (``is_duplicate`` True), never a second job
+      or a second budget reservation.
+    * No client key       -> unique key ``kind:job_id:suffix:uuid`` so the message
+      always dispatches exactly once (behaviour-compatible with BackgroundTasks).
+    """
+    queue = _job_queue()
+    if client_key:
+        idempotency_key = f"{kind}:{client_key}"
+    else:
+        idempotency_key = f"{kind}:{job_id}:{attempt_suffix}:{uuid.uuid4().hex}".replace("::", ":")
+    message = queue.submit(
+        idempotency_key=idempotency_key,
+        target=target,
+        args=args,
+        job_id=job_id,
+    )
+    return queue, message
+
+
+def _capacity_rejection(violations: list) -> HTTPException:
+    """422 naming the SPECIFIC capacity limit a submission exceeded (B11)."""
+    first = violations[0]
+    return HTTPException(
+        status_code=422,
+        detail={
+            "error": "capacity_limit_exceeded",
+            "message": first.message(),
+            "limits": [v.to_dict() for v in violations],
+        },
+        headers={REJECTION_HEADER: REASON_CAPACITY_LIMIT},
+    )
+
+
+def _validate_submit_capacity(payload_bytes: int) -> None:
+    """Validate a submission against deployment capacity limits BEFORE reserving.
+
+    ``upload_bytes`` (the serialized request payload) is always available and is
+    the honest server-side dimension checked at submit; duration limits are
+    enforced through the same ``validate_submission`` contract when declared.
+    """
+    violations = validate_submission(upload_bytes=payload_bytes)
+    if violations:
+        raise _capacity_rejection(violations)
 
 
 @app.get("/health")
@@ -423,6 +545,7 @@ def get_runtime():
         allowed_voice_providers=["gemini"],
         script_model=model_for("script"),
         fallback_model=model_for("story_fallback"),
+        limits=load_capacity_config().to_runtime_dict(),
         **generation_state,
     )
 
@@ -438,6 +561,20 @@ def list_video_styles():
 async def generate_script(req: ScriptRequest, request: Request, background_tasks: BackgroundTasks):
     """Queue persisted Vertex script production and return immediately."""
     _enforce_public_generation_access(request)
+    # B11: validate the submission against deployment capacity limits first.
+    _validate_submit_capacity(len(req.model_dump_json()))
+    # B7: a client-supplied idempotency key replays to the EXISTING job (no
+    # second job, no second budget reservation). Without it, behaviour is
+    # identical to the previous in-process enqueue.
+    client_key = _client_idempotency_key(request)
+    queue = _job_queue()
+    if client_key:
+        existing = queue.resolve(f"script:{client_key}")
+        if existing is not None and existing.job_id:
+            return ScriptJobResponse(
+                success=True, job_id=existing.job_id,
+                status_url=f"/api/script-jobs/{existing.job_id}/status",
+            )
     job_id = uuid.uuid4().hex[:8]
     lease = acquire_guardrail_lease(
         operation_id=job_id,
@@ -454,7 +591,22 @@ async def generate_script(req: ScriptRequest, request: Request, background_tasks
             "batch": None, "batch_count": None, "lock_id": None, "error": None,
             "retry_count": 0, "restart_resumable": True,
         })
-        background_tasks.add_task(run_script_pipeline, job_id, SCRIPT_JOBS_ROOT, LOCKS_ROOT)
+        submit_queue, message = _submit_to_queue(
+            kind="script",
+            target="run_script_pipeline",
+            args=[job_id, SCRIPT_JOBS_ROOT, LOCKS_ROOT],
+            job_id=job_id,
+            client_key=client_key,
+        )
+        if message.is_duplicate:
+            lease.release()
+            shutil.rmtree(job_dir, ignore_errors=True)
+            existing_id = message.job_id or job_id
+            return ScriptJobResponse(
+                success=True, job_id=existing_id,
+                status_url=f"/api/script-jobs/{existing_id}/status",
+            )
+        background_tasks.add_task(submit_queue.dispatch, message.message_id)
     except Exception:
         lease.release()
         if job_dir.exists():
@@ -531,7 +683,16 @@ async def resume_script_job(job_id: str, request: Request, background_tasks: Bac
             resume_count=resume_count,
             retry_count=0,
         )
-        background_tasks.add_task(run_script_pipeline, job_id, SCRIPT_JOBS_ROOT, LOCKS_ROOT)
+        submit_queue, message = _submit_to_queue(
+            kind="script-resume",
+            target="run_script_pipeline",
+            args=[job_id, SCRIPT_JOBS_ROOT, LOCKS_ROOT],
+            job_id=job_id,
+            client_key=_client_idempotency_key(request),
+            attempt_suffix=str(resume_count),
+        )
+        if not message.is_duplicate:
+            background_tasks.add_task(submit_queue.dispatch, message.message_id)
     except Exception:
         lease.release()
         try:
@@ -818,6 +979,21 @@ async def generate_video(req: VideoRequest, request: Request, background_tasks: 
                     shot["mascot_presence"] = "none"
         styled_script = _with_render_controls(styled_script, req)
 
+    # B11: validate the queued payload against deployment capacity limits.
+    _validate_submit_capacity(len(json.dumps(styled_script, default=str)))
+    # B7: client-supplied idempotency key replays to the EXISTING video job.
+    client_key = _client_idempotency_key(request)
+    queue = _job_queue()
+    if client_key:
+        existing = queue.resolve(f"video:{client_key}")
+        if existing is not None and existing.job_id:
+            return VideoResponse(
+                success=True,
+                job_id=existing.job_id,
+                status_url=f"/api/jobs/{existing.job_id}/status",
+                restart_resumable=True,
+            )
+
     job_id = uuid.uuid4().hex[:8]
 
     # Guardrail check happens BEFORE any disk creation!
@@ -831,9 +1007,24 @@ async def generate_video(req: VideoRequest, request: Request, background_tasks: 
     job_dir = JOBS_ROOT / job_id
     try:
         job = _create_video_job(styled_script, req.voice_provider, job_id=job_id)
-        background_tasks.add_task(
-            _run_video_pipeline_tracked, job.job_id, styled_script, req.voice_provider, JOBS_ROOT
+        submit_queue, message = _submit_to_queue(
+            kind="video",
+            target="_run_video_pipeline_tracked",
+            args=[job.job_id, styled_script, req.voice_provider, JOBS_ROOT],
+            job_id=job.job_id,
+            client_key=client_key,
         )
+        if message.is_duplicate:
+            lease.release()
+            shutil.rmtree(job_dir, ignore_errors=True)
+            existing_id = message.job_id or job.job_id
+            return VideoResponse(
+                success=True,
+                job_id=existing_id,
+                status_url=f"/api/jobs/{existing_id}/status",
+                restart_resumable=True,
+            )
+        background_tasks.add_task(submit_queue.dispatch, message.message_id)
         return VideoResponse(
             success=True,
             job_id=job.job_id,
@@ -1060,9 +1251,16 @@ async def resume_job(job_id: str, request: Request, background_tasks: Background
             "restart_resumable": True,
         })
 
-        background_tasks.add_task(
-            _run_video_pipeline_tracked, job_id, script_data, "gemini", JOBS_ROOT
+        submit_queue, message = _submit_to_queue(
+            kind="video-resume",
+            target="_run_video_pipeline_tracked",
+            args=[job_id, script_data, "gemini", JOBS_ROOT],
+            job_id=job_id,
+            client_key=_client_idempotency_key(request),
+            attempt_suffix=str(resume_count),
         )
+        if not message.is_duplicate:
+            background_tasks.add_task(submit_queue.dispatch, message.message_id)
     except Exception:
         lease.release()
         try:
@@ -1082,6 +1280,102 @@ async def resume_job(job_id: str, request: Request, background_tasks: Background
         status_url=f"/api/jobs/{job_id}/status",
         restart_resumable=True,
     )
+
+
+# ---------------------------------------------------------------------------
+# Stage B-III (B9): cooperative cancellation routes.
+#
+# Cancellation is COOPERATIVE. A request records a durable marker and flips an
+# in-process flag; queued work halts before dispatch and in-flight work stops at
+# the next safe boundary (between fully-written segments). Late-arriving results
+# and costs are still reconciled into the ledger, and a terminal ``cancelled``
+# state can never be overwritten by a stale result.
+# ---------------------------------------------------------------------------
+_CANCEL_TERMINAL_STATUSES = {"completed", "cancelled", "archived"}
+
+
+def _apply_cancellation(job_id: str, job_dir: Path, status_data: dict, *, is_script: bool) -> dict:
+    """Shared cancel semantics for video and script jobs (B9)."""
+    current = status_data.get("status")
+    if current in _CANCEL_TERMINAL_STATUSES:
+        # Terminal work is not cancellable; report its state honestly (idempotent)
+        # and never downgrade a newer terminal state.
+        return {
+            "success": True,
+            "job_id": job_id,
+            "status": current,
+            "already_terminal": True,
+            "cancellation": cancellation.cancellation_status(job_id, job_dir=job_dir).to_dict(),
+        }
+
+    cstat = cancellation.request_cancellation(job_id, job_dir=job_dir, reason="user_requested")
+    provider_op_id = status_data.get("provider_operation_id")
+    provider_ack = cancellation.best_effort_provider_cancel(provider_op_id, job_id=job_id)
+
+    # Queued work has not dispatched yet: it halts BEFORE dispatch and is terminal
+    # now. In-flight work seeks the next safe boundary -> 'cancelling' until then.
+    if current == "queued":
+        cancellation.mark_cancelled(job_id, job_dir=job_dir, boundary="pre_dispatch")
+        new_status = "cancelled"
+    else:
+        new_status = "cancelling"
+
+    snapshot = cancellation.cancellation_status(job_id, job_dir=job_dir).to_dict()
+    try:
+        if is_script:
+            update_script_status(job_dir, status=new_status, cancellation=snapshot)
+        else:
+            update_job_status(job_dir, {"status": new_status, "cancellation": snapshot})
+    except Exception:
+        logger.exception("Could not persist cancellation status for job %s", job_id)
+
+    return {
+        "success": True,
+        "job_id": job_id,
+        "status": new_status,
+        "already_terminal": False,
+        "provider_cancel_acknowledged": provider_ack,
+        "cancellation": snapshot,
+    }
+
+
+@app.post("/api/jobs/{job_id}/cancel")
+def cancel_video_job(job_id: str, request: Request):
+    """Cooperatively cancel a video job (queued halts now; in-flight at boundary)."""
+    _enforce_public_generation_access(request)
+    if not is_valid_job_id(job_id):
+        raise HTTPException(status_code=400, detail="Invalid job ID")
+    job_dir = _safe_job_path(JOBS_ROOT / job_id)
+    if job_dir is None:
+        raise HTTPException(status_code=403, detail="Forbidden path")
+    if not job_dir.is_dir():
+        raise HTTPException(status_code=404, detail="Job not found")
+    try:
+        status_data = read_job_status(job_dir)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Job not found")
+    except ValueError:
+        raise HTTPException(status_code=500, detail="Job status corrupted")
+    return _apply_cancellation(job_id, job_dir, status_data, is_script=False)
+
+
+@app.post("/api/script-jobs/{job_id}/cancel")
+def cancel_script_job(job_id: str, request: Request):
+    """Cooperatively cancel a script job (queued halts now; in-flight at boundary)."""
+    _enforce_public_generation_access(request)
+    if not is_valid_job_id(job_id):
+        raise HTTPException(status_code=400, detail="Invalid job ID format")
+    job_dir = SCRIPT_JOBS_ROOT / job_id
+    if not job_dir.is_dir():
+        raise HTTPException(status_code=404, detail="Script job not found")
+    status_path = job_dir / "status.json"
+    if not status_path.exists():
+        raise HTTPException(status_code=404, detail="Script job status missing")
+    try:
+        status_data = json.loads(status_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        raise HTTPException(status_code=400, detail="Script job status unreadable")
+    return _apply_cancellation(job_id, job_dir, status_data, is_script=True)
 
 
 @app.get("/api/jobs/{job_id}/video")

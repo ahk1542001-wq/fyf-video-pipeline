@@ -252,6 +252,12 @@ def read_job_status(job_dir: Path) -> Dict[str, Any]:
         raw_qa_progress = data.get("qa_progress")
         if raw_qa_progress is not None:
             result["qa_progress"] = _validate_qa_progress(raw_qa_progress)
+        # Stage B-III (B9): surface the persisted cancellation snapshot so it
+        # round-trips through read/update and survives subsequent status writes.
+        # Conditional so jobs without cancellation keep their exact prior shape.
+        raw_cancellation = data.get("cancellation")
+        if raw_cancellation is not None:
+            result["cancellation"] = raw_cancellation
         result["visual_progress"] = _visual_progress(job_dir)
         return result
     except json.JSONDecodeError as e:
@@ -296,6 +302,9 @@ def update_job_status(job_dir: Path, updates: Dict[str, Any]) -> Dict[str, Any]:
         "voice_provider", "resume_count", "restart_resumable",
         "attempt_count", "visual_artifact_key", "visual_cache_state", "stage_timings",
         "paired_source_job_id", "render_progress", "qa_progress", "render_controls",
+        # Stage B-III (B9): persisted cancellation snapshot (state, reason,
+        # requested_at, boundary). Additive only.
+        "cancellation",
     }
     if "render_controls" in updates:
         try:
@@ -330,6 +339,9 @@ def update_job_status(job_dir: Path, updates: Dict[str, Any]) -> Dict[str, Any]:
     valid_statuses = {
         "queued", "visuals", "voice", "rendering", "qa", "creative_qa",
         "retrying", "needs_attention", "completed", "failed", "needs_human_review",
+        # Stage B-III (B9): cooperative cancellation states. "cancelling" is an
+        # in-flight safe-boundary seek; "cancelled" is terminal. Additive only.
+        "cancelling", "cancelled",
     }
     if current["status"] not in valid_statuses:
         raise ValueError(f"Invalid status: {current['status']}")

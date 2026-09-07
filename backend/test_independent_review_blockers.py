@@ -217,6 +217,14 @@ class TestIndependentReviewBlockers(unittest.TestCase):
 
             with patch.dict("os.environ", {
                 "FYF_BUDGET_LEDGER_PATH": str(root / ".budget_ledger.json"),
+                # Stage B-III setup-only migration: enable paid production so the
+                # concurrency-slot guardrail (max=0) is the genuine cause of the
+                # rejection, matching this test's documented intent. Without the
+                # ceiling the fail-closed budget gate fired first and the slot
+                # intent was only coincidentally satisfied. The recovery error is
+                # guardrail-reason agnostic, so the existing assertions still hold.
+                "FYF_DAILY_BUDGET_CAP_USD": "10.0",
+                "FYF_TOTAL_BUDGET_CAP_USD": "50.0",
                 "FYF_MAX_CONCURRENT_JOBS": "0",  # Guardrails reject acquisition
             }), \
                  patch("backend.main.SCRIPT_JOBS_ROOT", Path(script_jobs_dir)), \

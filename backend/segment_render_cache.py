@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from backend.job_store import write_json_atomically
+from backend import cancellation
 from backend.render_contract import validate_render_input
 from backend.render_video import (
     REMOTION_COMPOSITION_ID,
@@ -797,6 +798,9 @@ def render_segments_and_assemble(job_dir: str) -> RenderAssemblyReport:
     """Render missing segments, resume valid cache entries, then mux once."""
 
     root = _job_dir_path(job_dir)
+    # B9: the job id is the directory name; cancellation state is keyed primarily
+    # by the resolved job dir so it is unique even if names collide across roots.
+    job_id = root.name
     concurrency = _segment_render_concurrency()
     render_input_path = root / "render_input.json"
     try:
@@ -910,6 +914,9 @@ def render_segments_and_assemble(job_dir: str) -> RenderAssemblyReport:
     missing_specs = [spec for spec in ordered_specs if spec[0] not in completed]
     rendered_segments = 0
     failures: list[BaseException] = []
+    # B9: queued work halts BEFORE any segment is dispatched once cancelled.
+    if missing_specs:
+        cancellation.checkpoint(job_id, job_dir=root, boundary="pre_render_dispatch")
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
         futures = {
             executor.submit(
@@ -937,6 +944,17 @@ def render_segments_and_assemble(job_dir: str) -> RenderAssemblyReport:
             completed[result.segment_id] = result
             rendered_segments += 1
             _write_progress_checkpoint(root, ordered_specs, completed, complete=False)
+            # B9: cooperative cancellation BETWEEN segments. The segment that just
+            # completed is fully written via atomic os.replace, so stopping here
+            # never truncates a segment mid-write. Running siblings are allowed to
+            # finish (their futures complete); not-yet-started ones are cancelled.
+            if cancellation.is_cancellation_requested(job_id, job_dir=root):
+                for pending in futures:
+                    if pending is not future:
+                        pending.cancel()
+                raise cancellation.JobCancelledError(
+                    job_id, boundary=f"segment:{result.segment_id}"
+                )
     if failures:
         raise failures[0]
 

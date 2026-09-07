@@ -18,6 +18,20 @@ REPO="fyf"
 IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/$REPO/fyf-pipeline:latest"
 SERVICE="fyf-pipeline"
 
+# ===========================================================================
+# OWNER-APPROVED PAID-PRODUCTION BUDGET ENVELOPE  <-- single place to change.
+# ---------------------------------------------------------------------------
+# Stage B-I budget_store is FAIL-CLOSED: paid provider dispatch is enabled ONLY
+# when BOTH a daily AND a total ceiling are present and valid. Deploying with
+# just FYF_DAILY_BUDGET_CAP_USD would DISABLE all paid production (every paid
+# request 429s with reason "paid_production_disabled"). Both caps below are the
+# owner-approved hackathon envelope of $3. Raising either value is a DELIBERATE
+# OWNER DECISION: edit ONLY this block (the deploy --set-env-vars below sources
+# these two variables verbatim, so there is no second literal to drift).
+# ===========================================================================
+FYF_DAILY_BUDGET_CAP_USD="3"
+FYF_TOTAL_BUDGET_CAP_USD="3"
+
 gcloud config set project "$PROJECT_ID"
 
 echo "== enable APIs =="
@@ -62,7 +76,7 @@ gcloud run deploy "$SERVICE" \
   --min-instances 0 --max-instances 1 \
   --timeout 3600 \
   --allow-unauthenticated \
-  --set-env-vars "FYF_RUNTIME_MODE=hackathon,NEXT_PUBLIC_FYF_RUNTIME_MODE=hackathon,FYF_SEGMENT_RENDER_ENABLED=1,FYF_PUBLIC_DEPLOYMENT=true,FYF_BACKEND_URL=http://127.0.0.1:8000,GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_CLOUD_LOCATION=global,FYF_PUBLIC_GENERATION_ENABLED=true,FYF_DAILY_BUDGET_CAP_USD=3,FYF_LOCK_METADATA_MODE=per_segment" \
+  --set-env-vars "FYF_RUNTIME_MODE=hackathon,NEXT_PUBLIC_FYF_RUNTIME_MODE=hackathon,FYF_SEGMENT_RENDER_ENABLED=1,FYF_PUBLIC_DEPLOYMENT=true,FYF_BACKEND_URL=http://127.0.0.1:8000,GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_CLOUD_LOCATION=global,FYF_PUBLIC_GENERATION_ENABLED=true,FYF_DAILY_BUDGET_CAP_USD=$FYF_DAILY_BUDGET_CAP_USD,FYF_TOTAL_BUDGET_CAP_USD=$FYF_TOTAL_BUDGET_CAP_USD,FYF_LOCK_METADATA_MODE=per_segment" \
   "${SECRETS_FLAGS[@]}"
 
 echo "== DONE =="

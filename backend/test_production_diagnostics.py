@@ -234,7 +234,17 @@ class TestProductionDiagnostics(unittest.TestCase):
 
             with patch("backend.main.JOBS_ROOT", Path(jobs_dir)), \
                  patch("backend.main.LOCKS_ROOT", Path(locks_dir)), \
-                 patch.dict("os.environ", {"FYF_MAX_CONCURRENT_JOBS": "1"}):
+                 patch.dict("os.environ", {
+                     "FYF_MAX_CONCURRENT_JOBS": "1",
+                     # Stage B-III setup-only migration: enable paid production so
+                     # the occupied concurrency slot (not the fail-closed budget
+                     # gate) is the genuine rejection cause. The ledger is isolated
+                     # to locks_dir so it never lands in jobs_dir (which this test
+                     # asserts stays empty).
+                     "FYF_DAILY_BUDGET_CAP_USD": "10.0",
+                     "FYF_TOTAL_BUDGET_CAP_USD": "50.0",
+                     "FYF_BUDGET_LEDGER_PATH": str(Path(locks_dir) / ".budget_ledger.json"),
+                 }):
 
                 register_active_job("blocker_job")
 
@@ -244,6 +254,10 @@ class TestProductionDiagnostics(unittest.TestCase):
                     "style": "fyf_explainer",
                 })
                 self.assertEqual(resp.status_code, 429)
+                self.assertEqual(
+                    resp.headers.get("X-FYF-Rejection-Reason"), "queue_full",
+                    "the intended concurrency-slot guardrail must be the one that fires",
+                )
 
                 created = list(Path(jobs_dir).iterdir())
                 self.assertEqual(len(created), 0, "No job folders or status files on rejection")
