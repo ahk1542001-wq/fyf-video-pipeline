@@ -370,6 +370,22 @@ class FinalVisualQATests(unittest.TestCase):
         self.assertTrue(report["passed"])
         self.assertEqual(extract.call_count, 3)
 
+    def test_render_only_metadata_does_not_enter_strict_script_validation(self):
+        client = MagicMock()
+        client.models.generate_content.return_value = self.passing_batch_response_for("s1")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir); self.prepare(root)
+            raw_script = json.loads((root / "script.json").read_text(encoding="utf-8"))
+            raw_script["reduced_motion"] = False
+            (root / "script.json").write_text(json.dumps(raw_script), encoding="utf-8")
+            with patch("backend.final_visual_qa_vertex._client", return_value=client), patch(
+                "backend.final_visual_qa_vertex._extract_frame",
+                side_effect=lambda video, seconds, output: output.write_bytes(b"jpg"),
+            ):
+                report = verify_final_rendered_meaning(str(root))
+
+        self.assertTrue(report["passed"])
+
     def test_missing_final_claim_fails_closed(self):
         client = MagicMock()
         client.models.generate_content.side_effect = [

@@ -25,7 +25,7 @@ agent on import.
 
 from __future__ import annotations
 
-from typing import Annotated, Literal, Optional, Union
+from typing import Annotated, Any, Literal, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -78,6 +78,11 @@ __all__ = [
     "ApprovalEffects",
     "ChangeSet",
     "Approval",
+    "ProposalStatus",
+    "ProposalDiff",
+    "ProjectProposal",
+    "ChangeProposal",
+    "Proposal",
     "WorkflowEventType",
     "WorkflowEvent",
 ]
@@ -97,42 +102,95 @@ _SHA256_PATTERN = r"^[0-9a-f]{64}$"
 
 CommandOperation = Literal[
     "edit_script",
+    "edit_scene",
     "edit_timing",
     "edit_visual",
+    "edit_voice",
     "update_surface",
     "request_render",
+    # D6 (additive extension, no existing literal touched): aspect reframing and
+    # duration re-editing are TWO SEPARATE commands.  They are deliberately not
+    # one "resize" operation, because shortening a video is a story re-edit that
+    # needs re-approval while reframing is a safe-zone composition problem.
+    "reframe_aspect",
+    "reedit_duration",
 ]
 
-# Lock scopes understood by the spine. ``lock_store`` is whole-script today and
-# Task 9 widens it to granular scopes; the seam is the scope name.
-CommandScope = Literal["content", "visual", "timing"]
+#: D6 operation names, exported so routes and planners cannot typo them.
+REFRAME_ASPECT_OPERATION = "reframe_aspect"
+REEDIT_DURATION_OPERATION = "reedit_duration"
+
+#: D6 operations that require a persisted approval before they may be committed.
+#: A duration re-edit changes the approved story, so it is re-approved; a
+#: reframe dispatches a fresh render, which is paid work.
+APPROVAL_REQUIRED_OPERATIONS: frozenset[str] = frozenset(
+    {REFRAME_ASPECT_OPERATION, REEDIT_DURATION_OPERATION}
+)
+
+#: A duration re-edit can NEVER be satisfied by changing the playback rate.
+#: Nothing in the payload vocabulary for these operations can express a speed
+#: factor, so the prohibition is structural rather than a convention.
+SPEED_FACTOR_FORBIDDEN_OPERATIONS: frozenset[str] = frozenset({REEDIT_DURATION_OPERATION})
+
+# Lock scopes understood by the spine.  ``voice`` is a first-class scene scope
+# rather than being folded into timing: a director may freeze pronunciation
+# while still adjusting a scene's media duration.
+CommandScope = Literal["content", "visual", "timing", "voice"]
 
 # operation -> the lock scope it touches (None = not lock-gated).
 OPERATION_SCOPE: dict[str, Optional[str]] = {
     "edit_script": "content",
+    "edit_scene": None,
     "edit_timing": "timing",
     "edit_visual": "visual",
+    "edit_voice": "voice",
     "update_surface": None,
     "request_render": None,
+    # D6 (additive): a reframe re-dispatches a render and is not lock-gated,
+    # exactly like request_render; a duration re-edit rewrites narration, so it
+    # takes the content lock.
+    REFRAME_ASPECT_OPERATION: None,
+    REEDIT_DURATION_OPERATION: "content",
 }
 
 # operation -> the required ``CommandPayload`` discriminator (kind).
 OPERATION_PAYLOAD_KIND: dict[str, str] = {
     "edit_script": "script_segments",
+    "edit_scene": "script_segments",
     "edit_timing": "segment_timings",
     "edit_visual": "script_segments",
+    "edit_voice": "script_segments",
     "update_surface": "surface",
     "request_render": "render_request",
+    # D6 (additive).  reframe_aspect reuses render_request because the target
+    # ratio travels in RenderManifest.output.aspect_ratio and the operation
+    # dispatches a paid re-render.  reedit_duration reuses script_segments
+    # because shortening is expressed ONLY as a replacement set of story
+    # segments -- there is no payload in this vocabulary that can carry a speed
+    # factor, which is the point.
+    REFRAME_ASPECT_OPERATION: "render_request",
+    REEDIT_DURATION_OPERATION: "script_segments",
 }
 
 # Operations that dispatch a paid provider and therefore require a persisted
 # approval record (budget_store.record_approval) before they may be applied.
-PAID_OPERATIONS: frozenset[str] = frozenset({"request_render"})
+PAID_OPERATIONS: frozenset[str] = frozenset({"request_render", REFRAME_ASPECT_OPERATION})
 
 
 def operation_is_paid(operation: str) -> bool:
     """True when ``operation`` dispatches paid provider work."""
     return operation in PAID_OPERATIONS
+
+
+def operation_requires_approval(operation: str) -> bool:
+    """True when an operation needs an explicit persisted human decision.
+
+    Paid operations always require approval. ``reedit_duration`` is not itself
+    a provider call, but it changes the approved story and therefore requires a
+    zero-spend story approval before the new version can be committed.
+    """
+
+    return operation in PAID_OPERATIONS or operation in APPROVAL_REQUIRED_OPERATIONS
 
 
 def scope_for_operation(operation: str) -> Optional[str]:
@@ -356,6 +414,7 @@ class LockState(BaseModel):
     content: bool = False
     visual: bool = False
     timing: bool = False
+    voice: bool = False
     lock_id: Optional[str] = None
     locked_by: Optional[str] = None
     locked_at: Optional[str] = None
@@ -622,6 +681,15 @@ class ProjectCommand(BaseModel):
             raise ValueError(f"unsupported operation {self.operation!r}")
         if self.payload is None:
             raise ValueError(f"operation {self.operation!r} requires a payload")
+        # A scene's duration is part of its editable segment contract.  Keep
+        # the historic ``segment_timings`` payload for timeline edits while
+        # also accepting a validated script-segment payload for direct scene
+        # duration updates.
+        if (
+            self.operation == "edit_timing"
+            and self.payload.kind in {"segment_timings", "script_segments"}
+        ):
+            return self
         if self.payload.kind != expected_kind:
             raise ValueError(
                 f"operation {self.operation!r} requires payload kind "
@@ -668,6 +736,10 @@ class ProjectVersion(BaseModel):
     actor: str = Field(min_length=1)
     created_at: str = Field(min_length=1)
     idempotency_key: Optional[str] = None
+    # Fingerprint of the exact ProjectCommand that created this version.
+    # Keeping it beside the idempotency key prevents a replay key from being
+    # reused for a different operation or payload.
+    command_fingerprint: Optional[str] = Field(default=None, pattern=_SHA256_PATTERN)
     applied_operations: list[str] = Field(default_factory=list)
     source_command_operation: Optional[CommandOperation] = None
 
@@ -802,6 +874,89 @@ class Approval(BaseModel):
     decision: Literal["approved", "denied", "pending"] = "pending"
     actor: str = Field(min_length=1)
     timestamp: str = Field(min_length=1)
+
+
+# ---------------------------------------------------------------------------
+# Chat proposal lifecycle
+# ---------------------------------------------------------------------------
+
+
+ProposalStatus = Literal["proposed", "approved", "rejected", "expired", "revoked"]
+
+
+class ProposalDiff(BaseModel):
+    """The server-derived, reviewable effect of a proposed command.
+
+    ``before`` and ``after`` intentionally contain only JSON-safe snapshots of
+    fields touched by the command.  The authoritative command remains the
+    validated :class:`ProjectCommand` persisted beside this summary.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    operation: CommandOperation
+    summary: str = Field(min_length=1)
+    affected_fields: list[str] = Field(default_factory=list)
+    before: dict[str, Any] = Field(default_factory=dict)
+    after: dict[str, Any] = Field(default_factory=dict)
+
+
+class ProjectProposal(BaseModel):
+    """An immutable command proposal until one explicit terminal decision.
+
+    Proposal records are separate from project versions: creating or rejecting
+    one never changes the project head.  Approval metadata is filled only after
+    the command has committed successfully under the same project lock.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    proposal_id: str = Field(min_length=1, max_length=128)
+    project_id: str = Field(pattern=PROJECT_ID_PATTERN)
+    base_version: int = Field(ge=1)
+    command: ProjectCommand
+    diff: ProposalDiff
+    affected_scopes: list[CommandScope] = Field(default_factory=list)
+    affected_segment_ids: list[str] = Field(default_factory=list)
+    actor: str = Field(min_length=1, max_length=80)
+    status: ProposalStatus = "proposed"
+    idempotency_key: str = Field(min_length=1, max_length=128)
+    created_at: str = Field(min_length=1)
+    updated_at: str = Field(min_length=1)
+    expires_at: Optional[str] = None
+    decision_actor: Optional[str] = None
+    decision_at: Optional[str] = None
+    target_version: Optional[int] = Field(default=None, ge=1)
+    reason: Optional[str] = None
+
+    @field_validator("actor", "proposal_id", "idempotency_key")
+    @classmethod
+    def _clean_identity(cls, value: str) -> str:
+        return _strip_non_blank(value, "proposal identity")
+
+    @model_validator(mode="after")
+    def _coherent_identity_and_status(self) -> "ProjectProposal":
+        if self.command.project_id != self.project_id:
+            raise ValueError("proposal command project_id must match project_id")
+        if self.command.base_version != self.base_version:
+            raise ValueError("proposal command base_version must match base_version")
+        if self.command.actor != self.actor:
+            raise ValueError("proposal command actor must match actor")
+        if self.command.idempotency_key != self.idempotency_key:
+            raise ValueError("proposal command idempotency_key must match idempotency_key")
+        if self.diff.operation != self.command.operation:
+            raise ValueError("proposal diff operation must match command operation")
+        if self.status == "approved" and self.target_version is None:
+            raise ValueError("approved proposal requires target_version")
+        if self.status != "approved" and self.target_version is not None:
+            raise ValueError("only an approved proposal may carry target_version")
+        return self
+
+
+# Names used by callers in different stages of the project brief.  They are
+# aliases, not duplicate schemas, so persisted JSON has one canonical shape.
+ChangeProposal = ProjectProposal
+Proposal = ProjectProposal
 
 
 # ---------------------------------------------------------------------------

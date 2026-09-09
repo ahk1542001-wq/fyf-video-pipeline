@@ -2,11 +2,12 @@
 //
 // This module owns the reducer + the `useProjectStudio` controller hook. Neither
 // pane keeps a private authoritative copy of the project: every mutation goes to
-// the backend (POST /api/projects/{id}/commands | /chat | /undo | /variants |
-// /locks | /results) and the canonical head is re-read afterwards. The chat
-// transcript is held SEPARATELY from the versioned decision record (versions /
-// events / locks), and cross-project preferences travel only via the explicit
-// `saveToBrand()` action - never implicitly.
+// the backend (POST /api/projects/{id}/commands | /chat/proposals | /undo |
+// /variants | /locks | /results) and the canonical head is re-read afterwards.
+// The chat transcript and proposal records are held SEPARATELY from the
+// versioned decision record (versions / events / locks), and cross-project
+// preferences travel only via the explicit `saveToBrand()` action - never
+// implicitly.
 
 "use client";
 
@@ -14,24 +15,33 @@ import { useCallback, useEffect, useReducer } from "react";
 
 import {
   ApiError,
-  applyCommand,
+  approveProposal,
   createVariant,
   describeSelection,
+  editScene,
   getBudget,
   getVersion,
   getLocks,
+  getVideoJobStatus,
+  listProposals,
   listEvents,
   listVersions,
   newIdempotencyKey,
-  sendChat,
+  proposeChat,
+  regenerateScenes,
+  rejectProposal,
+  renderProject,
+  getProjectAcceptance,
+  setProjectAcceptance,
+  setProjectBudget as setProjectBudgetApi,
   setLock,
   undoToVersion,
   type BudgetStatus,
   type CommandScope,
   type LocksResponse,
-  type ProjectCommand,
+  type ProjectProposal,
+  type ProjectAcceptanceResponse,
   type ProjectVersion,
-  type ScriptSegment,
   type Selection,
   type VersionSummary,
   type WorkflowEvent,
@@ -71,6 +81,7 @@ export interface StudioState {
   events: WorkflowEvent[];
   locks: LocksResponse | null;
   budget: BudgetStatus | null;
+  humanAcceptance: ProjectAcceptanceResponse | null;
   selection: Selection | null;
   selectionMode: SelectionMode;
   selectedSceneId: string | null;
@@ -78,9 +89,13 @@ export interface StudioState {
   timeRangeStart: string;
   timeRangeEnd: string;
   chat: ChatMessage[];
+  proposals: ProjectProposal[];
   chatDraft: string;
   sceneTextDraft: string;
   sceneVisualDraft: string;
+  sceneCaptionDraft: string;
+  sceneVoiceDraft: string;
+  sceneDurationDraft: string;
   variantDraft: string;
   compareBefore: number | null;
   compareAfter: number | null;
@@ -88,6 +103,10 @@ export interface StudioState {
   compareBeforeVersion: ProjectVersion | null;
   compareAfterVersion: ProjectVersion | null;
   pending: boolean;
+  renderJobId: string | null;
+  renderDispatchedVersion: number | null;
+  renderStatus: string | null;
+  videoUrl: string | null;
   notice: Notice | null;
   error: string | null;
 }
@@ -101,6 +120,8 @@ type Action =
       events: WorkflowEvent[];
       locks: LocksResponse;
       budget: BudgetStatus;
+      proposals: ProjectProposal[];
+      humanAcceptance?: ProjectAcceptanceResponse | null;
     }
   | { type: "load/failure"; error: string; offline: boolean }
   | { type: "selection/mode"; mode: SelectionMode }
@@ -111,13 +132,24 @@ type Action =
   | { type: "chat/draft"; value: string }
   | { type: "chat/push"; message: ChatMessage }
   | { type: "chat/resolve"; id: string; text: string; meta?: string }
-  | { type: "scene/draft"; field: "text" | "visual"; value: string }
+  | { type: "proposals/set"; proposals: ProjectProposal[] }
+  | { type: "proposal/add"; proposal: ProjectProposal }
+  | { type: "proposal/update"; proposal: ProjectProposal }
+  | { type: "scene/draft"; field: "text" | "visual" | "caption" | "voice" | "duration"; value: string }
   | { type: "variant/draft"; value: string }
   | { type: "compare/set"; which: "before" | "after"; versionNo: number | null }
   | { type: "compare/toggle"; open: boolean }
   | { type: "compare/loaded"; before: ProjectVersion | null; after: ProjectVersion | null }
   | { type: "command/start" }
   | { type: "command/failure"; notice: Notice }
+  | { type: "render/queued"; jobId: string; status: string; dispatchedVersion: number | null }
+  | {
+      type: "render/status";
+      status: string;
+      videoUrl?: string | null;
+      error?: string | null;
+      dispatchedVersion?: number | null;
+    }
   | { type: "notice/set"; notice: Notice }
   | { type: "notice/clear" };
 
@@ -130,6 +162,7 @@ export function initialStudioState(projectId: string): StudioState {
     events: [],
     locks: null,
     budget: null,
+    humanAcceptance: null,
     selection: null,
     selectionMode: "scene",
     selectedSceneId: null,
@@ -137,9 +170,13 @@ export function initialStudioState(projectId: string): StudioState {
     timeRangeStart: "0",
     timeRangeEnd: "4",
     chat: [],
+    proposals: [],
     chatDraft: "",
     sceneTextDraft: "",
     sceneVisualDraft: "",
+    sceneCaptionDraft: "",
+    sceneVoiceDraft: "",
+    sceneDurationDraft: "",
     variantDraft: "",
     compareBefore: null,
     compareAfter: null,
@@ -147,6 +184,10 @@ export function initialStudioState(projectId: string): StudioState {
     compareBeforeVersion: null,
     compareAfterVersion: null,
     pending: false,
+    renderJobId: null,
+    renderDispatchedVersion: null,
+    renderStatus: null,
+    videoUrl: null,
     notice: null,
     error: null,
   };
@@ -180,7 +221,12 @@ export function studioReducer(state: StudioState, action: Action): StudioState {
   switch (action.type) {
     case "load/start":
       return { ...state, status: "loading", error: null, pending: true };
-    case "load/success":
+    case "load/success": {
+      const attachedVideo = action.head?.asset_references.find(
+        (asset) => asset.kind === "video" && typeof asset.uri === "string",
+      );
+      const attachedJobMatch = attachedVideo?.asset_id.match(/^job:([0-9a-f]{8}):video$/);
+      const clearUnattachedRender = !attachedVideo && state.renderStatus === "completed";
       return {
         ...state,
         status: "ready",
@@ -191,7 +237,45 @@ export function studioReducer(state: StudioState, action: Action): StudioState {
         events: action.events,
         locks: action.locks,
         budget: action.budget,
+        humanAcceptance: action.humanAcceptance ?? null,
+        proposals: action.proposals,
+        renderStatus: attachedVideo
+          ? "completed"
+          : clearUnattachedRender
+            ? null
+            : state.renderStatus,
+        renderJobId: attachedVideo
+          ? attachedJobMatch?.[1] ?? null
+          : clearUnattachedRender
+            ? null
+            : state.renderJobId,
+        renderDispatchedVersion: attachedVideo
+          ? action.head?.version_no ?? null
+          : clearUnattachedRender
+            ? null
+            : state.renderDispatchedVersion,
+        videoUrl: attachedVideo?.uri ?? (clearUnattachedRender ? null : state.videoUrl),
+        ...(state.selectedSceneId && action.head
+          ? (() => {
+              const selected = action.head.script.segments.find(
+                (segment) => segment.id === state.selectedSceneId,
+              );
+              return selected
+                ? {
+                    sceneTextDraft: selected.text,
+                    sceneVisualDraft: selected.visual_action,
+                    sceneCaptionDraft: selected.caption ?? "",
+                    sceneVoiceDraft: selected.voice ?? "",
+                    sceneDurationDraft:
+                      selected.duration_seconds == null
+                        ? ""
+                        : String(selected.duration_seconds),
+                  }
+                : {};
+            })()
+          : {}),
       };
+    }
     case "load/failure":
       return {
         ...state,
@@ -221,6 +305,10 @@ export function studioReducer(state: StudioState, action: Action): StudioState {
         selection: { kind: "scene", scene_ids: [action.sceneId] },
         sceneTextDraft: segment ? segment.text : "",
         sceneVisualDraft: segment ? segment.visual_action : "",
+        sceneCaptionDraft: segment?.caption ?? "",
+        sceneVoiceDraft: segment?.voice ?? "",
+        sceneDurationDraft:
+          segment?.duration_seconds == null ? "" : String(segment.duration_seconds),
       };
     }
     case "selection/objectDraft":
@@ -270,10 +358,36 @@ export function studioReducer(state: StudioState, action: Action): StudioState {
             : m,
         ),
       };
+    case "proposals/set":
+      return { ...state, proposals: action.proposals };
+    case "proposal/add":
+      return {
+        ...state,
+        proposals: [
+          action.proposal,
+          ...state.proposals.filter((proposal) => proposal.proposal_id !== action.proposal.proposal_id),
+        ],
+      };
+    case "proposal/update":
+      return {
+        ...state,
+        proposals: state.proposals.map((proposal) =>
+          proposal.proposal_id === action.proposal.proposal_id ? action.proposal : proposal,
+        ),
+      };
     case "scene/draft":
-      return action.field === "text"
-        ? { ...state, sceneTextDraft: action.value }
-        : { ...state, sceneVisualDraft: action.value };
+      switch (action.field) {
+        case "text":
+          return { ...state, sceneTextDraft: action.value };
+        case "visual":
+          return { ...state, sceneVisualDraft: action.value };
+        case "caption":
+          return { ...state, sceneCaptionDraft: action.value };
+        case "voice":
+          return { ...state, sceneVoiceDraft: action.value };
+        case "duration":
+          return { ...state, sceneDurationDraft: action.value };
+      }
     case "variant/draft":
       return { ...state, variantDraft: action.value };
     case "compare/set":
@@ -292,6 +406,28 @@ export function studioReducer(state: StudioState, action: Action): StudioState {
       return { ...state, pending: true, notice: null };
     case "command/failure":
       return { ...state, pending: false, notice: action.notice };
+    case "render/queued":
+      return {
+        ...state,
+        pending: false,
+        renderJobId: action.jobId,
+        renderDispatchedVersion: action.dispatchedVersion,
+        renderStatus: action.status,
+        videoUrl: null,
+      };
+    case "render/status":
+      return {
+        ...state,
+        pending: false,
+        renderStatus: action.status,
+        ...(action.dispatchedVersion === undefined
+          ? {}
+          : { renderDispatchedVersion: action.dispatchedVersion }),
+        videoUrl: action.videoUrl === undefined ? state.videoUrl : action.videoUrl,
+        notice: action.error
+          ? { kind: "error", message: action.error }
+          : state.notice,
+      };
     case "notice/set":
       return { ...state, notice: action.notice };
     case "notice/clear":
@@ -352,16 +488,36 @@ export interface ProjectStudioController extends StudioState {
   clearSelection: () => void;
   setChatDraft: (value: string) => void;
   sendChatMessage: () => Promise<void>;
-  setSceneDraft: (field: "text" | "visual", value: string) => void;
-  applySceneEdit: (field: "text" | "visual") => Promise<void>;
+  approveProposal: (proposalId: string) => Promise<void>;
+  rejectProposal: (proposalId: string) => Promise<void>;
+  setSceneDraft: (
+    field: "text" | "visual" | "caption" | "voice" | "duration",
+    value: string,
+  ) => void;
+  applySceneEdit: (
+    field: "text" | "visual" | "caption" | "voice" | "duration",
+  ) => Promise<void>;
+  regenerateScene: () => Promise<void>;
   setVariantDraft: (value: string) => void;
   saveVariant: () => Promise<void>;
   undo: (targetVersion: number) => Promise<void>;
   toggleLock: (scope: CommandScope, locked: boolean) => Promise<void>;
+  toggleSceneLock: (scope: CommandScope, locked: boolean) => Promise<void>;
   setCompare: (which: "before" | "after", versionNo: number | null) => void;
   openComparison: () => Promise<void>;
   closeComparison: () => void;
   saveToBrand: () => void;
+  setHumanAcceptance: (
+    accepted: boolean,
+    automatedQa?: Record<string, unknown> | null,
+    note?: string,
+  ) => Promise<void>;
+  setProjectBudget: (budgetUsd: number) => Promise<void>;
+  startRender: (args: {
+    approvedSpendUsd: number;
+    aspectRatio: "9:16" | "16:9" | "1:1";
+    reducedMotion: boolean;
+  }) => Promise<void>;
   dismissNotice: () => void;
 }
 
@@ -372,15 +528,17 @@ export function useProjectStudio(projectId: string): ProjectStudioController {
     initialStudioState,
   );
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (): Promise<ProjectVersion | null> => {
     const versionsRes = await listVersions(projectId);
     const headNo = versionsRes.head;
     const head =
       headNo >= 1 ? (await getVersion(projectId, headNo)).version : null;
-    const [eventsRes, locks, budgetRes] = await Promise.all([
+    const [eventsRes, locks, budgetRes, proposalsRes, acceptanceRes] = await Promise.all([
       listEvents(projectId),
       getLocks(projectId),
-      getBudget(),
+      getBudget(projectId),
+      listProposals(projectId),
+      head ? getProjectAcceptance(projectId, head.version_no) : Promise.resolve(null),
     ]);
     dispatch({
       type: "load/success",
@@ -389,7 +547,10 @@ export function useProjectStudio(projectId: string): ProjectStudioController {
       events: eventsRes.events,
       locks,
       budget: budgetRes.budget,
+      proposals: proposalsRes.proposals,
+      humanAcceptance: acceptanceRes,
     });
+    return head;
   }, [projectId]);
 
   useEffect(() => {
@@ -410,6 +571,93 @@ export function useProjectStudio(projectId: string): ProjectStudioController {
       active = false;
     };
   }, [refresh]);
+
+  useEffect(() => {
+    const jobId = state.renderJobId;
+    const activeStatuses = new Set([
+      "queued",
+      "visuals",
+      "voice",
+      "rendering",
+      "qa",
+      "retrying",
+    ]);
+    if (!jobId || !state.renderStatus || !activeStatuses.has(state.renderStatus)) return;
+    let cancelled = false;
+    const timer = window.setInterval(() => {
+      void getVideoJobStatus(jobId)
+        .then(async (job) => {
+          if (cancelled) return;
+          if (job.status === "completed") {
+            window.clearInterval(timer);
+            // A job can finish after its originating project version has gone
+            // stale.  Refresh first and only expose a video when the backend
+            // attached this exact job to the current project head.
+            const refreshedHead = await refresh();
+            if (cancelled) return;
+            const attached = refreshedHead?.asset_references.some(
+              (asset) =>
+                asset.asset_id === `job:${jobId}:video` && typeof asset.uri === "string",
+            );
+            if (attached) {
+              dispatch({
+                type: "render/status",
+                status: "completed",
+                dispatchedVersion: refreshedHead?.version_no ?? null,
+                videoUrl: job.video_url ?? `/api/jobs/${jobId}/video`,
+              });
+              dispatch({
+                type: "notice/set",
+                notice: { kind: "success", message: "Render completed and attached to this project." },
+              });
+            } else {
+              dispatch({
+                type: "render/status",
+                status: "needs_attention",
+                dispatchedVersion: null,
+                videoUrl: null,
+                error:
+                  "Render completed for an earlier project version and was kept isolated; no current preview was changed.",
+              });
+            }
+          } else if (["failed", "cancelled", "needs_attention", "needs_human_review"].includes(job.status)) {
+            window.clearInterval(timer);
+            dispatch({
+              type: "render/status",
+              status: job.status,
+              dispatchedVersion: null,
+              videoUrl: null,
+              error:
+                job.error ??
+                (job.status === "needs_human_review"
+                  ? "Render needs human review before it can be approved."
+                  : job.status === "needs_attention"
+                    ? "Render completed outside the current project head; no current preview was changed."
+                  : `Render ${job.status}.`),
+            });
+          } else {
+            dispatch({ type: "render/status", status: job.status });
+          }
+        })
+        .catch((err: unknown) => {
+          if (!cancelled) {
+            dispatch({
+              type: "notice/set",
+              notice: {
+                kind: "partial",
+                message:
+                  (err instanceof Error ? err.message : "Could not read render status.") +
+                  " Polling will retry.",
+              },
+            });
+          }
+        });
+    }, 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [refresh, state.renderJobId, state.renderStatus]);
 
   async function runMutation(fn: () => Promise<void>, success?: Notice) {
     dispatch({ type: "command/start" });
@@ -437,7 +685,7 @@ export function useProjectStudio(projectId: string): ProjectStudioController {
   async function sendChatMessage() {
     const message = state.chatDraft.trim();
     if (!message || !state.head) return;
-    const pendingId = newIdempotencyKey("msg");
+    const pendingId = newIdempotencyKey("proposal");
     dispatch({
       type: "chat/push",
       message: { id: newIdempotencyKey("msg"), role: "user", text: message },
@@ -454,23 +702,25 @@ export function useProjectStudio(projectId: string): ProjectStudioController {
     dispatch({ type: "chat/draft", value: "" });
     dispatch({ type: "command/start" });
     try {
-      const res = await sendChat(projectId, {
+      const res = await proposeChat(projectId, {
         message,
         selection: state.selection,
         baseVersion: state.head.version_no,
+        idempotencyKey: pendingId,
       });
+      dispatch({ type: "proposal/add", proposal: res.proposal });
       await refresh();
       dispatch({
         type: "chat/resolve",
         id: pendingId,
-        text: res.summary,
-        meta: `${res.operation} · now v${res.version.version_no}`,
+        text: `Proposed change ready for review: ${res.diff.summary}`,
+        meta: `${res.command.operation} · pending approval`,
       });
       dispatch({
         type: "notice/set",
         notice: {
-          kind: "success",
-          message: `Chat applied ${res.operation} — canonical head is v${res.version.version_no}.`,
+          kind: "info",
+          message: "Chat prepared a proposed change. Review its affected fields, then Approve or Reject.",
         },
       });
     } catch (err) {
@@ -480,7 +730,46 @@ export function useProjectStudio(projectId: string): ProjectStudioController {
     }
   }
 
-  async function applySceneEdit(field: "text" | "visual") {
+  async function approveChatProposal(proposalId: string) {
+    const proposal = state.proposals.find((item) => item.proposal_id === proposalId);
+    if (!proposal || proposal.status !== "proposed") return;
+    dispatch({ type: "command/start" });
+    try {
+      const res = await approveProposal(projectId, proposalId);
+      await refresh();
+      dispatch({ type: "proposal/update", proposal: res.proposal });
+      dispatch({
+        type: "notice/set",
+        notice: {
+          kind: "success",
+          message: `Approved ${proposal.command.operation}; canonical head is v${res.target_version ?? res.proposal.target_version}.`,
+        },
+      });
+    } catch (err) {
+      dispatch({ type: "command/failure", notice: toNotice(err, state.locks) });
+    }
+  }
+
+  async function rejectChatProposal(proposalId: string) {
+    const proposal = state.proposals.find((item) => item.proposal_id === proposalId);
+    if (!proposal || proposal.status !== "proposed") return;
+    dispatch({ type: "command/start" });
+    try {
+      const res = await rejectProposal(projectId, proposalId);
+      await refresh();
+      dispatch({ type: "proposal/update", proposal: res.proposal });
+      dispatch({
+        type: "notice/set",
+        notice: { kind: "info", message: "Proposed change rejected; the project head was not changed." },
+      });
+    } catch (err) {
+      dispatch({ type: "command/failure", notice: toNotice(err, state.locks) });
+    }
+  }
+
+  async function applySceneEdit(
+    field: "text" | "visual" | "caption" | "voice" | "duration",
+  ) {
     const head = state.head;
     const sceneId = state.selectedSceneId;
     if (!head || !sceneId) {
@@ -492,34 +781,90 @@ export function useProjectStudio(projectId: string): ProjectStudioController {
     }
     const segment = head.script.segments.find((s) => s.id === sceneId);
     if (!segment) return;
-    const value = (field === "text" ? state.sceneTextDraft : state.sceneVisualDraft).trim();
-    if (!value) {
+
+    const textValue =
+      field === "text"
+        ? state.sceneTextDraft.trim()
+        : field === "visual"
+          ? state.sceneVisualDraft.trim()
+          : field === "caption"
+            ? state.sceneCaptionDraft.trim()
+            : field === "voice"
+              ? state.sceneVoiceDraft.trim()
+              : state.sceneDurationDraft.trim();
+    if (!textValue) {
       dispatch({
         type: "notice/set",
         notice: { kind: "error", message: "Enter the new value before applying." },
       });
       return;
     }
-    const updated: ScriptSegment =
-      field === "text"
-        ? { ...segment, text: value }
-        : { ...segment, visual_action: value };
-    const command: ProjectCommand = {
-      project_id: projectId,
+
+    const edit: Parameters<typeof editScene>[1] = {
       base_version: head.version_no,
+      scene_ids: [sceneId],
       actor: "canvas",
-      operation: field === "text" ? "edit_script" : "edit_visual",
-      selection: { kind: "scene", scene_ids: [sceneId] },
-      payload: { kind: "script_segments", segments: [updated] },
       idempotency_key: newIdempotencyKey("canvas"),
     };
+    if (field === "duration") {
+      const duration = Number(textValue);
+      if (!Number.isFinite(duration) || duration <= 0) {
+        dispatch({
+          type: "notice/set",
+          notice: { kind: "error", message: "Duration must be a finite number greater than zero." },
+        });
+        return;
+      }
+      edit.duration_seconds = duration;
+    } else if (field === "text") {
+      edit.text = textValue;
+    } else if (field === "visual") {
+      edit.visual_action = textValue;
+    } else if (field === "caption") {
+      edit.caption = textValue;
+    } else {
+      edit.voice = textValue;
+    }
     await runMutation(
-      () => applyCommand(projectId, command).then(() => undefined),
+      () => editScene(projectId, edit).then(() => undefined),
       {
         kind: "success",
         message: `Canvas applied a ${field} edit to ${sceneId} — chat sees the same version.`,
       },
     );
+  }
+
+  async function regenerateScene() {
+    const head = state.head;
+    const sceneId = state.selectedSceneId;
+    if (!head || !sceneId) {
+      dispatch({
+        type: "notice/set",
+        notice: { kind: "error", message: "Select a scene on the storyboard first." },
+      });
+      return;
+    }
+    await runMutation(async () => {
+      const response = await regenerateScenes(projectId, {
+        base_version: head.version_no,
+        scene_ids: [sceneId],
+        actor: "creative-director",
+        idempotency_key: newIdempotencyKey("regenerate-scene"),
+      });
+      dispatch({
+        type: "notice/set",
+        notice:
+          response.status === "blocked"
+            ? {
+                kind: "locked",
+                message: `Regeneration blocked by locked descendants: ${response.plan.blocked.join(", ")}.`,
+              }
+            : {
+                kind: "info",
+                message: `Regeneration planned from exact head v${response.base_version}; only selected-scene descendants are dirty.`,
+              },
+      });
+    });
   }
 
   async function saveVariant() {
@@ -532,7 +877,8 @@ export function useProjectStudio(projectId: string): ProjectStudioController {
       return;
     }
     await runMutation(
-      () => createVariant(projectId, name).then(() => undefined),
+      () =>
+        createVariant(projectId, name, state.head?.version_no).then(() => undefined),
       {
         kind: "success",
         message: `Saved named variant "${name}" as a server version — it survives reload.`,
@@ -543,7 +889,10 @@ export function useProjectStudio(projectId: string): ProjectStudioController {
 
   async function undo(targetVersion: number) {
     await runMutation(
-      () => undoToVersion(projectId, targetVersion).then(() => undefined),
+      () =>
+        undoToVersion(projectId, targetVersion, "creative-director", state.head?.version_no).then(
+          () => undefined,
+        ),
       {
         kind: "info",
         message: `Undo complete — content of v${targetVersion} restored as a NEW version. Nothing was deleted.`,
@@ -560,6 +909,30 @@ export function useProjectStudio(projectId: string): ProjectStudioController {
       {
         kind: locked ? "info" : "success",
         message: locked ? `Locked ${scope} edits.` : `Unlocked ${scope} edits.`,
+      },
+    );
+  }
+
+  async function toggleSceneLock(scope: CommandScope, locked: boolean) {
+    const sceneId = state.selectedSceneId;
+    if (!sceneId) {
+      dispatch({
+        type: "notice/set",
+        notice: { kind: "error", message: "Select a scene before changing a scene lock." },
+      });
+      return;
+    }
+    await runMutation(
+      () =>
+        setLock(projectId, scope, locked, {
+          sceneId,
+          reason: locked ? "Locked by Creative Director" : undefined,
+        }).then(() => undefined),
+      {
+        kind: locked ? "info" : "success",
+        message: locked
+          ? `Locked ${scope} edits for ${sceneId}.`
+          : `Unlocked ${scope} edits for ${sceneId}.`,
       },
     );
   }
@@ -613,6 +986,93 @@ export function useProjectStudio(projectId: string): ProjectStudioController {
     }
   }
 
+  async function setHumanAcceptance(
+    accepted: boolean,
+    automatedQa: Record<string, unknown> | null = null,
+    note?: string,
+  ) {
+    const head = state.head;
+    if (!head) return;
+    await runMutation(
+      () =>
+        setProjectAcceptance(projectId, head.version_no, {
+          accepted,
+          automatedQa,
+          note,
+        }).then(() => undefined),
+      {
+        kind: accepted ? "success" : "info",
+        message: accepted
+          ? `Version ${head.version_no} accepted; readiness still requires current verified media.`
+          : `Version ${head.version_no} rejected; downloads remain blocked.`,
+      },
+    );
+  }
+
+  async function setProjectBudget(budgetUsd: number) {
+    if (!Number.isFinite(budgetUsd) || budgetUsd < 0) {
+      dispatch({
+        type: "notice/set",
+        notice: { kind: "error", message: "Project budget must be a finite non-negative amount." },
+      });
+      return;
+    }
+    await runMutation(
+      () => setProjectBudgetApi(projectId, budgetUsd).then(() => undefined),
+      {
+        kind: "success",
+        message: `Project budget updated to $${budgetUsd.toFixed(2)}; account caps still apply.`,
+      },
+    );
+  }
+
+  async function startRender(args: {
+    approvedSpendUsd: number;
+    aspectRatio: "9:16" | "16:9" | "1:1";
+    reducedMotion: boolean;
+  }) {
+    if (!state.head) return;
+    if (!Number.isFinite(args.approvedSpendUsd) || args.approvedSpendUsd <= 0) {
+      dispatch({
+        type: "notice/set",
+        notice: { kind: "error", message: "Enter a valid positive budget before approval." },
+      });
+      return;
+    }
+    dispatch({ type: "command/start" });
+    try {
+      const response = await renderProject(
+        projectId,
+        {
+          baseVersion: state.head.version_no,
+          approvedSpendUsd: args.approvedSpendUsd,
+          aspectRatio: args.aspectRatio,
+          reducedMotion: args.reducedMotion,
+          ctaText: state.head.script.cta_text ?? "",
+          retentionProgressBar: state.head.script.retention_progress_bar ?? true,
+          animatedLowerThirds: state.head.script.animated_lower_thirds ?? true,
+        },
+        newIdempotencyKey("studio-render"),
+      );
+      dispatch({
+        type: "render/queued",
+        jobId: response.job_id,
+        status: "queued",
+        dispatchedVersion: response.dispatched_version,
+      });
+      await refresh();
+      dispatch({
+        type: "notice/set",
+        notice: {
+          kind: "info",
+          message: `Render queued from v${response.dispatched_version}. Estimated cost $${response.estimated_cost_usd.toFixed(2)}; approved ceiling $${response.approved_spend_usd.toFixed(2)}.`,
+        },
+      });
+    } catch (err) {
+      dispatch({ type: "command/failure", notice: toNotice(err, state.locks) });
+    }
+  }
+
   const chatContextScene =
     state.selectedSceneId && state.head
       ? state.head.script.segments.find((s) => s.id === state.selectedSceneId) ?? null
@@ -626,7 +1086,9 @@ export function useProjectStudio(projectId: string): ProjectStudioController {
       : state.head
         ? `${state.head.script.title} — v${state.head.version_no}`
         : "Loading project…",
-    reload: refresh,
+    reload: async () => {
+      await refresh();
+    },
     setSelectionMode: (mode) => dispatch({ type: "selection/mode", mode }),
     selectScene: (sceneId) => dispatch({ type: "selection/scene", sceneId }),
     setObjectDraft: (value) => dispatch({ type: "selection/objectDraft", value }),
@@ -635,17 +1097,24 @@ export function useProjectStudio(projectId: string): ProjectStudioController {
     clearSelection: () => dispatch({ type: "selection/clear" }),
     setChatDraft: (value) => dispatch({ type: "chat/draft", value }),
     sendChatMessage,
+    approveProposal: approveChatProposal,
+    rejectProposal: rejectChatProposal,
     setSceneDraft: (field, value) => dispatch({ type: "scene/draft", field, value }),
     applySceneEdit,
+    regenerateScene,
     setVariantDraft: (value) => dispatch({ type: "variant/draft", value }),
     saveVariant,
     undo,
     toggleLock,
+    toggleSceneLock,
     setCompare: (which, versionNo) =>
       dispatch({ type: "compare/set", which, versionNo }),
     openComparison,
     closeComparison: () => dispatch({ type: "compare/toggle", open: false }),
     saveToBrand,
+    setHumanAcceptance,
+    setProjectBudget,
+    startRender,
     dismissNotice: () => dispatch({ type: "notice/clear" }),
   };
 }

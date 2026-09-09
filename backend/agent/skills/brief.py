@@ -1,11 +1,11 @@
 """Skill module: Brief / Strategy.
 
 WRAPS (import/read only, never edited or re-implemented):
-    * ``backend.agent.tools.research_topic``  — the ADK research/strategy tool
+    * ``backend.agent.tools.draft_story_segments`` — the ADK script tool
     * ``video_contract.ScriptGenerationRequest`` — the canonical request contract
 
 This skill is the *strategy* boundary: it turns a raw client request into a
-research-backed, contract-validated generation brief (language, genre,
+contract-validated generation brief (language, genre,
 presenter mode, studio, duration, narrative hook) that every downstream skill
 consumes. It does not draft narration, plan visuals, or synthesise voice.
 """
@@ -25,8 +25,7 @@ from backend.agent.skills.base import (
 TRIGGER: str = (
     "A new video request arrives (a ScriptGenerationRequest with a topic) and no "
     "resolved strategy brief exists yet for the job; runs before any narration "
-    "drafting. Concretely: job status is new/'research' and research_topic has "
-    "not produced a dossier for this topic+studio+language+genre combination."
+    "drafting. The user's supplied script or brief remains the source of truth."
 )
 
 # --- Contract boundary (existing video_contract types, referenced not copied)
@@ -37,9 +36,9 @@ OUTPUT_SCHEMA: tuple[type, ...] = (ScriptGenerationRequest,)
 ALLOWED_TOOLS: tuple[ToolRef, ...] = (
     ToolRef(
         module="backend.agent.tools",
-        name="research_topic",
-        role="Extract factual focus, narrative hook, target audience and visual "
-        "concepts for the requested topic/genre/language/studio.",
+        name="draft_story_segments",
+        role="Structure the supplied script or brief for the requested "
+        "topic/genre/language/studio without external research.",
     ),
 )
 
@@ -75,11 +74,8 @@ EXAMPLES: tuple[Example, ...] = (
             "genre": "cinematic_documentary",
             "studio_name": "FYF Studio",
             "suggested_segments": 6,
-            "target_audience": "Global audience interested in "
-            "cinematic_documentary content by FYF Studio",
         },
-        note="Mirrors backend.agent.tools.research_topic's deterministic "
-        "dossier shape (short/micro -> 4 segments, otherwise 6). No model call.",
+        note="Static resolved request example. No research or provider call.",
     ),
 )
 
@@ -115,5 +111,5 @@ DESCRIPTOR = SkillDescriptor(
     version=VERSION,
     wrapped_modules=WRAPPED_MODULES,
     notes="Strategy boundary only; produces the resolved generation brief that "
-    "downstream skills consume. Wraps research_topic; no logic copied.",
+    "downstream skills consume. No research stage is present.",
 )

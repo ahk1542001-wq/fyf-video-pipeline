@@ -173,6 +173,27 @@ class TestRenderVideo(unittest.TestCase):
             self.assertIn("fyf-v2/scene-a1.png", captures[0]["public"])
             self.assertIn("job-visuals/verified.png", captures[0]["public"])
 
+    @patch("backend.render_video.validate_render_input")
+    @patch("backend.render_video.subprocess.run")
+    def test_full_renderer_enforces_playback_safe_h264_pixel_format(self, mock_run, mock_validate):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            job_dir = Path(temp_dir)
+            (job_dir / "voice.wav").write_bytes(b"mock audio")
+            (job_dir / "render_input.json").write_text(json.dumps(self._segment_render_input()))
+
+            def side_effect(*args, **kwargs):
+                command = args[0]
+                output = Path(command[command.index(REMOTION_COMPOSITION_ID) + 1])
+                output.write_bytes(b"mock full render")
+
+            mock_run.side_effect = side_effect
+            render_video_remotion(str(job_dir))
+
+            command = mock_run.call_args.args[0]
+            self.assertIn("--codec=h264", command)
+            self.assertIn("--pixel-format=yuv420p", command)
+            self.assertIn("--color-space=bt709", command)
+
     def test_startup_resume_counts_active_job_and_enforces_limit(self):
         import backend.main as main_module
         from backend.job_store import initialize_job_status, update_job_status, read_job_status
@@ -228,7 +249,7 @@ class TestRenderVideo(unittest.TestCase):
 
             render_input_path = os.path.join(job_dir, "render_input.json")
             with open(render_input_path, "w") as f:
-                json.dump({"test": "data"}, f)
+                json.dump(self._segment_render_input(), f)
             visuals_dir = os.path.join(job_dir, "visuals")
             os.makedirs(visuals_dir)
             with open(os.path.join(visuals_dir, "verified.png"), "w") as f:
@@ -334,7 +355,7 @@ class TestRenderVideo(unittest.TestCase):
             with open(os.path.join(job_dir, "voice.wav"), "w") as f:
                 f.write("mock audio")
             with open(os.path.join(job_dir, "render_input.json"), "w") as f:
-                json.dump({"test": "data"}, f)
+                json.dump(self._segment_render_input(), f)
 
             def side_effect(*args, **kwargs):
                 cmd = args[0]

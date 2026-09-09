@@ -78,6 +78,18 @@ test.describe('Studio chat + canvas (real backend persistence)', () => {
     const projectId = await createProject(request);
     await page.goto(`/project/${projectId}`);
     await expectReady(page, 'v1');
+    await expect(page.getByTestId('studio-workflow')).toBeVisible();
+    await expect(page.locator('.workflow-stage__label')).toHaveText([
+      'Brief',
+      'Story',
+      'Storyboard',
+      'Render',
+      'Review',
+    ]);
+    await page.getByRole('button', { name: 'Brief', exact: true }).click();
+    await expect(page.getByTestId('studio-brand-kit')).toBeVisible();
+    await expect(page.getByTestId('scene-text-s1')).toHaveCount(0);
+    await page.getByRole('button', { name: 'Storyboard', exact: true }).click();
 
     // Burmese narration renders (typography does not regress).
     await expect(page.getByTestId('scene-text-s1')).toContainText('မူလ');
@@ -91,10 +103,15 @@ test.describe('Studio chat + canvas (real backend persistence)', () => {
     //    head; s1 is still selected so the chat context shows the new text).
     await expect(page.getByTestId('chat-context-value')).toContainText('Canvas edited narration');
 
-    // 3) EDIT VIA CHAT (select s2 first so the command scope is s2) -> v3.
+    // 3) EDIT VIA CHAT (select s2 first so the command scope is s2). Chat
+    // creates a proposal first; only explicit approval appends v3.
     await page.getByTestId('scene-select-s2').click();
     await page.getByTestId('chat-input').fill('rewrite the narration as "Chat edited line"');
     await page.getByTestId('chat-send').click();
+    const proposal = page.getByTestId('chat-proposal-card').first();
+    await expect(proposal).toBeVisible();
+    await expect(page.getByTestId('head-version')).toHaveText('v2');
+    await proposal.getByTestId('proposal-approve').click();
     await expectReady(page, 'v3');
 
     // 4) THE CHAT EDIT IS VISIBLE ON CANVAS.
@@ -105,6 +122,7 @@ test.describe('Studio chat + canvas (real backend persistence)', () => {
     await expectReady(page, 'v3');
     await expect(page.getByTestId('scene-text-s1')).toHaveText('Canvas edited narration');
     await expect(page.getByTestId('scene-text-s2')).toHaveText('Chat edited line');
+    await page.getByRole('button', { name: 'Story', exact: true }).click();
     await expect(page.getByTestId('version-count')).toHaveText('3');
   });
 
@@ -121,9 +139,13 @@ test.describe('Studio chat + canvas (real backend persistence)', () => {
     await expect(page.getByTestId('scene-text-s1')).toHaveText('Edited then undone');
 
     // Undo to v1 appends v3 restoring v1 content; nothing is deleted.
+    await page.getByRole('button', { name: 'Story', exact: true }).click();
     await page.getByTestId('undo-1').click();
-    await expectReady(page, 'v3');
+    await expect(page.getByTestId('studio-status')).toHaveText('ready', { timeout: 20_000 });
+    await page.getByRole('button', { name: 'Storyboard', exact: true }).click();
+    await expect(page.getByTestId('head-version')).toHaveText('v3', { timeout: 20_000 });
     await expect(page.getByTestId('scene-text-s1')).toContainText('မူလ');
+    await page.getByRole('button', { name: 'Story', exact: true }).click();
     await expect(page.getByTestId('version-count')).toHaveText('3');
     await expect(page.getByTestId('studio-notice-message')).toContainText('Nothing was deleted');
   });
@@ -171,14 +193,16 @@ test.describe('Studio chat + canvas (real backend persistence)', () => {
     await expectReady(page, 'v2');
 
     // v3: promote a NAMED variant to a server-persisted version.
+    await page.getByRole('button', { name: 'Story', exact: true }).click();
     await page.getByTestId('variant-name-input').fill('Golden Cut');
     await page.getByTestId('variant-create').click();
-    await expectReady(page, 'v3');
+    await expect(page.getByTestId('studio-status')).toHaveText('ready', { timeout: 20_000 });
     await expect(page.getByTestId('variant-name-3')).toHaveText('Golden Cut');
 
     // Reload -> the named variant is still there (this is what persistent means).
     await page.reload();
     await expectReady(page, 'v3');
+    await page.getByRole('button', { name: 'Story', exact: true }).click();
     await expect(page.getByTestId('variant-name-3')).toHaveText('Golden Cut');
 
     // Before/after renders two immutable versions side by side.

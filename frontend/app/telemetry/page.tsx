@@ -1,22 +1,26 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import StudioHeader from "../../components/studio-header";
 import {
   API_URL,
   STATIC_RUNTIME_FALLBACK,
-  type RuntimeInfo,
-  type TelemetrySummary,
   type JobTelemetry,
+  type RuntimeInfo,
   type SceneTelemetry,
+  type TelemetrySummary,
 } from "../../lib/video-ui";
 
 type JobTelemetryResponse = {
   job: JobTelemetry;
   scenes: SceneTelemetry[];
+  scene_count?: number;
+  qa_records?: Array<Record<string, unknown>>;
+  qa_count?: number;
+  connected_to_cloud?: boolean;
 };
 
-interface DeliveryInfo {
+type DeliveryInfo = {
   pending: number | null;
   failed: number | null;
   delivered: number | null;
@@ -25,11 +29,23 @@ interface DeliveryInfo {
   drain_blocked_reason: string | null;
   ingestion_lag_seconds: number | null;
   last_delivered_at: string | null;
-}
+};
 
-interface QueryResult {
+type TelemetrySummaryWithDelivery = TelemetrySummary & {
+  source?: string;
+  clickhouse_status?: string;
+  delivery?: DeliveryInfo;
+  ingestion_lag_seconds?: number | null;
+  cloud?: {
+    connected?: boolean;
+    status?: string;
+    label?: string;
+  };
+};
+
+type QueryResult = {
   columns: string[];
-  rows: (string | number | boolean | null)[][];
+  rows: Array<Array<string | number | boolean | null>>;
   row_count: number;
   duration_ms: number;
   source: string;
@@ -37,22 +53,8 @@ interface QueryResult {
   delivery?: DeliveryInfo;
   ingestion_lag_seconds?: number | null;
   freshness?: string | null;
-}
-
-// TelemetrySummary plus the Stage E2/E4 delivery + audience honesty fields the
-// backend now surfaces. Extended locally so lib/video-ui.ts stays untouched.
-type TelemetrySummaryWithDelivery = TelemetrySummary & {
-  delivery?: DeliveryInfo;
-  ingestion_lag_seconds?: number | null;
-  audience?: {
-    retention?: { value: number | null; status: string };
-    conversion?: { value: number | null; status: string };
-    source?: string;
-  };
 };
 
-// The six analytics capabilities (document line 147) plus the original detail
-// views. Every entry is a server-owned query id; the console never accepts SQL.
 type QueryId =
   | "creation_timeline"
   | "cost_summary"
@@ -76,22 +78,85 @@ const PRESET_QUERIES: Array<{ label: string; queryId: QueryId }> = [
   { label: "Scene Latencies", queryId: "scene_latency" },
 ];
 
+const EMPTY_JOBS: JobTelemetry[] = [];
+
 function formatCount(value: number | null | undefined): string {
-  return value === null || value === undefined ? "—" : value.toLocaleString();
+  return value === null || value === undefined ? "Unavailable" : value.toLocaleString();
 }
 
 function formatCost(value: number | null | undefined): string {
-  return value === null || value === undefined ? "Unpriced" : `$${value.toFixed(4)}`;
+  return value === null || value === undefined || !Number.isFinite(value) ? "Unavailable" : `$${value.toFixed(4)}`;
 }
 
-function statusTone(status: string | null | undefined): string {
-  if (status === "completed" || status === "exact" || status === "succeeded") {
-    return "text-[#16856B] bg-[#16856B]/10 border-[#16856B]/20";
+function formatDuration(value: number | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) return "Unavailable";
+  if (value >= 1000) return `${(value / 1000).toFixed(1)}s`;
+  return `${Math.round(value)}ms`;
+}
+
+function formatDate(value: string | undefined): string {
+  if (!value) return "Date unavailable";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return "Date unavailable";
+  return parsed.toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function statusForJob(job: JobTelemetry): string {
+  return String(job.status || job.summary?.job_status || "unknown").toLowerCase();
+}
+
+function statusLabel(status: string | null | undefined): string {
+  const normalized = String(status || "unknown").replace(/[_-]+/g, " ");
+  return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+}
+
+function statusClass(status: string | null | undefined): string {
+  const normalized = String(status || "unknown").toLowerCase();
+  if (["completed", "complete", "succeeded", "success", "passed"].includes(normalized)) {
+    return "status-chip status-chip--success";
   }
-  if (status === "failed" || status === "unpriced") {
-    return "text-[#B45309] bg-[#B45309]/10 border-[#B45309]/20";
+  if (["failed", "failure", "error", "cancelled", "canceled"].includes(normalized)) {
+    return "status-chip status-chip--warning";
   }
-  return "text-[#30382C]/70 bg-[#30382C]/5 border-[#30382C]/10";
+  return "status-chip status-chip--neutral";
+}
+
+function isSuccessful(status: string): boolean {
+  return ["completed", "complete", "succeeded", "success", "passed"].includes(status);
+}
+
+function isTerminal(status: string): boolean {
+  return [
+    "completed",
+    "complete",
+    "succeeded",
+    "success",
+    "passed",
+    "failed",
+    "failure",
+    "error",
+    "cancelled",
+    "canceled",
+  ].includes(status);
+}
+
+function successRate(jobs: JobTelemetry[]): { value: number | null; successful: number; known: number } {
+  const outcomes = jobs.map(statusForJob).filter(isTerminal);
+  const successful = outcomes.filter(isSuccessful).length;
+  return {
+    value: outcomes.length > 0 ? Math.round((successful / outcomes.length) * 100) : null,
+    successful,
+    known: outcomes.length,
+  };
+}
+
+function jobKind(job: JobTelemetry): string {
+  return job.job_kind || job.voice_mode || "production";
 }
 
 function existingGenerationAccessHeaders(): HeadersInit {
@@ -100,23 +165,31 @@ function existingGenerationAccessHeaders(): HeadersInit {
   return token ? { "X-FYF-Access-Token": token } : {};
 }
 
+function StatusChip({ status }: { status: string | null | undefined }) {
+  return <span className={statusClass(status)}>{statusLabel(status)}</span>;
+}
+
+function EmptyState({ children }: { children: string }) {
+  return <div className="telemetry-empty">{children}</div>;
+}
+
 export default function TelemetryPage() {
   const [runtime, setRuntime] = useState<RuntimeInfo>(STATIC_RUNTIME_FALLBACK);
   const [runtimeSource, setRuntimeSource] = useState<"api" | "fallback">("fallback");
   const [summary, setSummary] = useState<TelemetrySummaryWithDelivery | null>(null);
-  const [selectedJobId, setSelectedJobId] = useState<string>("");
+  const [selectedJobId, setSelectedJobId] = useState("");
   const [jobDetails, setJobDetails] = useState<JobTelemetryResponse | null>(null);
-  const [isLoading, setIsLoading] = useState<boolean>(true);
-  const [lastSynced, setLastSynced] = useState<string>("");
+  const [isLoading, setIsLoading] = useState(true);
+  const [lastSynced, setLastSynced] = useState("");
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(false);
+  const [searchTerm, setSearchTerm] = useState("");
 
-  // ClickHouse Query Console
   const [selectedQueryId, setSelectedQueryId] = useState<QueryId>(PRESET_QUERIES[0].queryId);
   const [queryResult, setQueryResult] = useState<QueryResult | null>(null);
   const [queryLoading, setQueryLoading] = useState(false);
   const [queryError, setQueryError] = useState<string | null>(null);
 
-  // Data Officer state
   const [officerQuestion, setOfficerQuestion] = useState("");
   const [officerAnswer, setOfficerAnswer] = useState<string | null>(null);
   const [officerToolUsed, setOfficerToolUsed] = useState(false);
@@ -125,63 +198,125 @@ export default function TelemetryPage() {
 
   const loadData = useCallback(async () => {
     setIsLoading(true);
+    setLoadError(null);
     try {
-      // 1. Fetch runtime
-      const runtimeRes = await fetch(`${API_URL}/api/runtime`).catch(() => null);
-      if (runtimeRes && runtimeRes.ok) {
-        const rData = await runtimeRes.json();
-        setRuntime(rData);
+      const [runtimeRes, telemetryRes] = await Promise.all([
+        fetch(`${API_URL}/api/runtime`).catch(() => null),
+        fetch(`${API_URL}/api/telemetry`).catch(() => null),
+      ]);
+
+      if (runtimeRes?.ok) {
+        setRuntime(await runtimeRes.json());
         setRuntimeSource("api");
       }
 
-      // 2. Fetch telemetry overview
-      const telRes = await fetch(`${API_URL}/api/telemetry`).catch(() => null);
-      if (telRes && telRes.ok) {
-        const tData = await telRes.json();
-        setSummary(tData);
-        if (!selectedJobId && Array.isArray(tData.jobs) && tData.jobs.length > 0) {
-          setSelectedJobId(tData.jobs[0].job_id);
+      let nextJobId = selectedJobId;
+      if (telemetryRes?.ok) {
+        const telemetryData = (await telemetryRes.json()) as TelemetrySummaryWithDelivery;
+        setSummary(telemetryData);
+        const availableJobs = Array.isArray(telemetryData.jobs) ? telemetryData.jobs : [];
+        if (!nextJobId || !availableJobs.some(job => job.job_id === nextJobId)) {
+          nextJobId = availableJobs[0]?.job_id || "";
+          if (nextJobId) setSelectedJobId(nextJobId);
         }
+      } else {
+        setLoadError("Telemetry is unavailable right now. No local or ClickHouse record was changed.");
       }
 
-      // 3. Fetch selected job details
-      if (selectedJobId) {
-        const jobRes = await fetch(`${API_URL}/api/jobs/${selectedJobId}/telemetry`).catch(() => null);
-        if (jobRes && jobRes.ok) {
-          const jData = await jobRes.json();
-          setJobDetails(jData);
+      if (nextJobId) {
+        const jobRes = await fetch(`${API_URL}/api/jobs/${nextJobId}/telemetry`).catch(() => null);
+        if (jobRes?.ok) {
+          setJobDetails((await jobRes.json()) as JobTelemetryResponse);
+        } else {
+          setJobDetails(null);
         }
+      } else {
+        setJobDetails(null);
       }
-      setLastSynced(new Date().toLocaleTimeString());
-    } catch (err) {
-      console.error("Telemetry load failed:", err);
+      setLastSynced(new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }));
+    } catch (error) {
+      setLoadError(error instanceof Error ? error.message : "Telemetry is unavailable right now.");
     } finally {
       setIsLoading(false);
     }
   }, [selectedJobId]);
 
   useEffect(() => {
-    const timer = window.setTimeout(() => {
-      void loadData();
-    }, 0);
+    const timer = window.setTimeout(() => void loadData(), 0);
     return () => window.clearTimeout(timer);
   }, [loadData]);
 
-  // Auto-refresh interval
   useEffect(() => {
     if (!autoRefresh) return;
-    const timer = setInterval(() => {
-      void loadData();
-    }, 15000);
-    return () => clearInterval(timer);
+    const timer = window.setInterval(() => void loadData(), 15000);
+    return () => window.clearInterval(timer);
   }, [autoRefresh, loadData]);
+
+  const jobs = summary?.jobs ?? EMPTY_JOBS;
+  const filteredJobs = useMemo(() => {
+    const needle = searchTerm.trim().toLowerCase();
+    if (!needle) return jobs;
+    return jobs.filter(job => {
+      const haystack = [job.job_id, job.title, job.job_kind, job.voice_mode, statusForJob(job)]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(needle);
+    });
+  }, [jobs, searchTerm]);
+
+  const selectedJob = jobs.find(job => job.job_id === selectedJobId) || jobs[0] || null;
+  const selectedSummary = jobDetails?.job.summary;
+  const selectedCalls = jobDetails?.job.calls || [];
+  const selectedScenes = jobDetails?.scenes || [];
+  const outcomes = successRate(jobs);
+  const sourceStatusKnown = Boolean(
+    summary && (
+      summary.cloud?.connected !== undefined ||
+      summary.delivery?.cloud_connected !== undefined ||
+      summary.source !== undefined
+    ),
+  );
+  const cloudConnected = summary?.cloud?.connected === true || summary?.delivery?.cloud_connected === true || summary?.source === "clickhouse";
+  const sourceLabel = !summary
+    ? "Waiting for telemetry"
+    : cloudConnected
+      ? "ClickHouse connected"
+      : sourceStatusKnown
+        ? "Local mirror only"
+        : "Source status unavailable";
+  const sourceDescription = cloudConnected
+    ? "The latest summary is connected to ClickHouse."
+    : !summary
+      ? "Waiting for the first telemetry response."
+      : sourceStatusKnown
+        ? "ClickHouse is not connected; this view is showing the recorded local mirror."
+        : "The API did not report whether this summary is local or remote.";
+
+  const timelineEvents = [
+    ...selectedCalls.map(call => ({
+      id: `call-${call.call_id}`,
+      label: call.stage,
+      detail: call.operation,
+      duration: call.duration_ms,
+      status: call.status,
+    })),
+    ...selectedScenes.map(scene => ({
+      id: `scene-${scene.scene_id}`,
+      label: scene.scene_id,
+      detail: scene.treatment_type,
+      duration: scene.render_time_ms,
+      status: "recorded",
+    })),
+  ];
+  const maxTimelineDuration = Math.max(...timelineEvents.map(event => event.duration || 0), 1);
 
   async function runClickHouseQuery(queryId: QueryId = selectedQueryId) {
     if (queryLoading) return;
     setQueryLoading(true);
     setQueryError(null);
     try {
-      const res = await fetch(`${API_URL}/api/clickhouse/query`, {
+      const response = await fetch(`${API_URL}/api/clickhouse/query`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -189,19 +324,19 @@ export default function TelemetryPage() {
         },
         body: JSON.stringify({ query_id: queryId }),
       });
-      const data = await res.json();
-      if (!res.ok) {
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
         throw new Error(typeof data.detail === "string" ? data.detail : "Query execution failed");
       }
       setQueryResult(data as QueryResult);
-    } catch (err) {
-      setQueryError(err instanceof Error ? err.message : "Query execution failed");
+    } catch (error) {
+      setQueryError(error instanceof Error ? error.message : "Query execution failed");
     } finally {
       setQueryLoading(false);
     }
   }
 
-  async function askDataOfficer(event: React.FormEvent) {
+  async function askDataOfficer(event: FormEvent) {
     event.preventDefault();
     const question = officerQuestion.trim();
     if (!question || officerBusy) return;
@@ -210,7 +345,7 @@ export default function TelemetryPage() {
     setOfficerAnswer(null);
     setOfficerToolUsed(false);
     try {
-      const res = await fetch(`${API_URL}/api/insights`, {
+      const response = await fetch(`${API_URL}/api/insights`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -218,456 +353,442 @@ export default function TelemetryPage() {
         },
         body: JSON.stringify({ question }),
       });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
         throw new Error(typeof data.detail === "string" ? data.detail : "Data Officer unavailable");
       }
       setOfficerAnswer(String(data.answer ?? ""));
       setOfficerToolUsed(Boolean(data.tool_used));
-    } catch (err) {
-      setOfficerError(err instanceof Error ? err.message : "Request failed");
+    } catch (error) {
+      setOfficerError(error instanceof Error ? error.message : "Request failed");
     } finally {
       setOfficerBusy(false);
     }
   }
 
   return (
-    <div className="min-h-screen bg-[#F4F0E6] text-[#30382C] overflow-x-hidden">
+    <div className="app-shell telemetry-page">
       <StudioHeader runtime={runtime} runtimeSource={runtimeSource} />
 
-      <main className="max-w-6xl mx-auto px-6 py-8">
-        {/* Header Title */}
-        <div className="flex flex-wrap items-center justify-between gap-4 mb-8 pb-6 border-b border-[#30382C]/15">
-          <div>
-            <div className="flex flex-wrap items-center gap-3 mb-2">
-              <h1 className="text-2xl font-black tracking-tight">⚡ Generation telemetry</h1>
-              <span className="bg-[#16856B]/15 text-[#16856B] text-xs font-bold px-2.5 py-1 rounded-md border border-[#16856B]/30">
-                ClickHouse &amp; Cloud View
-              </span>
-            </div>
-            <p className="text-sm opacity-80 max-w-2xl">
-              A factual ledger of Vertex calls, retries, tokens, Gemini TTS usage, cost status, and render evidence. Prompts and keys stay out of the record.
+      <main className="telemetry-main">
+        <header className="telemetry-hero">
+          <div className="telemetry-hero__copy">
+            <h1>Generation telemetry</h1>
+            <p>
+              A clear record of production activity, cost signals, and render evidence. Every value below comes from telemetry that was actually recorded.
             </p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-3">
-            <button
-              type="button"
-              onClick={() => void loadData()}
-              className="button button--secondary button--compact text-xs"
-              disabled={isLoading}
-            >
-              {isLoading ? "Syncing…" : "↻ Refresh Ledger"}
+          <div className="telemetry-hero__controls">
+            <button type="button" className="telemetry-button telemetry-button--secondary" onClick={() => void loadData()} disabled={isLoading}>
+              {isLoading ? "Refreshing…" : "Refresh data"}
             </button>
             <button
               type="button"
-              onClick={() => setAutoRefresh(prev => !prev)}
-              className={`button button--compact text-xs ${autoRefresh ? "button--primary" : "button--secondary"}`}
+              className={`telemetry-button ${autoRefresh ? "telemetry-button--primary" : "telemetry-button--secondary"}`}
+              onClick={() => setAutoRefresh(value => !value)}
+              aria-pressed={autoRefresh}
             >
               Auto-sync: {autoRefresh ? "ON (15s)" : "OFF"}
             </button>
-            {lastSynced && (
-              <span className="text-[11px] opacity-60 font-mono">
-                Last synced: {lastSynced}
+            <div className="telemetry-sync" data-testid="telemetry-source" aria-live="polite">
+              <span className={`telemetry-sync__dot${cloudConnected ? " telemetry-sync__dot--connected" : ""}`} aria-hidden="true" />
+              <span className="telemetry-sync__copy">
+                <strong>ClickHouse sync</strong>
+                <span>{sourceLabel}</span>
               </span>
-            )}
-            <span className="inline-flex items-center gap-2 bg-[#FFFFFF] px-3.5 py-1.5 rounded-lg border border-[#30382C]/15 text-xs font-semibold shadow-xs max-w-full">
-              <span className="w-2 h-2 rounded-full bg-[#16856B] animate-pulse" />
-              <span className="truncate">Primary: {runtime.script_model}</span>
-            </span>
-          </div>
-        </div>
-
-        {/* Top KPI Cards */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-          <div className="bg-[#FFFFFF] p-5 rounded-xl border border-[#30382C]/15 shadow-xs">
-            <div className="text-xs font-semibold uppercase tracking-wider opacity-70 mb-1">Jobs observed</div>
-            <div className="text-3xl font-black text-[#16856B]">{formatCount(summary?.total_jobs)}</div>
-            <div className="text-xs opacity-75 mt-1">Local job records available to this UI</div>
-          </div>
-
-          <div className="bg-[#FFFFFF] p-5 rounded-xl border border-[#30382C]/15 shadow-xs">
-            <div className="text-xs font-semibold uppercase tracking-wider opacity-70 mb-1">Selected job cost</div>
-            <div className="text-3xl font-black text-[#30382C]">{formatCost(jobDetails?.job.summary?.estimated_cost_usd)}</div>
-            <div className={`inline-flex text-xs font-semibold mt-1 px-2 py-0.5 rounded border ${statusTone(jobDetails?.job.summary?.cost_status)}`}>
-              {jobDetails?.job.summary?.cost_status || "Awaiting job"}
             </div>
           </div>
+        </header>
 
-          <div className="bg-[#FFFFFF] p-5 rounded-xl border border-[#30382C]/15 shadow-xs">
-            <div className="text-xs font-semibold uppercase tracking-wider opacity-70 mb-1">Provider calls</div>
-            <div className="text-3xl font-black text-[#30382C]">{formatCount(jobDetails?.job.summary?.total_calls)}</div>
-            <div className="text-xs opacity-75 mt-1">Actual SDK requests in selected job</div>
-          </div>
-
-          <div className="bg-[#FFFFFF] p-5 rounded-xl border border-[#30382C]/15 shadow-xs">
-            <div className="text-xs font-semibold uppercase tracking-wider opacity-70 mb-1">Token status</div>
-            <div className="text-3xl font-black text-[#16856B]">{jobDetails?.job.summary?.token_status || "—"}</div>
-            <div className="text-xs opacity-75 mt-1">{formatCount(jobDetails?.job.summary?.total_tokens)} total tokens</div>
-          </div>
-        </div>
-
-        {/* Job Selector & Details */}
-        <div className="bg-[#FFFFFF] rounded-xl border border-[#30382C]/15 p-6 mb-8 shadow-xs">
-          <div className="flex flex-wrap items-center justify-between gap-4 mb-6 pb-4 border-b border-[#30382C]/10">
+        <section className="telemetry-section telemetry-overview" aria-labelledby="overview-title">
+          <div className="telemetry-section-heading">
             <div>
-              <h2 className="text-lg font-bold text-[#30382C]">Job ledger</h2>
-              <p className="text-xs opacity-75">Choose a real job to inspect provider calls, usage, cost confidence, and scene evidence.</p>
+              <h2 id="overview-title">Overview</h2>
+              <p>Start with the facts we can verify now, then choose a production to inspect.</p>
             </div>
-
-            <div className="flex flex-wrap items-center justify-end gap-2 max-w-2xl">
-              {(summary?.jobs || []).slice(0, 8).map(job => {
-                const selected = selectedJobId === job.job_id;
-                return (
-                  <button
-                    key={job.job_id}
-                    type="button"
-                    onClick={() => setSelectedJobId(job.job_id)}
-                    className={`px-3 py-1.5 text-xs font-bold rounded-md transition border ${
-                      selected
-                        ? "bg-[#16856B] text-white border-[#16856B] shadow-xs"
-                        : "bg-[#F4F0E6] text-[#30382C] border-[#30382C]/10 hover:bg-[#30382C]/10"
-                    }`}
-                  >
-                    {job.job_id} · {job.job_kind || job.voice_mode || "job"}
-                  </button>
-                );
-              })}
-              {!summary?.jobs?.length && <span className="text-xs opacity-60">No telemetry jobs yet</span>}
+            <div className="telemetry-section-heading__meta">
+              <span>{sourceDescription}</span>
+              <span>{lastSynced ? `Checked ${lastSynced}` : "Not checked yet"}</span>
             </div>
           </div>
 
-          {jobDetails?.job.summary && (
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
-              {[
-                ["Status", jobDetails.job.summary.job_status || "unknown"],
-                ["Input tokens", formatCount(jobDetails.job.summary.total_input_tokens)],
-                ["Output tokens", formatCount(jobDetails.job.summary.total_output_tokens)],
-                ["Retries / failures", `${jobDetails.job.summary.retry_calls} / ${jobDetails.job.summary.failed_calls}`],
-              ].map(([label, value]) => (
-                <div key={label} className="rounded-lg bg-[#F4F0E6]/60 border border-[#30382C]/10 px-3 py-3">
-                  <div className="text-[11px] uppercase tracking-wide opacity-60">{label}</div>
-                  <div className="mt-1 text-sm font-bold text-[#30382C]">{value}</div>
-                </div>
-              ))}
-            </div>
-          )}
+          {loadError && <p className="telemetry-alert" role="alert">{loadError}</p>}
 
-          <div className="mb-6">
-            <div className="flex items-center justify-between mb-3 text-xs font-semibold opacity-75">
-              <span>Vertex / Gemini TTS call ledger</span>
-              <span>{formatCount(jobDetails?.job.calls?.length)} calls recorded</span>
-            </div>
-            <div className="space-y-2 max-h-80 overflow-y-auto pr-2">
-              {(jobDetails?.job.calls || []).slice().reverse().map(call => (
-                <div key={call.call_id} className="grid grid-cols-1 md:grid-cols-[1.1fr_1.6fr_auto] gap-2 items-center p-3 rounded-lg border border-[#30382C]/10 bg-[#F4F0E6]/40 text-xs">
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <strong className="text-[#16856B]">{call.stage}</strong>
-                      <span className={`px-2 py-0.5 rounded border ${statusTone(call.status)}`}>{call.status}</span>
-                    </div>
-                    <div className="font-mono text-[11px] opacity-70 mt-1">{call.operation} · attempt {call.attempt}</div>
-                  </div>
-                  <div className="min-w-0">
-                    <div className="font-mono truncate" title={call.model || "provider operation"}>{call.model || "provider operation"}</div>
-                    <div className="opacity-70 mt-1">
-                      {call.usage.total_tokens === null || call.usage.total_tokens === undefined
-                        ? "Token metadata unavailable"
-                        : `${call.usage.total_tokens.toLocaleString()} tokens`}
-                      {call.input_characters ? ` · ${call.input_characters.toLocaleString()} chars` : ""}
-                    </div>
-                  </div>
-                  <div className="font-mono text-right text-[11px] opacity-75">{call.duration_ms.toFixed(0)}ms</div>
-                </div>
-              ))}
-              {!jobDetails?.job.calls?.length && <div className="rounded-lg border border-dashed border-[#30382C]/20 px-4 py-6 text-center text-xs opacity-60">This job has no detailed provider ledger yet.</div>}
-            </div>
+          <div className="telemetry-metric-grid">
+            <article className="telemetry-metric" data-testid="metric-total-generations">
+              <p>Total generations</p>
+              <strong>{formatCount(summary?.total_jobs)}</strong>
+              <span>Recorded production rows</span>
+            </article>
+            <article className="telemetry-metric" data-testid="metric-known-cost">
+              <p>Known cost</p>
+              <strong>{formatCost(summary?.total_cost_usd)}</strong>
+              <span>{summary?.total_cost_usd === null || summary?.total_cost_usd === undefined ? "No priced records available" : "Sum of recorded priced jobs"}</span>
+            </article>
+            <article className="telemetry-metric" data-testid="metric-success-rate">
+              <p>Success rate</p>
+              <strong>{outcomes.value === null ? "Unavailable" : `${outcomes.value}%`}</strong>
+              <span>{outcomes.known ? `${outcomes.successful} of ${outcomes.known} recorded outcomes` : "No recorded outcomes"}</span>
+            </article>
+            <article className="telemetry-metric">
+              <p>Recorded tokens</p>
+              <strong>{formatCount(summary?.total_tokens_used)}</strong>
+              <span>{summary?.total_tokens_used === null || summary?.total_tokens_used === undefined ? "Token total unavailable" : "Sum of recorded token totals"}</span>
+            </article>
           </div>
 
-          {/* Scene Latency Waterfall Chart */}
-          <div className="mb-6">
-            <div className="flex items-center justify-between mb-3 text-xs font-semibold opacity-75">
-              <span>Scene ID &amp; Treatment Grammar</span>
-              <span>Render Latency (ms) &amp; Vertex Latency (ms)</span>
-            </div>
-
-            <div className="space-y-2 max-h-96 overflow-y-auto pr-2">
-              {(jobDetails?.scenes || []).map((scene, idx) => {
-                const renderWidth = Math.min(100, Math.max(15, (scene.render_time_ms / 8000) * 100));
-                const vertexWidth = Math.min(100, Math.max(10, (scene.vertex_latency_ms / 3000) * 100));
-
-                return (
-                  <div
-                    key={scene.scene_id || idx}
-                    className="p-3 bg-[#F4F0E6]/50 rounded-lg border border-[#30382C]/10 flex flex-col gap-2"
-                  >
-                    <div className="flex items-center justify-between text-xs">
-                      <div className="flex items-center gap-2">
-                        <strong className="font-mono text-[#16856B]">{scene.scene_id}</strong>
-                        <span className="bg-[#FFFFFF] px-2 py-0.5 rounded text-[11px] font-medium border border-[#30382C]/15">
-                          {scene.treatment_type || "3D Diorama"}
-                        </span>
-                        <span className="text-[11px] opacity-70">Claims: {scene.evidence_claim_count}</span>
-                      </div>
-                      <div className="font-mono text-[11px] text-[#30382C]">
-                        Render: <strong>{scene.render_time_ms}ms</strong> | Vertex: <strong>{scene.vertex_latency_ms}ms</strong>
-                      </div>
-                    </div>
-
-                    {/* Progress visual bars */}
-                    <div className="w-full bg-[#30382C]/10 h-2 rounded-full overflow-hidden flex gap-1">
-                      <div
-                        className="bg-[#16856B] h-full rounded-full transition-all"
-                        style={{ width: `${renderWidth}%` }}
-                        title={`Remotion Render: ${scene.render_time_ms}ms`}
-                      />
-                      <div
-                        className="bg-[#D97706] h-full rounded-full opacity-75 transition-all"
-                        style={{ width: `${vertexWidth}%` }}
-                        title={`Vertex AI Latency: ${scene.vertex_latency_ms}ms`}
-                      />
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        </div>
-
-        {/* ClickHouse Interactive Query Console */}
-        <section className="bg-[#FFFFFF] rounded-xl border border-[#30382C]/15 p-6 shadow-xs mb-8">
-          <div className="flex flex-wrap items-center justify-between gap-4 mb-4 pb-3 border-b border-[#30382C]/10">
+          <dl className="telemetry-sync-facts">
             <div>
-              <div className="flex items-center gap-2">
-                <h3 className="text-md font-bold text-[#30382C]">📊 ClickHouse query console</h3>
-                <span className="text-xs bg-[#2563EB]/15 text-[#2563EB] font-bold px-2.5 py-0.5 rounded-full">
-                  SQL Query Interface
-                </span>
+              <dt>Cloud status</dt>
+              <dd>{cloudConnected ? "Connected" : summary ? "Not connected" : "Unavailable"}</dd>
+            </div>
+            <div>
+              <dt>Local outbox</dt>
+              <dd>{summary?.delivery?.pending === null || summary?.delivery?.pending === undefined ? "Unavailable" : `${summary.delivery.pending} pending`}</dd>
+            </div>
+            <div>
+              <dt>Ingestion lag</dt>
+              <dd>{summary?.ingestion_lag_seconds === null || summary?.ingestion_lag_seconds === undefined ? "Unavailable" : `${summary.ingestion_lag_seconds}s`}</dd>
+            </div>
+          </dl>
+        </section>
+
+        <section className="telemetry-section telemetry-productions" aria-labelledby="productions-title">
+          <div className="telemetry-section-heading">
+            <div>
+              <h2 id="productions-title">Productions</h2>
+              <p>Search a real production record, then keep its summary beside the list.</p>
+            </div>
+            <span className="telemetry-count">{filteredJobs.length} shown · {jobs.length} recorded</span>
+          </div>
+
+          <div className="telemetry-productions__layout">
+            <div className="production-browser">
+              <div className="production-browser__toolbar">
+                <label htmlFor="production-search">Search productions</label>
+                <input
+                  id="production-search"
+                  type="search"
+                  role="searchbox"
+                  aria-label="Search productions"
+                  value={searchTerm}
+                  onChange={event => setSearchTerm(event.target.value)}
+                  placeholder="Title, job ID, or status"
+                />
               </div>
-              <p className="text-xs opacity-75 mt-1">
-                Run a bounded read-only view against ClickHouse Cloud tables with local mirror failover.
-              </p>
+
+              <div className="production-list" role="list" aria-label="Recorded productions">
+                {filteredJobs.map(job => {
+                  const selected = selectedJob?.job_id === job.job_id;
+                  return (
+                    <button
+                      key={job.job_id}
+                      type="button"
+                      className={`production-row${selected ? " production-row--selected" : ""}`}
+                      onClick={() => {
+                        setSelectedJobId(job.job_id);
+                        setJobDetails(null);
+                      }}
+                      aria-pressed={selected}
+                    >
+                      <span className="production-row__main">
+                        <strong>{job.title || "Untitled production"}</strong>
+                        <span>{job.job_id} · {jobKind(job)}</span>
+                      </span>
+                      <span className="production-row__meta">
+                        <StatusChip status={statusForJob(job)} />
+                        <span>{formatDate(job.created_at)}</span>
+                      </span>
+                    </button>
+                  );
+                })}
+                {!jobs.length && <EmptyState>No productions recorded yet.</EmptyState>}
+                {jobs.length > 0 && !filteredJobs.length && <EmptyState>No productions match that search.</EmptyState>}
+              </div>
             </div>
+
+            <aside className="selected-production" data-testid="selected-production" aria-labelledby="selected-production-title">
+              {selectedJob ? (
+                <>
+                  <div className="selected-production__topline">
+                    <span>Selected production</span>
+                    <StatusChip status={statusForJob(selectedJob)} />
+                  </div>
+                  <h3 id="selected-production-title">{selectedJob.title || "Untitled production"}</h3>
+                  <p className="selected-production__id">{selectedJob.job_id} · {jobKind(selectedJob)}</p>
+                  <dl className="selected-production__facts">
+                    <div>
+                      <dt>Known cost</dt>
+                      <dd>{formatCost(selectedSummary?.estimated_cost_usd ?? selectedJob.cost_usd)}</dd>
+                    </div>
+                    <div>
+                      <dt>Duration</dt>
+                      <dd>{selectedJob.duration_sec === null || selectedJob.duration_sec === undefined || !Number.isFinite(selectedJob.duration_sec) ? "Unavailable" : `${selectedJob.duration_sec.toFixed(1)}s`}</dd>
+                    </div>
+                    <div>
+                      <dt>Tokens</dt>
+                      <dd>{formatCount(selectedSummary?.total_tokens ?? selectedJob.total_tokens_used)}</dd>
+                    </div>
+                    <div>
+                      <dt>Created</dt>
+                      <dd>{formatDate(selectedJob.created_at)}</dd>
+                    </div>
+                  </dl>
+                  <p className="selected-production__hint">Details below update when this production is selected.</p>
+                </>
+              ) : (
+                <EmptyState>Select a production to see its recorded summary.</EmptyState>
+              )}
+            </aside>
+          </div>
+        </section>
+
+        <section className="telemetry-section telemetry-details" aria-labelledby="details-title">
+          <div className="telemetry-section-heading">
+            <div>
+              <h2 id="details-title">Details</h2>
+              <p>Inspect the selected production’s timing, retries, provider calls, and scene evidence.</p>
+            </div>
+            {selectedJob && <span className="telemetry-count">{selectedJob.job_id}</span>}
           </div>
 
-          {/* Quick preset query pills */}
-          <div className="flex flex-wrap gap-2 mb-3">
-            <label htmlFor="clickhouse-query-selector" className="text-xs font-semibold self-center opacity-70">View:</label>
-            <select
-              id="clickhouse-query-selector"
-              value={selectedQueryId}
-              onChange={(event) => setSelectedQueryId(event.target.value as QueryId)}
-              className="px-3 py-1.5 text-xs rounded-md border border-[#30382C]/20 bg-[#F4F0E6] text-[#30382C] focus:outline-none focus:border-[#16856B]"
-            >
-              {PRESET_QUERIES.map((preset) => (
-                <option key={preset.queryId} value={preset.queryId}>{preset.label}</option>
-              ))}
-            </select>
-            <span className="text-xs font-semibold self-center opacity-70">Presets:</span>
-            {PRESET_QUERIES.map((p) => (
-              <button
-                key={p.label}
-                type="button"
-                className="button button--secondary button--compact text-xs"
-                onClick={() => {
-                  setSelectedQueryId(p.queryId);
-                  void runClickHouseQuery(p.queryId);
-                }}
-              >
-                {p.label}
-              </button>
-            ))}
-          </div>
+          {selectedJob ? (
+            <div className="telemetry-detail-grid">
+              <section className="detail-panel detail-panel--timeline" aria-labelledby="timeline-title">
+                <div className="detail-panel__heading">
+                  <div>
+                    <h3 id="timeline-title">Performance timeline</h3>
+                    <p>Recorded call and scene durations, shown in the order available.</p>
+                  </div>
+                  <span>{formatDuration(selectedJob.total_render_time_ms)} total render</span>
+                </div>
+                {timelineEvents.length ? (
+                  <ol className="telemetry-timeline">
+                    {timelineEvents.map(event => (
+                      <li key={event.id}>
+                        <div className="telemetry-timeline__label">
+                          <strong>{event.label}</strong>
+                          <span>{event.detail}</span>
+                        </div>
+                        <div className="telemetry-timeline__track" aria-label={`${event.label} ${formatDuration(event.duration)}`}>
+                          <span style={{ width: `${Math.max(16, Math.round(((event.duration || 0) / maxTimelineDuration) * 100))}%` }} />
+                        </div>
+                        <div className="telemetry-timeline__meta">
+                          <StatusChip status={event.status} />
+                          <time>{formatDuration(event.duration)}</time>
+                        </div>
+                      </li>
+                    ))}
+                  </ol>
+                ) : (
+                  <EmptyState>No timing records for this production.</EmptyState>
+                )}
+              </section>
 
-          <div className="flex flex-col gap-3">
-            <div className="flex items-center justify-between">
-              <button
-                type="button"
-                id="run-query-button"
-                onClick={() => void runClickHouseQuery()}
-                disabled={queryLoading}
-                className="button button--primary button--compact"
-              >
-                {queryLoading ? "Executing query…" : "▶ Run Query"}
-              </button>
+              <section className="detail-panel" aria-labelledby="calls-title">
+                <div className="detail-panel__heading">
+                  <div>
+                    <h3 id="calls-title">Provider calls</h3>
+                    <p>SDK calls recorded for the selected production.</p>
+                  </div>
+                  <span>{formatCount(selectedSummary?.total_calls)} recorded</span>
+                </div>
+                {selectedCalls.length ? (
+                  <ul className="call-list">
+                    {selectedCalls.map(call => (
+                      <li key={call.call_id}>
+                        <div>
+                          <strong>{call.stage}</strong>
+                          <span>{call.operation} · attempt {call.attempt}</span>
+                        </div>
+                        <div className="call-list__model">{call.model || "Model unavailable"}</div>
+                        <div className="call-list__duration">
+                          <StatusChip status={call.status} />
+                          <time>{formatDuration(call.duration_ms)}</time>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <EmptyState>No provider calls recorded for this production.</EmptyState>
+                )}
+              </section>
+
+              <section className="detail-panel" aria-labelledby="health-title">
+                <div className="detail-panel__heading">
+                  <div>
+                    <h3 id="health-title">Cache and retries</h3>
+                    <p>Signals recorded by the provider and pipeline.</p>
+                  </div>
+                </div>
+                <dl className="detail-fact-grid">
+                  <div>
+                    <dt>Retries</dt>
+                    <dd>{formatCount(selectedSummary?.retry_calls)}</dd>
+                  </div>
+                  <div>
+                    <dt>Failed calls</dt>
+                    <dd>{formatCount(selectedSummary?.failed_calls)}</dd>
+                  </div>
+                  <div>
+                    <dt>Cached input</dt>
+                    <dd>{formatCount(selectedSummary?.total_cached_input_tokens)}</dd>
+                  </div>
+                  <div>
+                    <dt>Token record</dt>
+                    <dd>{selectedSummary?.token_status || "Unavailable"}</dd>
+                  </div>
+                </dl>
+              </section>
+
+              <section className="detail-panel detail-panel--evidence" aria-labelledby="evidence-title">
+                <div className="detail-panel__heading">
+                  <div>
+                    <h3 id="evidence-title">Scene evidence</h3>
+                    <p>Scene-level render latency and evidence counts from the selected record.</p>
+                  </div>
+                  <span>{selectedScenes.length} scenes</span>
+                </div>
+                {selectedScenes.length ? (
+                  <ul className="evidence-list">
+                    {selectedScenes.map(scene => (
+                      <li key={scene.scene_id}>
+                        <div>
+                          <strong>{scene.scene_id}</strong>
+                          <span>{scene.treatment_type || "Treatment unavailable"}</span>
+                        </div>
+                        <div>
+                          <span>{scene.evidence_claim_count} claims</span>
+                          <span>{formatDuration(scene.render_time_ms)} render · {formatDuration(scene.vertex_latency_ms)} Vertex</span>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <EmptyState>No scene evidence recorded for this production.</EmptyState>
+                )}
+              </section>
+            </div>
+          ) : (
+            <EmptyState>Select a production above to load its detail record.</EmptyState>
+          )}
+        </section>
+
+        <details className="telemetry-advanced" data-testid="advanced-telemetry">
+          <summary>
+            <span>Advanced telemetry</span>
+            <span>Bounded queries, Data Officer, and privacy facts</span>
+          </summary>
+          <div className="telemetry-advanced__content">
+            <section className="advanced-panel" aria-labelledby="query-console-title">
+              <div className="detail-panel__heading">
+                <div>
+                  <h3 id="query-console-title">ClickHouse query console</h3>
+                  <p>Run a server-owned read-only preset. SQL text is never accepted in this interface.</p>
+                </div>
+                <span>ClickHouse only</span>
+              </div>
+
+              <div className="query-toolbar">
+                <label htmlFor="clickhouse-query-selector">Preset</label>
+                <select id="clickhouse-query-selector" value={selectedQueryId} onChange={event => setSelectedQueryId(event.target.value as QueryId)}>
+                  {PRESET_QUERIES.map(preset => <option key={preset.queryId} value={preset.queryId}>{preset.label}</option>)}
+                </select>
+                <button id="run-query-button" type="button" className="telemetry-button telemetry-button--primary" onClick={() => void runClickHouseQuery()} disabled={queryLoading}>
+                  {queryLoading ? "Executing…" : "Run query"}
+                </button>
+              </div>
+
+              <div className="query-presets" aria-label="Approved ClickHouse query presets">
+                {PRESET_QUERIES.map(preset => (
+                  <button
+                    key={preset.queryId}
+                    type="button"
+                    className={`query-preset${selectedQueryId === preset.queryId ? " query-preset--selected" : ""}`}
+                    onClick={() => {
+                      setSelectedQueryId(preset.queryId);
+                      void runClickHouseQuery(preset.queryId);
+                    }}
+                  >
+                    {preset.label}
+                  </button>
+                ))}
+              </div>
+
+              {queryError && <p className="telemetry-alert" role="alert">{queryError}</p>}
               {queryResult && (
-                <div className="flex flex-wrap items-center gap-3 text-xs opacity-75 font-mono">
-                  <span>Rows: <strong>{queryResult.row_count}</strong></span>
-                  <span>Latency: <strong>{queryResult.duration_ms}ms</strong></span>
-                  <span className="text-[#16856B]">Source: {queryResult.source}</span>
-                  <span>Availability: <strong>{queryResult.availability ?? "—"}</strong></span>
-                  <span>Freshness: <strong>{queryResult.freshness ?? "unavailable"}</strong></span>
-                  <span>
-                    Ingestion lag:{" "}
-                    <strong>
-                      {queryResult.ingestion_lag_seconds === null || queryResult.ingestion_lag_seconds === undefined
-                        ? "unavailable"
-                        : `${queryResult.ingestion_lag_seconds}s`}
-                    </strong>
-                  </span>
-                  {queryResult.delivery && (
-                    <span>
-                      Pending: <strong>{queryResult.delivery.pending ?? "—"}</strong> · Failed:{" "}
-                      <strong className={queryResult.delivery.failed ? "text-[#B45309]" : ""}>
-                        {queryResult.delivery.failed ?? "—"}
-                      </strong>
-                    </span>
-                  )}
+                <div className="query-result">
+                  <div className="query-result__meta">
+                    <span>Rows <strong>{queryResult.row_count}</strong></span>
+                    <span>Latency <strong>{queryResult.duration_ms}ms</strong></span>
+                    <span>Source <strong>{queryResult.source}</strong></span>
+                    <span>Availability <strong>{queryResult.availability || "Unavailable"}</strong></span>
+                  </div>
+                  <div className="query-result__table-wrap">
+                    <table>
+                      <thead><tr>{queryResult.columns.map(column => <th key={column}>{column}</th>)}</tr></thead>
+                      <tbody>
+                        {queryResult.rows.map((row, rowIndex) => (
+                          <tr key={rowIndex}>{row.map((cell, cellIndex) => <td key={cellIndex}>{cell === null ? "null" : String(cell)}</td>)}</tr>
+                        ))}
+                        {!queryResult.rows.length && <tr><td colSpan={queryResult.columns.length || 1}>Query returned 0 rows.</td></tr>}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               )}
-            </div>
+            </section>
 
-            {queryError && (
-              <div role="alert" className="p-3 text-xs bg-[#FEE2E2] text-[#991B1B] border border-[#FCA5A5] rounded-lg">
-                {queryError}
+            <section className="advanced-panel" aria-labelledby="data-officer-title">
+              <div className="detail-panel__heading">
+                <div>
+                  <h3 id="data-officer-title">Ask the Data Officer</h3>
+                  <p>Ask a plain-language question about recorded production telemetry.</p>
+                </div>
+                <span>ClickHouse Cloud</span>
               </div>
-            )}
+              <form className="officer-form" onSubmit={askDataOfficer}>
+                <label htmlFor="officer-question">Question</label>
+                <div>
+                  <input
+                    id="officer-question"
+                    type="text"
+                    value={officerQuestion}
+                    onChange={event => setOfficerQuestion(event.target.value)}
+                    placeholder="e.g. How many video jobs succeeded this week?"
+                    maxLength={500}
+                  />
+                  <button type="submit" className="telemetry-button telemetry-button--primary" disabled={officerBusy || !officerQuestion.trim()}>
+                    {officerBusy ? "Querying…" : "Ask"}
+                  </button>
+                </div>
+              </form>
+              {officerError && <p className="telemetry-alert" role="alert">{officerError}</p>}
+              {officerAnswer !== null && (
+                <div className="officer-answer">
+                  <p>{officerAnswer}</p>
+                  <span>{officerToolUsed ? "Answered from a live ClickHouse query" : "Answered without tool use"}</span>
+                </div>
+              )}
+            </section>
 
-            {queryResult && (
-              <div className="mt-3 overflow-x-auto max-h-80 border border-[#30382C]/10 rounded-lg">
-                <table className="w-full text-left text-xs border-collapse font-mono">
-                  <thead>
-                    <tr className="bg-[#F4F0E6] text-[#30382C] border-b border-[#30382C]/15">
-                      {queryResult.columns.map((col, idx) => (
-                        <th key={idx} className="p-2.5 font-bold">{col}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {queryResult.rows.map((row, rIdx) => (
-                      <tr key={rIdx} className="border-b border-[#30382C]/5 hover:bg-[#F4F0E6]/50">
-                        {row.map((cell, cIdx) => (
-                          <td key={cIdx} className="p-2.5 opacity-90 truncate max-w-xs">
-                            {cell === null ? <em className="opacity-50">null</em> : String(cell)}
-                          </td>
-                        ))}
-                      </tr>
-                    ))}
-                    {queryResult.rows.length === 0 && (
-                      <tr>
-                        <td colSpan={queryResult.columns.length || 1} className="p-4 text-center opacity-60">
-                          Query returned 0 rows.
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
+            <section className="advanced-panel advanced-panel--boundary" aria-labelledby="boundary-title">
+              <div className="detail-panel__heading">
+                <div>
+                  <h3 id="boundary-title">Telemetry boundary</h3>
+                  <p>What this ledger records, and what it deliberately leaves out.</p>
+                </div>
               </div>
-            )}
+              <ul className="boundary-list">
+                <li>Prompts excluded from telemetry</li>
+                <li>Response text excluded from telemetry</li>
+                <li>Credentials excluded from telemetry</li>
+                <li>Cost confidence remains labeled when pricing is partial or unavailable</li>
+              </ul>
+            </section>
           </div>
-        </section>
-
-        {/* Delivery health & freshness (Stage E2 / document line 149 & 151) */}
-        <section className="bg-[#FFFFFF] rounded-xl border border-[#30382C]/15 p-6 shadow-xs mb-8">
-          <div className="flex items-center justify-between mb-4 pb-3 border-b border-[#30382C]/10">
-            <h3 className="text-md font-bold text-[#30382C]">📡 Delivery health &amp; freshness</h3>
-            <span className="text-xs bg-[#30382C]/10 text-[#30382C] font-bold px-2.5 py-0.5 rounded-full">
-              Durable outbox
-            </span>
-          </div>
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 text-xs">
-            {[
-              ["Pending", formatCount(summary?.delivery?.pending)],
-              ["Failed", formatCount(summary?.delivery?.failed)],
-              ["Delivered", formatCount(summary?.delivery?.delivered)],
-              ["Replay-safe schema", summary?.delivery?.schema_ready ? "confirmed" : "not confirmed"],
-              ["Cloud sink", summary?.delivery?.cloud_connected ? "connected" : "local mirror only"],
-              [
-                "Ingestion lag",
-                summary?.ingestion_lag_seconds === null || summary?.ingestion_lag_seconds === undefined
-                  ? "unavailable"
-                  : `${summary.ingestion_lag_seconds}s`,
-              ],
-            ].map(([label, value]) => (
-              <div key={label} className="rounded-lg bg-[#F4F0E6]/60 border border-[#30382C]/10 px-3 py-3">
-                <div className="text-[11px] uppercase tracking-wide opacity-60">{label}</div>
-                <div className="mt-1 text-sm font-bold text-[#30382C]">{value}</div>
-              </div>
-            ))}
-          </div>
-          {summary?.delivery?.drain_blocked_reason && (
-            <p className="mt-3 text-[11px] font-mono text-[#B45309] bg-[#B45309]/10 border border-[#B45309]/20 rounded-lg p-2.5">
-              Drain paused: {summary.delivery.drain_blocked_reason} — events stay durable in the local outbox and replay after recovery.
-            </p>
-          )}
-          <p className="mt-3 text-[11px] font-mono opacity-70">
-            Audience retention/conversion: {summary?.audience?.retention?.status ?? "unavailable"} — not recorded by this pipeline, never inferred.
-          </p>
-        </section>
-
-        {/* Privacy and partner boundary */}
-        <section className="bg-[#FFFFFF] rounded-xl border border-[#30382C]/15 p-6 shadow-xs">
-          <div className="flex items-center justify-between mb-4 pb-3 border-b border-[#30382C]/10">
-            <h3 className="text-md font-bold text-[#30382C]">🛡️ Telemetry boundary</h3>
-            <span className="text-xs bg-[#16856B]/15 text-[#16856B] font-bold px-2.5 py-0.5 rounded-full">
-              In-app canonical
-            </span>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 text-xs">
-            {[
-              "Prompts excluded from telemetry",
-              "Response text excluded from telemetry",
-              "Credentials excluded from telemetry",
-              "Replit host uses secret-store configuration",
-              "External sinks remain opt-in",
-              "Cost confidence is labeled exact / partial / unpriced",
-            ].map((check, idx) => (
-              <div
-                key={idx}
-                className="flex items-center gap-2 p-2.5 rounded-lg bg-[#F0FDF4] border border-[#16856B]/20 text-[#16856B]"
-              >
-                <span className="text-sm font-bold">✓</span>
-                <span className="font-mono text-[11px] text-[#30382C]">{check}</span>
-              </div>
-            ))}
-          </div>
-        </section>
-
-        {/* Data Officer: natural-language Q&A over ClickHouse Cloud via mcp-clickhouse */}
-        <section className="bg-[#FFFFFF] rounded-xl border border-[#30382C]/15 p-6 shadow-xs mt-6">
-          <div className="flex items-center justify-between mb-4 pb-3 border-b border-[#30382C]/10">
-            <h3 className="text-md font-bold text-[#30382C]">🧠 Ask the Data Officer</h3>
-            <span className="text-xs bg-[#2563EB]/10 text-[#2563EB] font-bold px-2.5 py-0.5 rounded-full">
-              ClickHouse Cloud · mcp-clickhouse
-            </span>
-          </div>
-          <p className="text-xs text-[#30382C]/70 mb-3">
-            An ADK agent answers questions about production jobs, QA outcomes and
-            model-call cost by querying the ClickHouse tables through the official
-            mcp-clickhouse MCP server.
-          </p>
-          <form onSubmit={askDataOfficer} className="flex flex-col sm:flex-row gap-2 mb-3">
-            <input
-              type="text"
-              value={officerQuestion}
-              onChange={(e) => setOfficerQuestion(e.target.value)}
-              placeholder="e.g. How many video jobs succeeded this week?"
-              maxLength={500}
-              className="flex-1 min-h-[44px] px-3 py-2 rounded-lg border border-[#30382C]/20 text-sm text-[#30382C] bg-white focus:outline-none focus:border-[#16856B]"
-            />
-            <button
-              type="submit"
-              disabled={officerBusy || !officerQuestion.trim()}
-              className="button button--primary min-h-[44px] px-5 disabled:opacity-50"
-            >
-              {officerBusy ? "Querying ClickHouse…" : "Ask"}
-            </button>
-          </form>
-          {officerError && (
-            <p role="alert" className="text-xs text-[#B45309] bg-[#B45309]/10 border border-[#B45309]/20 rounded-lg p-3">
-              {officerError}
-            </p>
-          )}
-          {officerAnswer !== null && (
-            <div className="rounded-lg bg-[#F0FDF4] border border-[#16856B]/20 p-4">
-              <p className="text-sm text-[#30382C] whitespace-pre-wrap">{officerAnswer}</p>
-              <p className="mt-2 text-[11px] font-mono text-[#16856B]">
-                {officerToolUsed ? "✓ answered from live ClickHouse query" : "answered without tool use"}
-              </p>
-            </div>
-          )}
-        </section>
+        </details>
       </main>
     </div>
   );

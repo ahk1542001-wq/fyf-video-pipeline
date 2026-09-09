@@ -1032,7 +1032,7 @@ def generate_exact_lock(request_data: dict) -> dict:
                 f"{last_validation_error[:600]}"
             )
         try:
-            lock_mode = os.getenv("FYF_LOCK_METADATA_MODE", "combined").strip().lower()
+            lock_mode = os.getenv("FYF_LOCK_METADATA_MODE", "per_segment").strip().lower()
             if metadata is None and lock_mode == "per_segment":
                 collected_segments: list[CompactVisualPlanSegment] = []
                 total_segments = len(request.approved_segments)

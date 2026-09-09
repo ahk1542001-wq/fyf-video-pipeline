@@ -1,5 +1,6 @@
 """Validated semantic contract between Vertex, the backend, and Remotion."""
 
+import math
 import re
 from typing import Annotated, Literal
 
@@ -362,7 +363,13 @@ VisualType = Annotated[
 
 
 class ScriptSegment(BaseModel):
-    """Meaning chosen by Vertex. Timing is deliberately absent."""
+    """Meaning chosen by Vertex plus the editable scene contract.
+
+    ``caption``, ``voice`` and ``duration_seconds`` are optional for backwards
+    compatibility with legacy scripts, but when present they are validated at
+    the segment boundary.  Duration is a real media duration; there is no
+    playback-rate/speed-factor field in this contract.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -374,6 +381,13 @@ class ScriptSegment(BaseModel):
     emotion: Literal["neutral", "warm", "focused", "concerned", "confident"]
     emphasis: list[str] = Field(default_factory=list)
     visual: VisualType | None = None
+    # Scene-level editing fields. ``exclude_if`` keeps legacy JSON stable when
+    # a producer did not provide the optional values.
+    caption: str | None = Field(default=None, max_length=500, exclude_if=lambda value: value is None)
+    voice: str | None = Field(default=None, max_length=500, exclude_if=lambda value: value is None)
+    duration_seconds: float | None = Field(
+        default=None, gt=0, le=600, exclude_if=lambda value: value is None
+    )
 
     @field_validator("id", "text", "visual_action")
     @classmethod
@@ -381,6 +395,25 @@ class ScriptSegment(BaseModel):
         value = value.strip()
         if not value:
             raise ValueError("must not be blank")
+        return value
+
+    @field_validator("caption", "voice")
+    @classmethod
+    def strip_optional_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("must not be blank when provided")
+        return value
+
+    @field_validator("duration_seconds")
+    @classmethod
+    def finite_duration(cls, value: float | None) -> float | None:
+        if value is None:
+            return None
+        if not math.isfinite(value):
+            raise ValueError("duration_seconds must be finite")
         return value
 
 

@@ -5,8 +5,8 @@ Proves, without touching Jason's ``backend.projects.{models,store,commands}``:
 * the whole-script ``story`` lock (``create_script_lock``/``read_script_lock``,
   backing ``/api/story-lock``) is UNCHANGED;
 * the granular registry sets/reads/releases scope locks atomically, validates
-  scope + project id, and fails OPEN on a corrupt registry (never a silent
-  freeze);
+  scope + project id, and fails CLOSED on a corrupt registry (never a silent
+  bypass);
 * ``granular_lock_checker`` WIDENS - never narrows - ``default_lock_checker`` and
   injects into ``apply_command`` through the existing ``lock_checker`` parameter,
   leaving ``apply_command``'s signature and default behaviour untouched;
@@ -17,6 +17,8 @@ Proves, without touching Jason's ``backend.projects.{models,store,commands}``:
 from __future__ import annotations
 
 import pytest
+from pathlib import Path
+from unittest.mock import patch
 
 from backend import lock_store
 from backend.lock_store import (
@@ -127,14 +129,54 @@ def test_unknown_scope_and_bad_project_id_rejected(tmp_path):
         read_scope_locks(root, "../escape")
 
 
-def test_corrupt_registry_fails_open(tmp_path):
+def test_corrupt_registry_fails_closed(tmp_path):
     root = tmp_path / "locks"
     set_scope_lock(root, PID, "timing", locked=True)
     (root / "granular" / f"{PID}.json").write_text("{ not json", encoding="utf-8")
-    # A corrupt registry is never treated as a lock (no silent operator freeze).
-    assert read_scope_locks(root, PID) == {}
-    assert locked_scopes(root, PID) == []
-    assert is_scope_locked(root, PID, "timing") is False
+    # Corrupt storage must block callers instead of silently bypassing the
+    # durable lock that may be present in the unreadable file.
+    with pytest.raises(ValueError, match="granular lock registry"):
+        read_scope_locks(root, PID)
+    with pytest.raises(ValueError, match="granular lock registry"):
+        locked_scopes(root, PID)
+    with pytest.raises(ValueError, match="granular lock registry"):
+        is_scope_locked(root, PID, "timing")
+
+
+def test_broken_registry_link_fails_closed(tmp_path):
+    root = tmp_path / "locks"
+    registry_dir = root / "granular"
+    registry_dir.mkdir(parents=True)
+    (registry_dir / f"{PID}.json").symlink_to("missing-registry.json")
+
+    # A broken link is an existing registry entry whose state cannot be read;
+    # treating it as an absent registry would silently bypass a possible lock.
+    with pytest.raises(ValueError, match="granular lock registry"):
+        read_scope_locks(root, PID)
+
+
+def test_registry_read_error_fails_closed_as_corruption(tmp_path):
+    root = tmp_path / "locks"
+    set_scope_lock(root, PID, "content", locked=True)
+    registry_path = root / "granular" / f"{PID}.json"
+    original_exists = Path.exists
+    original_lstat = Path.lstat
+
+    def unreadable_exists(path):
+        if path == registry_path:
+            raise PermissionError("registry permissions changed")
+        return original_exists(path)
+
+    def unreadable_lstat(path):
+        if path == registry_path:
+            raise PermissionError("registry permissions changed")
+        return original_lstat(path)
+
+    # A filesystem read error must not escape as an unclassified exception or
+    # be converted to an unlocked result by a permissive exists() check.
+    with patch.object(Path, "exists", unreadable_exists), patch.object(Path, "lstat", unreadable_lstat):
+        with pytest.raises(ValueError, match="granular lock registry"):
+            read_scope_locks(root, PID)
 
 
 # --- the lock_checker seam widens the default; apply_command unchanged -------

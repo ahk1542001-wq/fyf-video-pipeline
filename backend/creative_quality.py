@@ -241,3 +241,61 @@ def failed_scene_ids(report: dict[str, Any]) -> list[str]:
         import re
         return tuple(int(x) if x.isdigit() else x for x in re.split(r"(\d+)", value))
     return sorted(ids, key=key)
+
+
+def route_creative_quality(
+    report: dict[str, Any], *, attempt: int = 0, max_repairs: int = 1
+) -> dict[str, Any]:
+    """Route creative QA through a bounded repair budget.
+
+    Creative quality is never an implicit approval. A passing deterministic
+    audit is eligible for human review; a failing audit gets at most the caller
+    supplied repair budget and then becomes an explicit human-review state.
+    """
+
+    if not isinstance(report, dict):
+        return {
+            "route": "needs_human_review",
+            "reason": "creative_qa_report_invalid",
+            "attempt": attempt,
+            "max_repairs": max_repairs,
+            "human_acceptance_required": True,
+        }
+    if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 0:
+        raise ValueError("attempt must be a non-negative integer")
+    if isinstance(max_repairs, bool) or not isinstance(max_repairs, int) or max_repairs < 0:
+        raise ValueError("max_repairs must be a non-negative integer")
+    if report.get("passed") is True:
+        return {
+            "route": "pass",
+            "reason": "creative_qa_passed",
+            "attempt": attempt,
+            "max_repairs": max_repairs,
+            "human_acceptance_required": True,
+        }
+    if report.get("route") == "needs_human_review":
+        return {
+            "route": "needs_human_review",
+            "reason": "creative_qa_requires_human_review",
+            "failure_codes": list(report.get("failure_codes") or []),
+            "attempt": attempt,
+            "max_repairs": max_repairs,
+            "human_acceptance_required": True,
+        }
+    if attempt < max_repairs:
+        return {
+            "route": "repair",
+            "reason": "creative_qa_repair_requested",
+            "failure_codes": list(report.get("failure_codes") or []),
+            "attempt": attempt,
+            "max_repairs": max_repairs,
+            "human_acceptance_required": False,
+        }
+    return {
+        "route": "needs_human_review",
+        "reason": "creative_qa_repair_budget_exhausted",
+        "failure_codes": list(report.get("failure_codes") or []),
+        "attempt": attempt,
+        "max_repairs": max_repairs,
+        "human_acceptance_required": True,
+    }

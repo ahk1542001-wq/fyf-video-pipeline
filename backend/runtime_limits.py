@@ -463,12 +463,14 @@ class GuardrailLease:
         slot_acquired: bool = False,
         budget_reserved: bool = False,
         root_dir: Path | None = None,
+        project_id: str | None = None,
     ):
         self.operation_id = operation_id
         self.estimated_usd = estimated_usd
         self.slot_acquired = slot_acquired
         self.budget_reserved = budget_reserved
         self.root_dir = root_dir
+        self.project_id = project_id
         self.reconciled = False
         self.released = False
         # B8: the provider operation ID for the paid dispatch this lease guards.
@@ -490,8 +492,9 @@ class GuardrailLease:
                     actual_usd,
                     outcome=outcome,
                     root_dir=self.root_dir,
+                    project_id=self.project_id,
                 )
-            return get_budget_status(root_dir=self.root_dir)
+            return get_budget_status(root_dir=self.root_dir, project_id=self.project_id)
 
     def release(self) -> None:
         """Idempotently release all reserved slots and budget reservations."""
@@ -532,6 +535,7 @@ def acquire_guardrail_lease(
     estimated_charge_usd: float = 0.05,
     root_dir: Path | None = None,
     job_roots: tuple[Path, ...] | None = None,
+    project_id: str | None = None,
 ) -> GuardrailLease:
     """Transactionally acquire budget reservation and concurrency slot.
 
@@ -543,6 +547,7 @@ def acquire_guardrail_lease(
         operation_id=operation_id,
         estimated_usd=estimated_charge_usd,
         root_dir=root_dir,
+        project_id=project_id,
     )
 
     # 1. Rate limit check first (zero state held on failure)
@@ -554,7 +559,7 @@ def acquire_guardrail_lease(
     # 2. Fail-closed budget gate. Explicitly consult paid_production_enabled so a
     #    disabled ceiling is refused with its honest reason BEFORE any reservation.
     if estimated_charge_usd and estimated_charge_usd > 0.0:
-        budget_info = get_budget_status(root_dir=root_dir)
+        budget_info = get_budget_status(root_dir=root_dir, project_id=project_id)
         if not budget_info.get("paid_production_enabled"):
             _rejection(
                 REASON_PAID_DISABLED,
@@ -565,10 +570,12 @@ def acquire_guardrail_lease(
         operation_id,
         estimated_usd=estimated_charge_usd,
         root_dir=root_dir,
+        project_id=project_id,
+        approval_id=None,
     )
     if not reserved:
         lease.release()
-        budget_info = get_budget_status(root_dir=root_dir)
+        budget_info = get_budget_status(root_dir=root_dir, project_id=project_id)
         code = _budget_rejection_code(budget_info, estimated_charge_usd)
         _rejection(code, f"Budget guardrail: {budget_reason}. Contact the operator.")
     lease.budget_reserved = True
@@ -600,6 +607,7 @@ def enforce_generation_guardrails(
     estimated_charge_usd: float = 0.05,
     root_dir: Path | None = None,
     job_roots: tuple[Path, ...] | None = None,
+    project_id: str | None = None,
 ) -> GuardrailLease | None:
     """Enforce guardrails transactionally, returning a lease when operation_id is provided."""
     if operation_id:
@@ -610,17 +618,22 @@ def enforce_generation_guardrails(
             estimated_charge_usd=estimated_charge_usd,
             root_dir=root_dir,
             job_roots=job_roots,
+            project_id=project_id,
         )
 
     ip = client_ip or get_client_ip(request)
-    budget_info = get_budget_status(root_dir=root_dir)
+    budget_info = get_budget_status(root_dir=root_dir, project_id=project_id)
     if estimated_charge_usd and estimated_charge_usd > 0.0:
         if not budget_info.get("paid_production_enabled"):
             _rejection(
                 REASON_PAID_DISABLED,
                 f"Budget guardrail: {budget_info.get('reason')}. Contact the operator.",
             )
-        if not is_budget_available(estimated_charge_usd, root_dir=root_dir):
+        if not is_budget_available(
+            estimated_charge_usd,
+            root_dir=root_dir,
+            project_id=project_id,
+        ):
             code = _budget_rejection_code(budget_info, estimated_charge_usd)
             reason = budget_info.get("reason") or "Generation budget cap reached"
             _rejection(code, f"Budget guardrail: {reason}. Contact the operator.")

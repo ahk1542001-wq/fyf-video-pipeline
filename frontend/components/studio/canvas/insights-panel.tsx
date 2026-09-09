@@ -5,6 +5,7 @@ import type { CommandScope } from "../../../lib/api";
 
 type InsightsPanelProps = {
   studio: ProjectStudioController;
+  mode?: "full" | "locks";
 };
 
 const SCOPES: Array<{ id: CommandScope; label: string; testId: string }> = [
@@ -18,7 +19,7 @@ const SCOPES: Array<{ id: CommandScope; label: string; testId: string }> = [
 // source is "actual"; an estimate is labelled "Estimated" plus the current stage
 // and never rendered as a number. Budget uses the fail-closed fields and shows
 // unknown cost as "Unavailable", never 0.
-export default function InsightsPanel({ studio }: InsightsPanelProps) {
+export default function InsightsPanel({ studio, mode = "full" }: InsightsPanelProps) {
   const events = studio.events;
   const latest = events.length > 0 ? events[events.length - 1] : null;
   const completed = events.filter((event) => event.status === "completed").length;
@@ -28,6 +29,43 @@ export default function InsightsPanel({ studio }: InsightsPanelProps) {
 
   const budget = studio.budget;
   const remaining = budget?.remaining_usd ?? null;
+  const locks = (
+    <div className="locks-region" data-testid="locks-region">
+      <p className="locks-region__label">Granular locks</p>
+      <div className="locks-toggles">
+        {SCOPES.map((scope) => {
+          const locked = studio.locks?.locked.includes(scope.id) ?? false;
+          const reason = studio.locks?.scopes?.[scope.id]?.reason ?? null;
+          return (
+            <label key={scope.id} className="lock-toggle" htmlFor={scope.testId}>
+              <input
+                id={scope.testId}
+                data-testid={scope.testId}
+                type="checkbox"
+                checked={locked}
+                disabled={studio.pending || studio.status !== "ready"}
+                onChange={(event) => void studio.toggleLock(scope.id, event.target.checked)}
+              />
+              <span className="field-label">{scope.label}</span>
+              {locked && reason ? <span className="lock-reason" data-testid={`lock-reason-${scope.id}`}>{reason}</span> : null}
+            </label>
+          );
+        })}
+      </div>
+      <p className="helper-text" data-testid="locked-scopes">
+        Locked scopes: {studio.locks && studio.locks.locked.length > 0 ? studio.locks.locked.join(", ") : "none"}
+      </p>
+    </div>
+  );
+
+  if (mode === "locks") {
+    return (
+      <section className="workspace-panel insights-panel insights-panel--locks" aria-labelledby="locks-title">
+        <div className="section-heading"><div><p className="eyebrow">Protection</p><h2 id="locks-title">Scene edit locks</h2></div></div>
+        {locks}
+      </section>
+    );
+  }
 
   return (
     <section className="workspace-panel insights-panel" aria-labelledby="insights-title">
@@ -89,36 +127,7 @@ export default function InsightsPanel({ studio }: InsightsPanelProps) {
         </p>
       </div>
 
-      <div className="locks-region" data-testid="locks-region">
-        <p className="locks-region__label">Granular locks</p>
-        <div className="locks-toggles">
-          {SCOPES.map((scope) => {
-            const locked = studio.locks?.locked.includes(scope.id) ?? false;
-            const reason = studio.locks?.scopes?.[scope.id]?.reason ?? null;
-            return (
-              <label key={scope.id} className="lock-toggle" htmlFor={scope.testId}>
-                <input
-                  id={scope.testId}
-                  data-testid={scope.testId}
-                  type="checkbox"
-                  checked={locked}
-                  disabled={studio.pending || studio.status !== "ready"}
-                  onChange={(event) => void studio.toggleLock(scope.id, event.target.checked)}
-                />
-                <span className="field-label">{scope.label}</span>
-                {locked && reason ? (
-                  <span className="lock-reason" data-testid={`lock-reason-${scope.id}`}>
-                    {reason}
-                  </span>
-                ) : null}
-              </label>
-            );
-          })}
-        </div>
-        <p className="helper-text" data-testid="locked-scopes">
-          Locked scopes: {studio.locks && studio.locks.locked.length > 0 ? studio.locks.locked.join(", ") : "none"}
-        </p>
-      </div>
+      {locks}
 
       <details className="technical-disclosure">
         <summary>Workflow events ({events.length})</summary>

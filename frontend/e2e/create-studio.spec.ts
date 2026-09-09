@@ -20,6 +20,163 @@ async function mockReadyRuntime(page: Page) {
 }
 
 test.describe('Create Studio (/ and /create)', () => {
+  test('reconnects the same active script job after refresh and a transient status failure', async ({ page }) => {
+    await mockReadyRuntime(page);
+    let statusRequests = 0;
+    let generationRequests = 0;
+    const completedScript = {
+      title: 'Refresh-safe production',
+      language: 'en-US',
+      studio_name: 'FYF Agentic Business Studio',
+      genre: 'cinematic_documentary',
+      presenter_mode: 'voiceover_only',
+      voice_actor: 'Sadaltager',
+      segments: [{
+        id: 's1',
+        text: 'The supplied narration remains attached to the original job.',
+        visual_action: 'Fluid simulation resolves into a stable equation.',
+        scene_type: 'demo',
+        mascot_action: 'present',
+        emotion: 'focused',
+        emphasis: ['original job'],
+      }],
+    };
+
+    await page.addInitScript(() => {
+      window.sessionStorage.setItem('fyf-active-script-job', 'refresh01');
+      window.sessionStorage.setItem('fyf-wizard-context', JSON.stringify({
+        topic: 'The supplied narration remains attached to the original job.',
+        sourceMode: 'full_script',
+        videoTitle: 'Refresh-safe production',
+        submittedMessages: ['The supplied narration remains attached to the original job.'],
+        startedAt: Date.now() - 70_000,
+      }));
+      window.sessionStorage.setItem('fyf-locked-script', JSON.stringify({
+        lockId: 'abcd1234',
+        script: {
+          title: 'Refresh-safe production',
+          language: 'en-US',
+          segments: [{
+            id: 's1',
+            text: 'The supplied narration remains attached to the original job.',
+            visual_action: 'Fluid simulation resolves into a stable equation.',
+            scene_type: 'demo',
+            mascot_action: 'present',
+            emotion: 'focused',
+            emphasis: ['original job'],
+          }],
+        },
+      }));
+    });
+    await page.route('**/api/generate-script', async (route) => {
+      generationRequests += 1;
+      await route.fulfill({ status: 500, body: 'A new job must not be created.' });
+    });
+    await page.route('**/api/script-jobs/refresh01/status', async (route) => {
+      statusRequests += 1;
+      if (statusRequests === 1) {
+        await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ detail: 'Temporary restart window' }) });
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(statusRequests === 2
+          ? { status: 'writing', stage: 'visual_lock', progress: 35 }
+          : { status: 'completed', stage: 'locked', progress: 100, lock_id: 'abcd1234', data: completedScript }),
+      });
+    });
+
+    await page.goto('/');
+
+    await expect(page.locator('.director-message--user p')).toHaveText('The supplied narration remains attached to the original job.');
+    await expect.poll(() => statusRequests, { timeout: 12_000 }).toBeGreaterThanOrEqual(3);
+    await expect(page.getByText(/The narration is locked/)).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Generate locked video' })).toBeEnabled();
+    await expect(page.getByLabel('Language')).toHaveValue('en-US');
+    expect(generationRequests).toBe(0);
+    expect(await page.evaluate(() => window.sessionStorage.getItem('fyf-active-script-job'))).toBeNull();
+  });
+
+  test('keeps draft edits out of director history until the brief is submitted', async ({ page }) => {
+    await mockReadyRuntime(page);
+    await page.route('**/api/generate-script', async (route) => {
+      await route.fulfill({
+        status: 500,
+        contentType: 'application/json',
+        body: JSON.stringify({ detail: 'Test submission stopped before provider work.' }),
+      });
+    });
+    await page.goto('/');
+    await expect(page.locator('.workflow-stage__label')).toHaveText([
+      'Brief',
+      'Story',
+      'Storyboard',
+      'Render',
+      'Review',
+    ]);
+
+    await expect(page.getByRole('complementary', { name: 'Build with FYF' })).toBeVisible();
+    await expect(page.getByRole('region', { name: 'Turn a draft into a finished video.' })).toBeVisible();
+    await page.screenshot({ path: 'output/playwright/create-studio-source-step.png', fullPage: false });
+
+    const directorBrief = page.getByRole('textbox', { name: 'What should we make?' });
+    const canvasBrief = page.getByRole('textbox', { name: 'Topic or draft' });
+
+    await directorBrief.fill('A Burmese product launch for independent shop owners');
+    await expect(canvasBrief).toHaveValue('A Burmese product launch for independent shop owners');
+    await expect(page.getByRole('button', { name: 'Build script' })).toBeEnabled();
+    await expect(page.locator('.director-message--user')).toHaveCount(0);
+
+    await canvasBrief.fill('A concise social ad for first-time founders');
+    await expect(directorBrief).toHaveValue('A concise social ad for first-time founders');
+    await expect(page.locator('.director-message--user')).toHaveCount(0);
+
+    await directorBrief.press('Enter');
+    await expect(page.locator('.director-message--user p')).toHaveText('A concise social ad for first-time founders');
+  });
+
+  test('keeps one Build script action and routes alternative requests through conversation', async ({ page }) => {
+    await mockReadyRuntime(page);
+    await page.route('**/api/story-polish', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          success: true,
+          model_used: 'test-model',
+          variants: [{
+            name: 'Direct Response',
+            script: {
+              title: 'A clear story',
+              language: 'my-MM',
+              segments: [{
+                id: 'option-1',
+                text: 'စမ်းသပ်စာသား',
+                visual_action: 'Product demo',
+                scene_type: 'demo',
+                mascot_action: 'present',
+                emotion: 'confident',
+                emphasis: ['စမ်းသပ်'],
+              }],
+            },
+          }],
+        }),
+      });
+    });
+    await page.goto('/');
+
+    await expect(page.getByRole('button', { name: 'Build script', exact: true })).toHaveCount(1);
+    await expect(page.getByRole('button', { name: /FYF Polish|3 directions|create 3 story options/i })).toHaveCount(0);
+
+    const directorBrief = page.getByRole('textbox', { name: 'What should we make?' });
+    await directorBrief.fill('Give me 3 options for a Burmese product launch');
+    await directorBrief.press('Enter');
+
+    await expect(page.locator('.story-section')).toBeVisible();
+    await expect(page.locator('.director-message--user p')).toHaveText('Give me 3 options for a Burmese product launch');
+  });
+
   test('renders Create Studio properly on / and /create routes', async ({ page }) => {
     // 1. Test root route /
     await page.goto('/');
@@ -63,17 +220,17 @@ test.describe('Create Studio (/ and /create)', () => {
     await page.goto('/');
 
     const topicArea = page.locator('#topic-source');
-    const generateBtn = page.getByRole('button', { name: 'Generate script' });
-    const polishBtn = page.getByRole('button', { name: /FYF Polish/i });
+    const buildBtn = page.getByRole('button', { name: 'Build script', exact: true });
     const styleSelect = page.locator('#video-style');
     const personaSelect = page.locator('#presenter-persona');
     const mascotToggle = page.locator('#mascot-toggle');
 
     // Verify initial state: buttons disabled when topic is empty
     await expect(topicArea).toHaveValue('');
-    await expect(generateBtn).toBeDisabled();
-    await expect(polishBtn).toBeDisabled();
-    await expect(page.locator('.action-hint')).toContainText('Enter a topic above to enable script generation');
+    await expect(buildBtn).toBeDisabled();
+    await expect(page.locator('.director-composer__hint')).toContainText('alternatives');
+
+    await page.locator('details.production-controls > summary').click();
 
     // Select style
     await styleSelect.selectOption('evidence_story');
@@ -100,11 +257,11 @@ test.describe('Create Studio (/ and /create)', () => {
 
     // Enter topic
     await topicArea.fill('AI Video Production Workflow in Myanmar');
-    await expect(generateBtn).toBeEnabled();
-    await expect(polishBtn).toBeEnabled();
-    await expect(page.locator('.action-hint')).not.toBeVisible();
+    await expect(buildBtn).toBeEnabled();
+    await expect(page.locator('.director-message--user')).toHaveCount(0);
 
-    // Verify preview empty state
+    // Preview is a deliberate workflow step rather than a second long panel.
+    await page.locator('.workflow-stage__button').filter({ hasText: 'Render' }).click();
     await expect(page.locator('.preview-empty')).toBeVisible();
   });
 
@@ -228,17 +385,21 @@ test.describe('Create Studio (/ and /create)', () => {
 
     await page.goto('/');
     await page.getByRole('button', { name: 'High-Converting Social Ad', exact: true }).click();
-    await page.locator('#topic-source').fill('A product launch campaign for small businesses');
-    await page.getByRole('button', { name: /FYF Polish/i }).click();
+    const directorBrief = page.getByRole('textbox', { name: 'What should we make?' });
+    await directorBrief.fill('Give me 3 story options for a product launch campaign for small businesses');
+    await directorBrief.press('Enter');
     await expect(page.locator('.story-section')).toBeVisible();
     await expect(page.getByText('English Narration', { exact: true })).toBeVisible();
 
     await page.getByRole('button', { name: /Approve selected story/i }).click();
     await expect(page.getByRole('button', { name: /Generate locked video/i })).toBeEnabled();
 
+    await page.locator('.workflow-stage__button').filter({ hasText: 'Brief' }).click();
+    await page.locator('details.production-controls > summary').click();
     await page.locator('#cta-button-text').fill('Book a Demo');
     await page.locator('#retention-progress-bar-toggle').uncheck();
     await page.locator('#animated-lower-thirds-toggle').uncheck();
+    await page.locator('.workflow-stage__button').filter({ hasText: 'Render' }).click();
     await page.getByRole('radio', { name: /16:9/ }).click();
     await page.getByRole('button', { name: /Generate locked video/i }).click();
 
@@ -357,11 +518,9 @@ test.describe('Create Studio (/ and /create)', () => {
     });
 
     await page.goto('/');
-    const topicArea = page.locator('#topic-source');
-    await topicArea.fill('AI Verification in Myanmar');
-
-    const polishBtn = page.getByRole('button', { name: /FYF Polish/i });
-    await polishBtn.click();
+    const directorBrief = page.getByRole('textbox', { name: 'What should we make?' });
+    await directorBrief.fill('Give me 3 story options for AI Verification in Myanmar');
+    await directorBrief.press('Enter');
 
     // Verify variants displayed
     await expect(page.locator('.story-section')).toBeVisible();
@@ -395,6 +554,11 @@ test.describe('Create Studio (/ and /create)', () => {
     const lockBtn = page.getByRole('button', { name: /Approve selected story/i });
     await expect(lockBtn).toBeEnabled();
     await lockBtn.click();
+
+    // The approved canonical story can now enter the shared chat + canvas
+    // project spine; this is an explicit transition, not an automatic duplicate.
+    await expect(page.getByTestId('open-shared-studio')).toBeVisible();
+    await expect(page.getByTestId('open-shared-studio')).toBeEnabled();
 
     // Verify video render button is unlocked
     const renderBtn = page.getByRole('button', { name: /Generate locked video/i });

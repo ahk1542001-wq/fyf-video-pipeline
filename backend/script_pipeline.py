@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -34,6 +35,14 @@ DEFAULT_SCRIPT_RETRY_MAX_SECONDS = 120.0
 DEFAULT_SCRIPT_QUOTA_RETRY_BASE_SECONDS = 60.0
 DEFAULT_SCRIPT_QUOTA_RETRY_MAX_SECONDS = 300.0
 DEFAULT_SCRIPT_LOCK_BATCH_SIZE = 2
+
+
+def _parse_full_script(source: str) -> list[dict[str, str]]:
+    """Parse explicit blank-line scene blocks without rewriting narration."""
+    blocks = [block.strip() for block in re.split(r"\n\s*\n", source.strip()) if block.strip()]
+    if not blocks:
+        raise ValueError("Full script must contain at least one narration scene")
+    return [{"id": f"s{index}", "text": block} for index, block in enumerate(blocks, start=1)]
 
 
 def _is_transient_error(error: BaseException) -> bool:
@@ -203,6 +212,62 @@ def _run_script_pipeline(job_id: str, script_jobs_root: Path, locks_root: Path) 
         genre = request.get("genre", "explainer")
         presenter_mode = request.get("presenter_mode", "on_screen")
         voice_actor = request.get("voice_actor", "Sadaltager")
+
+        if request.get("source_mode") == "full_script":
+            from backend.agent.tools import _restore_storyboard_visual_variety
+            from backend.video_director import apply_director_pass
+            from backend.video_styles import apply_video_style
+
+            approved_segments = _parse_full_script(request["topic"])
+            update_script_status(
+                job_dir,
+                status="writing",
+                stage="visual_lock",
+                progress=35,
+                batch=1,
+                batch_count=1,
+                batch_size=len(approved_segments),
+            )
+            planned = generate_exact_lock({
+                "title": request["title"],
+                "approved_segments": approved_segments,
+                "studio_name": studio_name,
+                "language": language,
+                "genre": genre,
+                "presenter_mode": presenter_mode,
+                "voice_actor": voice_actor,
+            })
+            expected = [(item["id"], item["text"]) for item in approved_segments]
+            actual = [
+                (str(item.get("id", "")), str(item.get("text", "")))
+                for item in planned.get("segments", [])
+            ]
+            if actual != expected:
+                raise ValueError("Visual planner changed the supplied narration")
+            result = VideoScript.model_validate(
+                apply_director_pass(
+                    apply_video_style(
+                        _restore_storyboard_visual_variety(planned),
+                        style_id=genre,
+                    )
+                )
+            ).model_dump(mode="json", exclude_none=True)
+            lock_id = create_script_lock(locks_root, result)
+            write_json_atomically(job_dir / "result.json", result)
+            update_script_status(
+                job_dir,
+                status="completed",
+                stage="locked",
+                progress=100,
+                batch=1,
+                batch_count=1,
+                lock_id=lock_id,
+                error=None,
+                restart_resumable=True,
+                source_mode="full_script",
+                narration_rewritten=False,
+            )
+            return
 
         use_adk = request.get("use_adk_agent", True) and os.getenv("FYF_USE_ADK_AGENT", "true").lower() in ("true", "1")
         if use_adk:

@@ -4,13 +4,14 @@ import {theme} from "./theme";
 
 export type ProgressBarProps = {
   position?: "top" | "bottom";
+  reducedMotion?: boolean;
 };
 
 /** Deterministic retention progress indicator for the active render timeline. */
-export const ProgressBar: React.FC<ProgressBarProps> = ({position = "bottom"}) => {
+export const ProgressBar: React.FC<ProgressBarProps> = ({position = "bottom", reducedMotion = false}) => {
   const frame = useCurrentFrame();
   const {durationInFrames} = useVideoConfig();
-  const progress = interpolate(frame, [0, Math.max(1, durationInFrames)], [0, 1], {
+  const progress = reducedMotion ? 1 : interpolate(frame, [0, Math.max(1, durationInFrames)], [0, 1], {
     extrapolateLeft: "clamp",
     extrapolateRight: "clamp",
   });

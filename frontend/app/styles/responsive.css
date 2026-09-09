@@ -1,6 +1,5 @@
 @media (max-width: 760px) {
   .studio-header__inner,
-  .create-main,
   .library-main {
     width: min(100% - 24px, 1180px);
   }
@@ -74,7 +73,6 @@
     flex-wrap: wrap;
   }
 
-  .workspace-grid,
   .library-grid {
     grid-template-columns: 1fr;
   }
@@ -104,7 +102,6 @@
     right: 16px;
   }
 
-  .create-main,
   .library-main {
     padding-top: 22px;
   }
@@ -139,4 +136,3 @@
     transition-duration: 0.01ms !important;
   }
 }
-

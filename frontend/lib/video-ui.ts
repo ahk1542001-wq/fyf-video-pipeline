@@ -19,7 +19,7 @@ export type RecentApprovedVideo = {
   video_url: string;
 };
 
-export type WorkflowStageId = "source" | "story" | "lock" | "render";
+export type WorkflowStageId = "brief" | "story" | "storyboard" | "render" | "review";
 export type WorkflowStageState = "complete" | "current" | "upcoming";
 
 export type WorkflowStage = {
@@ -115,15 +115,17 @@ export function deriveWorkflowStages({
     completedResult || hasStory,
     completedResult || narrationLocked,
     completedResult,
+    false,
   ];
   const firstIncomplete = done.every(Boolean)
     ? done.length - 1
     : done.findIndex(stepDone => !stepDone);
   const definitions: Array<{ id: WorkflowStageId; label: string }> = [
-    { id: "source", label: "Source" },
+    { id: "brief", label: "Brief" },
     { id: "story", label: "Story" },
-    { id: "lock", label: "Lock" },
+    { id: "storyboard", label: "Storyboard" },
     { id: "render", label: "Render" },
+    { id: "review", label: "Review" },
   ];
 
   return definitions.map((stage, index) => ({

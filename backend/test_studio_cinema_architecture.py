@@ -101,7 +101,7 @@ class StudioCinemaArchitectureTests(unittest.TestCase):
         self.assertIn("Voiceover-only mode", instruction)
         self.assertIn("130-150 words per minute", instruction)
 
-    def test_producer_research_tool_is_bound_to_selected_studio_context(self):
+    def test_producer_has_no_research_tool(self):
         with patch(
             "backend.agent.fyf_producer.vertex_client_kwargs",
             return_value={"vertexai": True, "project": "test", "location": "global"},
@@ -113,10 +113,9 @@ class StudioCinemaArchitectureTests(unittest.TestCase):
                 studio_name="Cinema Lab",
             )
 
-        research = agent.tools[0]("Quantum Computing", "standard")
-        self.assertEqual(research["language"], "en-US")
-        self.assertEqual(research["genre"], "cinematic_documentary")
-        self.assertEqual(research["studio_name"], "Cinema Lab")
+        names = [tool.__name__ for tool in agent.tools]
+        self.assertNotIn("research_topic", names)
+        self.assertEqual(names, ["draft_story_segments", "audit_story_quality", "plan_visual_shots"])
 
     def test_exact_lock_instruction_follows_selected_language(self):
         english_request = ExactLockRequest(

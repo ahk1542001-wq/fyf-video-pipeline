@@ -15,6 +15,17 @@ export default function PreviewPanel({ studio }: PreviewPanelProps) {
           <h2 id="preview-title">Preview</h2>
         </div>
         <div className="preview-panel__actions" style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+          {studio.scriptLocked && studio.script && (
+            <button
+              type="button"
+              className="button button--primary button--compact"
+              onClick={() => void studio.openSharedStudio()}
+              disabled={studio.openingStudio}
+              data-testid="open-shared-studio"
+            >
+              {studio.openingStudio ? "Opening Studio…" : "Continue in Chat + Canvas Studio"}
+            </button>
+          )}
           <div className="aspect-ratio-selector" role="radiogroup" aria-label="Aspect Ratio Switcher" style={{ display: "flex", gap: "4px" }}>
             {(["9:16", "16:9", "1:1"] as const).map((ratio) => (
               <button
@@ -35,6 +46,25 @@ export default function PreviewPanel({ studio }: PreviewPanelProps) {
           {studio.renderStatus === "completed" && <span className="status-badge">Ready</span>}
         </div>
       </div>
+
+      {studio.script && (
+        <div className="render-actions">
+          <button
+            type="button"
+            onClick={studio.generateVideo}
+            disabled={!studio.scriptLocked || !studio.scriptLockId || studio.renderBusy || !studio.generationReady}
+            className="button button--accent"
+          >
+            {studio.renderStatus === "queued" ? "Job queued…"
+              : studio.renderStatus === "visuals" ? "Creating visuals…"
+                : studio.renderStatus === "voice" ? "Generating voice…"
+                  : studio.renderStatus === "rendering" ? "Rendering video…"
+                    : studio.renderStatus === "qa" ? "Checking output…"
+                      : studio.scriptLocked ? "Generate locked video" : "Approve and lock before video"}
+          </button>
+          <p className="helper-text helper-text--center">Script, visual, voice, and render stages are checkpointed and restart-resumable.</p>
+        </div>
+      )}
 
       <div className="preview-window">
         <div className="preview-window__bar" aria-hidden="true">

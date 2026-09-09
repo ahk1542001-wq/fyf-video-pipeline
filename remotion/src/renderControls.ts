@@ -27,6 +27,17 @@ export function aspectRatioDimensions(value: unknown): {width: number; height: n
   return DIMENSIONS[value];
 }
 
+export function resolveReducedMotion(
+  input: Record<string, unknown> | null | undefined,
+): boolean {
+  const source = input && typeof input === "object" ? input : {};
+  if (!Object.prototype.hasOwnProperty.call(source, "reduced_motion")) return false;
+  if (typeof source.reduced_motion !== "boolean") {
+    throw new Error("reduced_motion must be a boolean");
+  }
+  return source.reduced_motion;
+}
+
 export function normalizeRenderControls(input: Record<string, unknown> | null | undefined): RenderControls {
   const source = input && typeof input === "object" ? input : {};
   const nested = source.render_controls;
@@ -74,12 +85,13 @@ export function normalizeRenderControls(input: Record<string, unknown> | null | 
     throw new Error("retention_progress_bar must be a boolean");
   }
 
-  const animated = Object.prototype.hasOwnProperty.call(values, "animated_lower_thirds")
+  const requestedAnimated = Object.prototype.hasOwnProperty.call(values, "animated_lower_thirds")
     ? values.animated_lower_thirds
     : DEFAULT_RENDER_CONTROLS.animated_lower_thirds;
-  if (typeof animated !== "boolean") {
+  if (typeof requestedAnimated !== "boolean") {
     throw new Error("animated_lower_thirds must be a boolean");
   }
+  const animated = resolveReducedMotion(source) ? false : requestedAnimated;
 
   const aspect = Object.prototype.hasOwnProperty.call(values, "aspect_ratio")
     ? values.aspect_ratio

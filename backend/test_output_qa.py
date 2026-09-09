@@ -218,5 +218,38 @@ class TestOutputQA(unittest.TestCase):
         self.assertIn("VOICE_PEAK_HEADROOM_LOW", report["failure_codes"])
         self.assertEqual(report["metrics"]["voice_full_scale_samples"], 59)
 
+    @patch("backend.output_qa._get_ffprobe_info")
+    def test_exact_frame_count_allows_two_frame_container_duration_rounding(self, mock_ffprobe):
+        self.setup_valid_files()
+        self.create_mock_file(
+            "render_input.json",
+            {
+                "id": "1",
+                "text": "hello",
+                "fps": 30,
+                "width": 1080,
+                "height": 1920,
+                "durationInFrames": 1221,
+            },
+            is_json=True,
+        )
+        mock_ffprobe.side_effect = lambda filepath: {
+            "format": {"duration": "40.746667" if "video.mp4" in filepath else "40.690958"},
+            "streams": ([{"codec_type": "audio"}] if "voice.wav" in filepath else [{
+                "codec_type": "video",
+                "avg_frame_rate": "30/1",
+                "width": 1080,
+                "height": 1920,
+                "pix_fmt": "yuv420p",
+                "codec_name": "h264",
+                "nb_frames": "1221",
+            }, {"codec_type": "audio"}]),
+        }
+
+        report = qa_job_directory(self.job_dir)
+
+        self.assertTrue(report["passed"])
+        self.assertNotIn("VIDEO_DURATION_MISMATCH", report["failure_codes"])
+
 if __name__ == "__main__":
     unittest.main()

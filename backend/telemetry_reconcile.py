@@ -23,8 +23,9 @@ signals (document line 156) -- never collapsed into one "quality" number.
 
 from __future__ import annotations
 
+import math
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 UNAVAILABLE = "unavailable"
 _OK = "ok"
@@ -35,7 +36,12 @@ _OK = "ok"
 # ---------------------------------------------------------------------------
 
 def _is_real_number(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return False
 
 
 def number_or_none(value: Any) -> Optional[float]:
@@ -348,6 +354,91 @@ def reconcile_sources(
     }
 
 
+def completeness_report(
+    source_events: Mapping[str, Iterable[Any]],
+    *,
+    canonical_name: str = "canonical",
+) -> Dict[str, Any]:
+    """Compare event identity sets across canonical, outbox and cloud sources.
+
+    Event counts alone cannot reveal a replay gap: a duplicate can make a
+    count look healthy while a different event is missing.  This report uses
+    the stable ``event_id`` as the cross-source key, records duplicates
+    separately, and returns ``unavailable`` when a source cannot expose event
+    identities rather than treating it as an empty source.
+    """
+    materialised: Dict[str, List[Dict[str, Any]]] = {
+        str(name): _as_records(events)
+        for name, events in source_events.items()
+    }
+
+    def _ids(records: Sequence[Dict[str, Any]]) -> tuple[set[str], List[str]]:
+        ids = [
+            str(record.get("event_id"))
+            for record in records
+            if isinstance(record.get("event_id"), str) and record.get("event_id")
+        ]
+        unique = set(ids)
+        duplicates = sorted({event_id for event_id in ids if ids.count(event_id) > 1})
+        return unique, duplicates
+
+    per_source: Dict[str, Dict[str, Any]] = {}
+    for name, records in materialised.items():
+        ids, duplicates = _ids(records)
+        per_source[name] = {
+            "records": len(records),
+            "identified_records": len(ids),
+            "missing_identity_count": len(records) - len(ids),
+            "event_ids": sorted(ids),
+            "duplicates": duplicates,
+            "status": UNAVAILABLE if records and len(ids) != len(records) else _OK,
+        }
+
+    canonical_records = materialised.get(canonical_name)
+    if canonical_records is None:
+        return {
+            "status": UNAVAILABLE,
+            "canonical_source": canonical_name,
+            "sources": per_source,
+            "missing": {},
+            "extra": {},
+            "duplicates": {
+                name: details["duplicates"]
+                for name, details in per_source.items()
+                if details["duplicates"]
+            },
+        }
+
+    canonical_ids, canonical_duplicates = _ids(canonical_records)
+    missing: Dict[str, List[str]] = {}
+    extra: Dict[str, List[str]] = {}
+    duplicates: Dict[str, List[str]] = {}
+    for name, details in per_source.items():
+        if name == canonical_name:
+            continue
+        source_ids = set(details["event_ids"])
+        missing_ids = sorted(canonical_ids - source_ids)
+        extra_ids = sorted(source_ids - canonical_ids)
+        if missing_ids:
+            missing[name] = missing_ids
+        if extra_ids:
+            extra[name] = extra_ids
+        if details["duplicates"]:
+            duplicates[name] = list(details["duplicates"])
+
+    if canonical_duplicates:
+        duplicates[canonical_name] = canonical_duplicates
+    status = "incomplete" if missing or extra or duplicates else _OK
+    return {
+        "status": status,
+        "canonical_source": canonical_name,
+        "sources": per_source,
+        "missing": missing,
+        "extra": extra,
+        "duplicates": duplicates,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Combined report
 # ---------------------------------------------------------------------------
@@ -360,9 +451,13 @@ def build_reconciliation_report(
     clickhouse_aggregates: Sequence[Any] = (),
     now: Optional[datetime] = None,
     stream_key: str = "stream",
+    source_events: Mapping[str, Iterable[Any]] | None = None,
 ) -> Dict[str, Any]:
     """One honest reconciliation bundle for the analytics surface."""
     materialised = _as_records(events)
+    completeness_sources = source_events or {
+        "canonical": materialised,
+    }
     return {
         "integrity": {
             "missing": detect_missing_events(materialised, stream_key=stream_key),
@@ -376,6 +471,7 @@ def build_reconciliation_report(
             clickhouse_aggregates=clickhouse_aggregates,
         ),
         "audience": audience_metrics(),
+        "completeness": completeness_report(completeness_sources),
         "event_count": len(materialised),
     }
 
@@ -389,6 +485,7 @@ def report_is_clean(report: Dict[str, Any]) -> bool:
         and integrity.get("duplicates", {}).get("status") == _OK
         and integrity.get("reordered", {}).get("status") == _OK
         and reconciliation.get("status") == _OK
+        and report.get("completeness", {}).get("status", _OK) == _OK
     )
 
 
@@ -404,6 +501,7 @@ __all__ = [
     "audience_metrics",
     "separate_quality_signals",
     "reconcile_sources",
+    "completeness_report",
     "build_reconciliation_report",
     "report_is_clean",
 ]

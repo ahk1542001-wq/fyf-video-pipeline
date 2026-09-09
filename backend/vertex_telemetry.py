@@ -272,8 +272,6 @@ class VertexTelemetryCollector:
     ) -> bool:
         """Record a provider call already performed by an external orchestrator."""
         usage = _usage_metadata(response)
-        if succeeded and not any(value is not None for value in usage.values()):
-            return False
 
         retry_context = _current_retry_attempt.get()
         retry_group, retry_attempt = retry_context or (None, default_attempt)
@@ -338,8 +336,9 @@ class VertexTelemetryCollector:
         cached_tokens = [call["usage"].get("cached_input_tokens") for call in billable]
         thoughts_tokens = [call["usage"].get("thoughts_tokens") for call in billable]
 
-        def sum_known(values: list[int | None]) -> int:
-            return sum(value for value in values if value is not None)
+        def sum_known(values: list[int | None]) -> int | None:
+            known = [value for value in values if value is not None]
+            return sum(known) if known else None
 
         if not billable:
             token_status = "none"
@@ -423,7 +422,12 @@ class VertexTelemetryCollector:
         try:
             from backend.budget_store import reconcile_budget
             summary = payload.get("summary", {})
-            actual_cost = float(summary.get("estimated_cost_usd", 0.0) or 0.0)
+            actual_cost = summary.get("estimated_cost_usd")
+            if actual_cost is not None:
+                try:
+                    actual_cost = float(actual_cost)
+                except (TypeError, ValueError, OverflowError):
+                    actual_cost = None
             outcome = summary.get("job_status", "completed")
             reconcile_budget(self.job_id, actual_cost, outcome=outcome)
         except Exception:

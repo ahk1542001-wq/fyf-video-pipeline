@@ -268,5 +268,16 @@ class TestLipSync(unittest.TestCase):
             res = build_render_input(script_data, self.wav_path, rhubarb_bin=self.bin_path)
             self.assertEqual(res["mouthCueSource"], "burmese-text-audio")
 
+    def test_english_render_without_rhubarb_uses_amplitude_not_burmese_text_cues(self):
+        script_data = {
+            "title": "English narration",
+            "language": "en-US",
+            "segments": [{"text": "A smooth fluid flow remains stable."}],
+        }
+
+        res = build_render_input(script_data, self.wav_path, rhubarb_bin=None)
+
+        self.assertEqual(res["mouthCueSource"], "amplitude-fallback")
+
 if __name__ == '__main__':
     unittest.main()

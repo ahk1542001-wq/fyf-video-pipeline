@@ -8,6 +8,7 @@
 @import "./styles/base.css";
 @import "./styles/app-chrome.css";
 @import "./styles/layout.css";
+@import "./styles/telemetry.css";
 @import "./styles/workflow-strip.css";
 @import "./styles/workspace.css";
 @import "./styles/forms.css";

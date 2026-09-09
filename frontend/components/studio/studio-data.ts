@@ -5,6 +5,7 @@
 
 export const SCRIPT_JOB_STORAGE_KEY = "fyf-active-script-job";
 export const WIZARD_TOPIC_STORAGE_KEY = "fyf-wizard-topic";
+export const WIZARD_CONTEXT_STORAGE_KEY = "fyf-wizard-context";
 export const LOCKED_SCRIPT_STORAGE_KEY = "fyf-locked-script";
 
 export function formatElapsed(ms: number): string {

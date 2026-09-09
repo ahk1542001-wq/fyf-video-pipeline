@@ -55,7 +55,7 @@ def test_telemetry_overview_summary(tmp_path: Path):
 
 
 def test_telemetry_status_fallback_does_not_invent_fake_tokens(tmp_path: Path):
-    # Fallback when job telemetry is absent should report 0 tokens and unavailable status
+    # Missing telemetry is unknown, not a measured zero.
     job_id = "55556666"
     jobs_root = tmp_path / "jobs"
     job_dir = jobs_root / job_id
@@ -67,9 +67,9 @@ def test_telemetry_status_fallback_does_not_invent_fake_tokens(tmp_path: Path):
 
     res = get_job_telemetry(job_id, job_roots=(jobs_root,))
     job = res["job"]
-    assert job["input_tokens"] == 0
-    assert job["output_tokens"] == 0
-    assert job["summary"]["total_input_tokens"] == 0
+    assert job["input_tokens"] is None
+    assert job["output_tokens"] is None
+    assert job["summary"]["total_input_tokens"] is None
     assert job["summary"]["token_status"] == "unavailable"
     assert job["cost_status"] == "unavailable"
     assert job["model_name"] is None
@@ -86,5 +86,5 @@ def test_missing_model_does_not_claim_a_default_model_or_cost(tmp_path: Path):
 
     assert job["model_name"] is None
     assert job["cost_status"] == "unknown"
-    assert job["estimated_cost_usd"] == 0.0
+    assert job["estimated_cost_usd"] is None
     assert job["status"] == "unknown"

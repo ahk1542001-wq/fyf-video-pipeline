@@ -8,68 +8,55 @@
 
 If a target control is not verified, omit that claim from the recording. If the selected job or ClickHouse has no data, use the unavailable wording in Beat 4; do not fill the gap with an estimate.
 
-## Beat 1 - The business problem (0:00-0:25)
+## Beat 1 - Studio Presets & Multi-Format Brand Kit (0:00-0:22)
 
-**Screen:** Create Studio at `http://localhost:3001/`, showing the verified two-column workbench.
-
-**Voiceover:**
-
-> "Business teams need clear explainers, social ads, product launches, and brand videos from the same brief. Agentic Business Video Studio keeps that work in one reviewable workspace: choose a business preset, shape the brand output, approve the story, and render the finished video. The original Burmese FYF explainer remains Preset #1 and the default."
-
-**Action:** Show the Quick Business Presets in order:
-
-1. `Brand Explainer (Flagship)` (the Burmese FYF default)
-2. `High-Converting Social Ad`
-3. `Product Launch Hype (Magnific)`
-
-Keep these labels scoped to the business product and the target event.
-
-## Beat 2 - From brief to approved story (0:25-0:55)
-
-**Screen:** Left-side brief and story controls, then the story options and approval state.
-
-**Action:** Paste the owner-approved business brief. If no approved brief is available, stop the take rather than inventing a product, claim, or source. Use the visible story-generation control, review the returned options, and approve the selected narration/story lock.
+**Screen:** Create Studio at `http://localhost:3001/`, showing the two-column workbench.
 
 **Voiceover:**
 
-> "One Google ADK Producer Agent coordinates research, drafting, story-quality review, and visual-shot planning. Voice generation, storyboard work, Remotion rendering, quality checks, and telemetry are pipeline stages, tools, or deterministic responsibilities, not separate agents. I review the options and approve the narration lock before rendering."
+> "Welcome to FYF Agentic Business Video Studio, created for the Google Cloud Agentic Cinema Hackathon. Our studio turns a simple brief into reviewable production video across Burmese flagship explainers, high-converting social ads, and product launches with instant aspect ratio switching."
 
-## Beat 3 - Brand controls and multi-format output (0:55-1:35)
+**Action:** Show Quick Business Presets (`Brand Explainer (Flagship)`, `High-Converting Social Ad`, `Product Launch`), aspect ratios (`16:9`, `1:1`, `9:16`), and brand kit parameters.
 
-**Screen:** Verified brand kit on the left and MP4 preview on the right.
+## Beat 2 - Chat + Canvas Studio & Granular Scene Locks (0:22-0:48)
 
-**Action:** Select a verified business preset, set the owner-approved CTA, toggle the requested options, and choose one format. Show the controls only if root has verified that they reach the render request:
-
-- `cta_text`
-- `retention_progress_bar`
-- `animated_lower_thirds`
-- `aspect_ratio` (`9:16`, `16:9`, or `1:1`)
-
-Queue the video from the approved lock and show the real progress states. Do not claim a control is rendered when the current run did not carry it through.
+**Screen:** Interactive Canvas Studio at `http://localhost:3001/project/{id}`.
 
 **Voiceover:**
 
-> "The brand kit is explicit: CTA text, retention progress, animated lower thirds, and aspect ratio. I can choose vertical, widescreen, or square output without opening a timeline editor. The workspace stays focused on the brief, the approved story, and the finished cut."
+> "In our new Chat plus Canvas Studio, operators collaborate with an AI Creative Director. The living canvas organizes scenes into an interactive storyboard with granular scene controls and locks, enabling surgical script revisions, version history, and safe human-in-the-loop proposals."
 
-## Beat 4 - Evidence-backed audit (1:35-2:25)
+**Action:** Navigate to the Project Studio, select Scene 1 on the storyboard canvas to reveal scene controls, focus the note to the Creative Director in the Chat Panel, and demonstrate granular scene locks and linear version history.
 
-**Screen:** The completed MP4 in the right preview, then `/telemetry` with the same job selected.
+## Beat 3 - Approved Video Library & Remotion Rendering (0:48-0:70)
 
-**Action:**
+**Screen:** Video Library at `http://localhost:3001/library`.
 
-1. Wait for the actual render and QA status. Play the fresh MP4 for several seconds.
-2. Point to the audit area and read only values present for the selected job, such as actual duration, token status/count, cost status/value, and aspect ratio. Never read a memorized or hard-coded metric.
-3. Open `http://localhost:3001/telemetry`, refresh the ledger, and select the same job ID.
-4. Ask the Data Officer:
+**Voiceover:**
 
-   `How many video jobs are recorded, how many succeeded, and what did they cost in total?`
+> "In the Approved Video Library, let's inspect our completed flagship production. The Remotion engine renders frame-accurate motion graphics, synchronized character lip-sync, and multi-layer visual evidence while preserving Burmese typography."
 
-5. In the ClickHouse query console, choose one of the supported query presets and run it through the allowlisted `POST /api/clickhouse/query` endpoint. The endpoint accepts a `query_id`, not caller SQL. Show the returned `source`, `availability`, and rows alongside the Data Officer answer.
-6. Say "answered from live ClickHouse" only when the allowlisted response reports `source: "clickhouse_cloud"`, `availability: "available"`, and relevant rows that match the answer.
+**Action:** Select the flagship production explainer video and play full playback showing mascot lip-sync and dynamic visual evidence.
 
-**Voiceover when live data is available:**
+## Beat 4 - 20-Gate Automated QA Inspector (0:70-0:84)
 
-> "The audit view is reading this selected run's recorded evidence, not a sample value. The Data Officer is a separate ADK agent using the official ClickHouse MCP path. The allowlisted query endpoint reports `source: clickhouse_cloud` and `availability: available`, and these rows match the answer."
+**Screen:** Video Metadata QA Inspector Modal.
+
+**Voiceover:**
+
+> "Every production must pass twenty automated quality gates before release. Operators can inspect the verification checklist confirming Output QA, Visual Evidence QA, audio headroom, and phonetic lip-sync alignment."
+
+**Action:** Open the Metadata Modal, hover over the verification check pills showing green checkmarks across deterministic Output QA, Visual Evidence QA, and audio/lip-sync constraints.
+
+## Beat 5 - ClickHouse Cloud Telemetry & MCP Data Officer (0:84-1:15)
+
+**Screen:** Telemetry dashboard at `http://localhost:3001/telemetry`.
+
+**Voiceover:**
+
+> "Finally, every production run dual-writes sanitized telemetry to ClickHouse Cloud. In our Telemetry dashboard, operators audit render duration, tokens, and cost, while querying live warehouse data through our Google ADK Data Officer via official ClickHouse MCP."
+
+**Action:** Display ClickHouse Cloud telemetry ledger, execute preset warehouse query, and highlight live Q&A with the Data Officer agent.
 
 **Voiceover when the endpoint uses the local fallback:**
 

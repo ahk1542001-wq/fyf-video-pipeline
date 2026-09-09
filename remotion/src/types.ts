@@ -174,6 +174,7 @@ export interface RenderInput extends Record<string, unknown> {
   cta_text?: string;
   retention_progress_bar?: boolean;
   animated_lower_thirds?: boolean;
+  reduced_motion?: boolean;
   aspect_ratio?: "9:16" | "16:9" | "1:1";
   render_controls?: {
     cta_text?: string;
@@ -183,4 +184,48 @@ export interface RenderInput extends Record<string, unknown> {
   };
   width?: number;
   height?: number;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Production compositions must receive their render input from the caller.
+ * Keeping this guard next to the wire type makes an omitted or malformed
+ * `--props` payload fail before a component tries to render a partial scene.
+ */
+export function requireExplicitRenderInput(input: unknown): RenderInput {
+  if (!isRecord(input)) {
+    throw new Error("Production composition requires explicit injected real render input");
+  }
+
+  const segments = input.segments;
+  const hasValidSegments = Array.isArray(segments)
+    && segments.length > 0
+    && segments.every((segment) => (
+      isRecord(segment)
+      && Number.isInteger(segment.startFrame)
+      && Number.isInteger(segment.endFrame)
+      && (segment.endFrame as number) > (segment.startFrame as number)
+      && typeof segment.text === "string"
+      && segment.text.trim().length > 0
+    ));
+
+  if (
+    typeof input.title !== "string"
+    || input.title.trim().length === 0
+    || typeof input.language !== "string"
+    || input.language.trim().length === 0
+    || !Number.isInteger(input.fps)
+    || (input.fps as number) <= 0
+    || !Number.isInteger(input.durationInFrames)
+    || (input.durationInFrames as number) <= 0
+    || !hasValidSegments
+    || !Array.isArray(input.mouthCues)
+  ) {
+    throw new Error("Production composition requires explicit injected real render input");
+  }
+
+  return input as RenderInput;
 }

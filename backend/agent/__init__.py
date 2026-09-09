@@ -16,13 +16,11 @@ from backend.agent.tools import (
     audit_story_quality,
     draft_story_segments,
     plan_visual_shots,
-    research_topic,
 )
 
 __all__ = [
     "create_fyf_producer_agent",
     "run_adk_pipeline",
-    "research_topic",
     "draft_story_segments",
     "audit_story_quality",
     "plan_visual_shots",

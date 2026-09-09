@@ -43,7 +43,10 @@ def vertex_client_kwargs(
     if explicit_api_key:
         return {"vertexai": True, "api_key": explicit_api_key}
     local_credentials = credential_file or Path(__file__).resolve().parents[1] / "gcp-key.json"
-    if not configured_adc and local_credentials.is_file():
+    use_local_credentials = os.getenv("FYF_USE_LOCAL_GCP_KEY", "true").strip().lower() not in {
+        "0", "false", "no", "off"
+    }
+    if not configured_adc and use_local_credentials and local_credentials.is_file():
         credentials = service_account.Credentials.from_service_account_file(
             str(local_credentials),
             scopes=["https://www.googleapis.com/auth/cloud-platform"],

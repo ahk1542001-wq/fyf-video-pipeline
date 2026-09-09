@@ -6,6 +6,10 @@ type VersionHistoryProps = {
   studio: ProjectStudioController;
 };
 
+function versionLabel(version: { version_no: number; variant_name?: string | null }): string {
+  return `v${version.version_no}`;
+}
+
 // Persistent version history (right pane). Undo APPENDS a new version restoring
 // the target content - never a destructive rollback. Named variants are promoted
 // to server-persisted versions (they survive reload). Before/after renders two
@@ -160,32 +164,88 @@ export default function VersionHistory({ studio }: VersionHistoryProps) {
         {studio.compareOpen ? (
           <div className="compare-panes" data-testid="compare-panes">
             <div className="compare-pane" data-testid="compare-before">
-              <p className="compare-pane__head" data-testid="compare-before-version">
+              <p
+                className="compare-pane__head"
+                data-testid="compare-before-version"
+                title={studio.compareBeforeVersion?.variant_name ?? undefined}
+              >
                 {studio.compareBeforeVersion
-                  ? `v${studio.compareBeforeVersion.version_no}`
+                  ? versionLabel(studio.compareBeforeVersion)
                   : "Before: not loaded"}
               </p>
               {studio.compareBeforeVersion ? (
                 <ul className="compare-pane__scenes">
                   {studio.compareBeforeVersion.script.segments.map((segment) => (
                     <li key={segment.id} data-testid={`before-${segment.id}`}>
-                      <strong>{segment.id}</strong>: {segment.text}
+                      <strong>{segment.id}</strong>
+                      <dl className="compare-scene-fields">
+                        <div>
+                          <dt>Text</dt>
+                          <dd data-testid={`before-${segment.id}-text`}>{segment.text}</dd>
+                        </div>
+                        <div>
+                          <dt>Caption</dt>
+                          <dd data-testid={`before-${segment.id}-caption`}>{segment.caption || "—"}</dd>
+                        </div>
+                        <div>
+                          <dt>Visual</dt>
+                          <dd data-testid={`before-${segment.id}-visual`}>{segment.visual_action}</dd>
+                        </div>
+                        <div>
+                          <dt>Voice</dt>
+                          <dd data-testid={`before-${segment.id}-voice`}>{segment.voice || "—"}</dd>
+                        </div>
+                        <div>
+                          <dt>Duration</dt>
+                          <dd data-testid={`before-${segment.id}-duration`}>
+                            {segment.duration_seconds == null ? "—" : `${segment.duration_seconds}s`}
+                          </dd>
+                        </div>
+                      </dl>
                     </li>
                   ))}
                 </ul>
               ) : null}
             </div>
             <div className="compare-pane" data-testid="compare-after">
-              <p className="compare-pane__head" data-testid="compare-after-version">
+              <p
+                className="compare-pane__head"
+                data-testid="compare-after-version"
+                title={studio.compareAfterVersion?.variant_name ?? undefined}
+              >
                 {studio.compareAfterVersion
-                  ? `v${studio.compareAfterVersion.version_no}`
+                  ? versionLabel(studio.compareAfterVersion)
                   : "After: not loaded"}
               </p>
               {studio.compareAfterVersion ? (
                 <ul className="compare-pane__scenes">
                   {studio.compareAfterVersion.script.segments.map((segment) => (
                     <li key={segment.id} data-testid={`after-${segment.id}`}>
-                      <strong>{segment.id}</strong>: {segment.text}
+                      <strong>{segment.id}</strong>
+                      <dl className="compare-scene-fields">
+                        <div>
+                          <dt>Text</dt>
+                          <dd data-testid={`after-${segment.id}-text`}>{segment.text}</dd>
+                        </div>
+                        <div>
+                          <dt>Caption</dt>
+                          <dd data-testid={`after-${segment.id}-caption`}>{segment.caption || "—"}</dd>
+                        </div>
+                        <div>
+                          <dt>Visual</dt>
+                          <dd data-testid={`after-${segment.id}-visual`}>{segment.visual_action}</dd>
+                        </div>
+                        <div>
+                          <dt>Voice</dt>
+                          <dd data-testid={`after-${segment.id}-voice`}>{segment.voice || "—"}</dd>
+                        </div>
+                        <div>
+                          <dt>Duration</dt>
+                          <dd data-testid={`after-${segment.id}-duration`}>
+                            {segment.duration_seconds == null ? "—" : `${segment.duration_seconds}s`}
+                          </dd>
+                        </div>
+                      </dl>
                     </li>
                   ))}
                 </ul>

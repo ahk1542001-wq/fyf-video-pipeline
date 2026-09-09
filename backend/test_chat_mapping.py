@@ -211,19 +211,19 @@ def test_propose_project_command_reports_mapping_error_honestly():
     assert out.get("error") == "chat_mapping_failed"
 
 
-def test_chat_tool_lives_in_tools_module_and_producer_is_unchanged():
+def test_chat_tool_lives_in_tools_module_and_producer_has_no_research_step():
     # The chat->command tool is wired into backend.agent.tools (the task's
     # "and/or tools.py" option). The producer agent's toolset is intentionally
-    # left UNCHANGED (exactly 4 tools, research first) so the existing runner
-    # contract stays green, and no third LlmAgent is created.
+    # remains isolated from the producer toolset, and no research step or third
+    # LlmAgent is created.
     from backend.agent import tools as tools_mod
     from backend.agent.fyf_producer import create_fyf_producer_agent
 
     assert callable(getattr(tools_mod, "propose_project_command", None))
     agent = create_fyf_producer_agent()
     names = [getattr(tool, "__name__", str(tool)) for tool in agent.tools]
-    assert names[0] == "research_topic"  # tools[0] unchanged (cinema test relies on it)
-    assert len(names) == 4  # producer toolset unchanged
+    assert "research_topic" not in names
+    assert len(names) == 3
 
 
 def test_backend_agent_still_has_exactly_two_llm_agents():

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
+import { useRouter } from "next/navigation";
 import {
   API_URL,
   deriveWorkflowStages,
@@ -12,6 +13,7 @@ import {
 import {
   DEFAULT_STYLES,
   SCRIPT_JOB_STORAGE_KEY,
+  WIZARD_CONTEXT_STORAGE_KEY,
   WIZARD_TOPIC_STORAGE_KEY,
   LOCKED_SCRIPT_STORAGE_KEY,
   fetchWithDeadline,
@@ -29,12 +31,25 @@ import {
   type VisualProgress,
 } from "./studio-data";
 
+function isAlternativeRequest(message: string) {
+  const normalized = message.toLowerCase();
+  return (
+    /\b(?:3|three)\s+(?:story\s+)?(?:options?|directions?|alternatives?|variants?)\b/.test(normalized) ||
+    /\b(?:alternative|alternatives|different directions|story options|story variants)\b/.test(normalized)
+  );
+}
+
 // Controller hook for the Create Studio workspace. All state, effects, async
-// job handlers, and derived audit values that previously lived inline in
-// app/page.tsx are lifted here verbatim so the panels stay presentational and
-// the runtime behavior is unchanged.
+// job handlers, and derived audit values live here so the panels stay
+// presentational while draft input and submitted director history remain
+// separate.
 export function useCreateStudio() {
+  const router = useRouter();
   const [topic, setTopic] = useState("");
+  const [directorMessage, setDirectorMessage] = useState("");
+  const [sourceMode, setSourceMode] = useState<"brief" | "full_script">("full_script");
+  const [videoTitle, setVideoTitle] = useState("");
+  const [submittedMessages, setSubmittedMessages] = useState<string[]>([]);
   const durationMode = "short";
   const [availableStyles, setAvailableStyles] = useState<VideoStyleOption[]>(DEFAULT_STYLES);
   const [selectedStyle, setSelectedStyle] = useState<string>("fyf_explainer");
@@ -100,6 +115,7 @@ export function useCreateStudio() {
   const [telemetryError, setTelemetryError] = useState<string | null>(null);
   const [renderedAspectRatio, setRenderedAspectRatio] = useState<"9:16" | "16:9" | "1:1">("9:16");
   const [error, setError] = useState<string | null>(null);
+  const [openingStudio, setOpeningStudio] = useState(false);
   const [runtime, setRuntime] = useState<RuntimeInfo>(STATIC_RUNTIME_FALLBACK);
   const [runtimeSource, setRuntimeSource] = useState<"api" | "fallback">("fallback");
   const [generationAccessToken, setGenerationAccessToken] = useState(() => (
@@ -109,6 +125,53 @@ export function useCreateStudio() {
   const activeVideoControllerRef = useRef<AbortController | null>(null);
   const activeStoryActionRef = useRef(false);
   const effectiveVoiceProvider: VoiceProvider = "gemini";
+
+  async function openSharedStudio() {
+    if (!script || !scriptLocked || !scriptLockId || openingStudio) return;
+    setOpeningStudio(true);
+    setError(null);
+    try {
+      const storageKey = `fyf-project-for-lock:${scriptLockId}`;
+      let projectId = window.sessionStorage.getItem(storageKey);
+      if (!projectId || !/^[0-9a-f]{8}$/.test(projectId)) {
+        const bytes = new Uint8Array(4);
+        window.crypto.getRandomValues(bytes);
+        projectId = Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
+        window.sessionStorage.setItem(storageKey, projectId);
+      }
+      const response = await fetchWithDeadline(`${API_URL}/api/projects`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(generationAccessToken.trim()
+            ? { "X-FYF-Access-Token": generationAccessToken.trim() }
+            : {}),
+        },
+        body: JSON.stringify({
+          project_id: projectId,
+          script,
+          actor: "creative-director",
+          idempotency_key: `story-lock:${scriptLockId}`,
+          pinned_production_config: {
+            voice_provider: "gemini",
+            voice_actor: selectedVoiceActor,
+            language: selectedLanguage,
+            aspect_ratio: aspectRatio,
+            style_id: selectedStyle,
+          },
+        }),
+      });
+      const body: unknown = await response.json();
+      if (!response.ok || !isRecord(body) || body.success !== true) {
+        const detail = isRecord(body) ? body.detail : null;
+        throw new Error(typeof detail === "string" ? detail : "Could not create the shared Studio project.");
+      }
+      router.push(`/project/${projectId}`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not open the shared Studio.");
+      setOpeningStudio(false);
+    }
+  }
 
   useEffect(() => {
     return () => {
@@ -163,8 +226,30 @@ export function useCreateStudio() {
     if (typeof window === "undefined") return;
 
     async function restoreWizardState() {
+      let restoredStartedAt: number | undefined;
+      const savedContext = window.sessionStorage.getItem(WIZARD_CONTEXT_STORAGE_KEY);
+      if (savedContext) {
+        try {
+          const parsed: unknown = JSON.parse(savedContext);
+          if (isRecord(parsed)) {
+            if (typeof parsed.topic === "string") setTopic(parsed.topic);
+            if (parsed.sourceMode === "brief" || parsed.sourceMode === "full_script") {
+              setSourceMode(parsed.sourceMode);
+            }
+            if (typeof parsed.videoTitle === "string") setVideoTitle(parsed.videoTitle);
+            if (Array.isArray(parsed.submittedMessages)) {
+              setSubmittedMessages(parsed.submittedMessages.filter(
+                (message): message is string => typeof message === "string",
+              ));
+            }
+            if (typeof parsed.startedAt === "number") restoredStartedAt = parsed.startedAt;
+          }
+        } catch {
+          window.sessionStorage.removeItem(WIZARD_CONTEXT_STORAGE_KEY);
+        }
+      }
       const savedTopic = window.sessionStorage.getItem(WIZARD_TOPIC_STORAGE_KEY);
-      if (savedTopic) setTopic(savedTopic);
+      if (savedTopic && !savedContext) setTopic(savedTopic);
 
       const savedLock = window.sessionStorage.getItem(LOCKED_SCRIPT_STORAGE_KEY);
       if (savedLock) {
@@ -177,6 +262,7 @@ export function useCreateStudio() {
             /^[0-9a-f]{8}$/.test(parsed.lockId)
           ) {
             setScript(parsed.script);
+            setSelectedLanguage(parsed.script.language);
             setScriptLockId(parsed.lockId);
             setScriptLocked(true);
             setWritingStatus("done");
@@ -201,7 +287,10 @@ export function useCreateStudio() {
           window.sessionStorage.removeItem(SCRIPT_JOB_STORAGE_KEY);
           return;
         }
-        await pollScriptJob(activeJob, { isCancelled: () => cancelled });
+        await pollScriptJob(activeJob, {
+          isCancelled: () => cancelled,
+          startedAt: restoredStartedAt,
+        });
       } catch (err) {
         setError((err as Error).message || "Lost track of the running script job.");
         setWritingStatus("error");
@@ -271,8 +360,8 @@ export function useCreateStudio() {
     }
   }
 
-  async function pollScriptJob(jobId: string, opts: { isCancelled?: () => boolean } = {}) {
-    const startTime = Date.now();
+  async function pollScriptJob(jobId: string, opts: { isCancelled?: () => boolean; startedAt?: number } = {}) {
+    const startTime = opts.startedAt || Date.now();
     while (Date.now() - startTime < 45 * 60 * 1000) {
       if (opts.isCancelled?.()) return;
       const statusRes = await fetchWithDeadline(`${API_URL}/api/script-jobs/${jobId}/status`);
@@ -283,13 +372,15 @@ export function useCreateStudio() {
       const elapsed = `· ${formatElapsed(Date.now() - startTime)} elapsed`;
       const progress = typeof job.progress === "number" ? ` (${job.progress}%)` : "";
       if (job.stage === "adk_producer") {
-        setScriptProgress(`Google ADK Producer Agent running… ${progress} ${elapsed}. This stage researches and drafts the full story, so it can take several minutes.`);
+        setScriptProgress(`Google ADK Producer Agent running… ${progress} ${elapsed}. This stage drafts and structures the full story, so it can take several minutes.`);
       } else if (job.stage === "narration") {
         setScriptProgress(`Writing narration with Vertex… ${progress} ${elapsed}`);
       } else if (job.stage === "storyboard" || job.stage === "visual_lock") {
         const batch = typeof job.batch === "number" ? job.batch : 1;
         const count = typeof job.batch_count === "number" ? job.batch_count : "?";
-        setScriptProgress(`Building visual story batch ${batch}/${count}… ${progress} ${elapsed}`);
+        setScriptProgress(sourceMode === "full_script"
+          ? `Planning scenes and visuals from your supplied script… ${progress} ${elapsed}`
+          : `Building visual story batch ${batch}/${count}… ${progress} ${elapsed}`);
       } else if (job.stage === "retrying") {
         setScriptProgress(`Provider hiccup — auto-retrying from the saved checkpoint… ${elapsed}`);
       } else {
@@ -298,6 +389,7 @@ export function useCreateStudio() {
 
       if (job.status === "completed" && isVideoScript(job.data) && typeof job.lock_id === "string" && /^[0-9a-f]{8}$/.test(job.lock_id)) {
         setScript(job.data);
+        setSelectedLanguage(job.data.language);
         setScriptLockId(job.lock_id);
         setScriptLocked(true);
         setWritingStatus("done");
@@ -333,8 +425,10 @@ export function useCreateStudio() {
     throw new Error("Script production timed out after 45 minutes");
   }
 
-  async function generateScript() {
-    if (!topic.trim() || !generationReady || activeStoryActionRef.current) return;
+  async function generateScript(topicOverride?: string) {
+    const requestTopic = (topicOverride ?? topic).trim();
+    const requestTitle = videoTitle.trim();
+    if (!requestTopic || (sourceMode === "full_script" && !requestTitle) || !generationReady || activeStoryActionRef.current) return;
     activeStoryActionRef.current = true;
 
     if (activeVideoControllerRef.current) {
@@ -351,7 +445,18 @@ export function useCreateStudio() {
     setVideoUrl(null);
     setError(null);
     setResumableScriptJobId(null);
-    window.sessionStorage.setItem(WIZARD_TOPIC_STORAGE_KEY, topic);
+    window.sessionStorage.setItem(WIZARD_TOPIC_STORAGE_KEY, requestTopic);
+    const startedAt = Date.now();
+    window.sessionStorage.setItem(WIZARD_CONTEXT_STORAGE_KEY, JSON.stringify({
+      topic: requestTopic,
+      sourceMode,
+      videoTitle: requestTitle,
+      submittedMessages: [
+        ...submittedMessages,
+        ...(submittedMessages.at(-1) === requestTopic ? [] : [requestTopic]),
+      ],
+      startedAt,
+    }));
     window.sessionStorage.removeItem(LOCKED_SCRIPT_STORAGE_KEY);
 
     try {
@@ -359,7 +464,9 @@ export function useCreateStudio() {
         method: "POST",
         headers: generationRequestHeaders(),
         body: JSON.stringify({
-          topic,
+          topic: requestTopic,
+          source_mode: sourceMode,
+          title: sourceMode === "full_script" ? requestTitle : undefined,
           duration_mode: durationMode,
           style: selectedStyle,
           studio_name: studioName,
@@ -384,7 +491,7 @@ export function useCreateStudio() {
       if (isRecord(data) && typeof data.job_id === "string") {
         const jobId = data.job_id;
         window.sessionStorage.setItem(SCRIPT_JOB_STORAGE_KEY, jobId);
-        await pollScriptJob(jobId);
+        await pollScriptJob(jobId, { startedAt });
       } else {
         setError("Invalid response format from script generation");
         setWritingStatus("error");
@@ -423,8 +530,9 @@ export function useCreateStudio() {
     }
   }
 
-  async function polishStory() {
-    if (!topic.trim() || !generationReady || activeStoryActionRef.current) return;
+  async function polishStory(topicOverride?: string) {
+    const requestTopic = (topicOverride ?? topic).trim();
+    if (!requestTopic || !generationReady || activeStoryActionRef.current) return;
     activeStoryActionRef.current = true;
     setWritingStatus("writing");
     setError(null);
@@ -441,7 +549,7 @@ export function useCreateStudio() {
         method: "POST",
         headers: generationRequestHeaders(),
         body: JSON.stringify({
-          topic_or_draft: topic,
+          topic_or_draft: requestTopic,
           studio_name: studioName,
           language: selectedLanguage,
           genre: selectedStyle,
@@ -466,6 +574,21 @@ export function useCreateStudio() {
       setWritingStatus("error");
     } finally {
       activeStoryActionRef.current = false;
+    }
+  }
+
+  async function submitDirectorMessage(message: string) {
+    const submittedMessage = message.trim();
+    if (!submittedMessage || !generationReady || writingStatus === "writing" || activeStoryActionRef.current) return;
+
+    setSubmittedMessages((current) => (
+      current.at(-1) === submittedMessage ? current : [...current, submittedMessage]
+    ));
+    setDirectorMessage("");
+    if (sourceMode === "brief" && isAlternativeRequest(submittedMessage)) {
+      await polishStory(submittedMessage);
+    } else {
+      await generateScript(submittedMessage);
     }
   }
 
@@ -771,7 +894,20 @@ export function useCreateStudio() {
   return {
     // Source + story inputs
     topic,
-    setTopic,
+    setTopic: (value: string) => {
+      setTopic(value);
+      setDirectorMessage(value);
+    },
+    directorMessage,
+    setDirectorMessage: (value: string) => {
+      setDirectorMessage(value);
+      setTopic(value);
+    },
+    sourceMode,
+    setSourceMode,
+    videoTitle,
+    setVideoTitle,
+    submittedMessages,
     durationMode,
     availableStyles,
     selectedStyle,
@@ -813,6 +949,8 @@ export function useCreateStudio() {
     setSelectedVariant,
     scriptLocked,
     scriptLockId,
+    openingStudio,
+    openSharedStudio,
     storyModel,
     writingStatus,
     resumableScriptJobId,
@@ -821,6 +959,7 @@ export function useCreateStudio() {
     updateSegmentField,
     generateScript,
     polishStory,
+    submitDirectorMessage,
     resumeScriptJob,
     approveAndLock,
     // Render + preview

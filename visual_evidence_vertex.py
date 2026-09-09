@@ -7,6 +7,7 @@ import hashlib
 import logging
 import os
 import re
+import stat
 import time
 from pathlib import Path
 from typing import Optional
@@ -32,6 +33,7 @@ from backend.runtime_limits import (
     settle_provider_operation,
 )
 from backend.vertex_thinking import generation_config_for
+from backend.job_store import write_json_atomically
 
 DEFAULT_LOCATION = "global"
 MAX_GENERATION_ATTEMPTS = 2
@@ -43,6 +45,7 @@ FINAL_REPAIR_PLAN_ATTEMPTS = 4
 VIDEO_POLL_SECONDS = 10
 VIDEO_TIMEOUT_SECONDS = 420
 VISUAL_EVIDENCE_CONTRACT_VERSION = 2
+UNVERIFIED_FALLBACK_FILENAME = "visual_evidence_unverified.json"
 
 logger = logging.getLogger(__name__)
 
@@ -667,8 +670,82 @@ def _write_final_repair_checkpoint(path: Path, source_fingerprint: str, script: 
     temp.replace(path)
 
 
-def _passed_shot_is_usable(shot: dict, asset_dir: Path) -> bool:
+def _unverified_fallback_path(asset_dir: Path) -> Path:
+    return asset_dir.parent / UNVERIFIED_FALLBACK_FILENAME
+
+
+def _read_unverified_fallbacks(asset_dir: Path) -> list[dict[str, str]]:
+    path = _unverified_fallback_path(asset_dir)
+    try:
+        entry = path.lstat()
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        raise ValueError("Unverified visual fallback registry is unreadable") from exc
+    if stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode) or entry.st_size == 0:
+        raise ValueError("Unverified visual fallback registry is invalid")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("Unverified visual fallback registry is unreadable") from exc
+    entries = payload.get("shots") if isinstance(payload, dict) else None
+    if not isinstance(payload, dict) or payload.get("version") != 1 or not isinstance(entries, list):
+        raise ValueError("Unverified visual fallback registry is invalid")
+    normalized: list[dict[str, str]] = []
+    for item in entries:
+        if not isinstance(item, dict) or not item.get("segment_id") or not item.get("shot_id"):
+            raise ValueError("Unverified visual fallback registry contains an invalid shot")
+        normalized.append({
+            "segment_id": str(item["segment_id"]),
+            "shot_id": str(item["shot_id"]),
+        })
+    return normalized
+
+
+def _record_unverified_fallback(asset_dir: Path, segment_id: str, shot_id: str) -> None:
+    """Persist provider-unverified fallback identity separately from script schema."""
+
+    path = _unverified_fallback_path(asset_dir)
+    entries = _read_unverified_fallbacks(asset_dir)
+    key = (str(segment_id), str(shot_id))
+    if not any((item["segment_id"], item["shot_id"]) == key for item in entries):
+        entries.append({
+            "segment_id": key[0],
+            "shot_id": key[1],
+            "fallback_used": "true",
+            "semantic_verification_status": "unverified",
+        })
+    write_json_atomically(path, {"version": 1, "shots": entries})
+
+
+def _clear_unverified_fallback(asset_dir: Path, segment_id: str, shot_id: str) -> None:
+    """Clear one fallback marker after a later provider verification succeeds."""
+
+    path = _unverified_fallback_path(asset_dir)
+    entries = _read_unverified_fallbacks(asset_dir)
+    remaining = [
+        item
+        for item in entries
+        if (item["segment_id"], item["shot_id"]) != (str(segment_id), str(shot_id))
+    ]
+    if remaining != entries:
+        write_json_atomically(path, {"version": 1, "shots": remaining})
+
+
+def _passed_shot_is_usable(
+    shot: dict, asset_dir: Path, *, segment_id: str | None = None
+) -> bool:
     if shot.get("verification_status") != "passed":
+        return False
+    # A deterministic outage fallback satisfies the structural motion contract
+    # but has not been semantically inspected by Vertex.  Its identity lives in
+    # a sidecar because the locked VideoScript schema intentionally forbids
+    # arbitrary QA metadata on evidence shots.
+    if segment_id is not None and any(
+        item["segment_id"] == str(segment_id)
+        and item["shot_id"] == str(shot.get("shot_id"))
+        for item in _read_unverified_fallbacks(asset_dir)
+    ):
         return False
     if shot.get("media_type") == "motion_graphic":
         return bool(shot.get("motion_spec"))
@@ -1133,6 +1210,7 @@ def generate_and_verify_visual_evidence(script_data: dict, job_dir: str) -> dict
         # Replace stale/corrupt progress before any remote call so status never
         # reports completed shots from a different locked script.
         _write_checkpoint(checkpoint, fingerprint, script)
+        write_json_atomically(root / UNVERIFIED_FALLBACK_FILENAME, {"version": 1, "shots": []})
 
     for segment in script["segments"]:
         visual = segment.get("visual") or {}
@@ -1144,7 +1222,7 @@ def generate_and_verify_visual_evidence(script_data: dict, job_dir: str) -> dict
 
         for shot in shots:
             required = [claims_by_id[claim_id] for claim_id in shot["proves_claim_ids"]]
-            if _passed_shot_is_usable(shot, asset_dir):
+            if _passed_shot_is_usable(shot, asset_dir, segment_id=segment["id"]):
                 continue
             if shot.get("media_type") == "motion_graphic":
                 try:
@@ -1153,8 +1231,10 @@ def generate_and_verify_visual_evidence(script_data: dict, job_dir: str) -> dict
                     raise ValueError(
                         f"Motion graphic for segment={segment['id']} shot={shot['shot_id']} {exc}"
                     ) from exc
+                semantic_verified = False
                 try:
                     _verify_motion_spec_semantics(client, required, shot)
+                    semantic_verified = True
                 except Exception as exc:
                     if _is_transient_vertex_error(exc):
                         logger.warning(
@@ -1164,9 +1244,11 @@ def generate_and_verify_visual_evidence(script_data: dict, job_dir: str) -> dict
                             type(exc).__name__,
                         )
                         _deterministic_motion_graphic_fallback(required, shot)
+                        _record_unverified_fallback(asset_dir, segment["id"], shot["shot_id"])
                     else:
                         try:
                             _repair_as_motion_graphic(client, required, shot, [str(exc)])
+                            semantic_verified = True
                         except Exception as repair_exc:
                             if not _is_transient_vertex_error(repair_exc):
                                 raise
@@ -1177,7 +1259,10 @@ def generate_and_verify_visual_evidence(script_data: dict, job_dir: str) -> dict
                                 type(repair_exc).__name__,
                             )
                             _deterministic_motion_graphic_fallback(required, shot)
+                            _record_unverified_fallback(asset_dir, segment["id"], shot["shot_id"])
                 shot["verification_status"] = "passed"
+                if semantic_verified:
+                    _clear_unverified_fallback(asset_dir, segment["id"], shot["shot_id"])
                 _write_checkpoint(checkpoint, fingerprint, script)
                 continue
             filename = f"{_safe_name(segment['id'])}-{_safe_name(shot['shot_id'])}.png"
@@ -1212,6 +1297,7 @@ def generate_and_verify_visual_evidence(script_data: dict, job_dir: str) -> dict
                             type(exc).__name__,
                         )
                         _deterministic_motion_graphic_fallback(required, shot)
+                        _record_unverified_fallback(asset_dir, segment["id"], shot["shot_id"])
                         break
                     try:
                         _repair_as_motion_graphic(client, required, shot, last_issues)
@@ -1224,13 +1310,32 @@ def generate_and_verify_visual_evidence(script_data: dict, job_dir: str) -> dict
                                 type(repair_exc).__name__,
                             )
                             _deterministic_motion_graphic_fallback(required, shot)
+                            _record_unverified_fallback(asset_dir, segment["id"], shot["shot_id"])
                             break
                         raise RuntimeError(
                             f"Visual media unavailable for segment={segment['id']} "
                             f"shot={shot['shot_id']}; motion repair failed: {repair_exc}"
                         ) from repair_exc
                     break
-                image_data, image_mime = _image_payload(response)
+                try:
+                    image_data, image_mime = _image_payload(response)
+                except RuntimeError as exc:
+                    last_issues = [str(exc)]
+                    if attempt + 1 < MAX_GENERATION_ATTEMPTS:
+                        logger.warning(
+                            "Vertex returned no image bytes for %s/%s; retrying on the quality route",
+                            segment["id"],
+                            shot["shot_id"],
+                        )
+                        continue
+                    try:
+                        _repair_as_motion_graphic(client, required, shot, last_issues)
+                    except Exception as repair_exc:
+                        raise RuntimeError(
+                            f"Visual media unavailable for segment={segment['id']} "
+                            f"shot={shot['shot_id']}; motion repair failed: {repair_exc}"
+                        ) from repair_exc
+                    break
                 if image_mime not in {"image/png", "image/jpeg", "image/webp"}:
                     raise RuntimeError(f"Unsupported Vertex image MIME type: {image_mime}")
                 destination.write_bytes(image_data)
@@ -1275,6 +1380,7 @@ def generate_and_verify_visual_evidence(script_data: dict, job_dir: str) -> dict
                             shot["media_type"] = "generated_image"
                             shot["fallback_used"] = True
                     shot["verification_status"] = "passed"
+                    _clear_unverified_fallback(asset_dir, segment["id"], shot["shot_id"])
                     break
                 last_issues = verification.issues or ["required evidence was not directly visible"]
             else:
@@ -1334,7 +1440,9 @@ def repair_final_visual_failures(script_data: dict, report: dict, job_dir: str) 
         if not claims or not shots:
             raise ValueError(f"Final visual repair has no evidence contract for {segment['id']}")
         original_visual = (original_by_id.get(segment["id"]) or {}).get("visual") or {}
-        if visual != original_visual and all(_passed_shot_is_usable(shot, assets) for shot in shots):
+        if visual != original_visual and all(
+            _passed_shot_is_usable(shot, assets, segment_id=segment["id"]) for shot in shots
+        ):
             continue
         repaired_screen_text: list[str] = []
         for shot in shots:

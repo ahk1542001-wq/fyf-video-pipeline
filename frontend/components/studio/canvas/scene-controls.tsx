@@ -2,6 +2,7 @@
 
 import type { ProjectStudioController } from "../../../lib/project-state";
 import type { SelectionMode } from "../../../lib/project-state";
+import type { CommandScope } from "../../../lib/api";
 
 type SceneControlsProps = {
   studio: ProjectStudioController;
@@ -14,6 +15,13 @@ const MODES: Array<{ id: SelectionMode; label: string; testId: string }> = [
   { id: "all", label: "All scenes", testId: "selection-mode-all" },
 ];
 
+const SCENE_LOCKS: Array<{ id: CommandScope; label: string }> = [
+  { id: "content", label: "Content" },
+  { id: "visual", label: "Visual" },
+  { id: "timing", label: "Timing" },
+  { id: "voice", label: "Voice" },
+];
+
 // Scene controls (right pane). Selection is expressible as scene / object /
 // time-range / all and is carried verbatim into every command scope+selection so
 // chat understands exactly what the operator has selected. Canvas edits build a
@@ -24,6 +32,13 @@ export default function SceneControls({ studio }: SceneControlsProps) {
   const disabled = studio.pending || !ready;
   const sceneLocked = studio.locks?.locked.includes("content") ?? false;
   const visualLocked = studio.locks?.locked.includes("visual") ?? false;
+  const timingLocked = studio.locks?.locked.includes("timing") ?? false;
+  const voiceLocked = studio.locks?.locked.includes("voice") ?? false;
+  const selectedSceneLocks = studio.selectedSceneId
+    ? studio.locks?.scene_locks?.[studio.selectedSceneId] ?? {}
+    : {};
+  const isSceneLocked = (scope: CommandScope) =>
+    Boolean(selectedSceneLocks[scope]?.locked);
 
   return (
     <section className="workspace-panel scene-controls" aria-labelledby="scene-controls-title">
@@ -115,7 +130,7 @@ export default function SceneControls({ studio }: SceneControlsProps) {
 
       <div className="field-group">
         <label htmlFor="scene-text-input" className="field-label">
-          Narration text {sceneLocked ? <span className="lock-chip">content locked</span> : null}
+          Narration text {sceneLocked || isSceneLocked("content") ? <span className="lock-chip">content locked</span> : null}
         </label>
         <input
           id="scene-text-input"
@@ -130,8 +145,59 @@ export default function SceneControls({ studio }: SceneControlsProps) {
       </div>
 
       <div className="field-group">
+        <label htmlFor="scene-caption-input" className="field-label">
+          Caption {sceneLocked || isSceneLocked("content") ? <span className="lock-chip">content locked</span> : null}
+        </label>
+        <input
+          id="scene-caption-input"
+          data-testid="scene-caption-input"
+          type="text"
+          className="field-control field-control--input"
+          value={studio.sceneCaptionDraft}
+          disabled={disabled}
+          placeholder="Optional on-screen caption"
+          onChange={(event) => studio.setSceneDraft("caption", event.target.value)}
+        />
+      </div>
+
+      <div className="field-group">
+        <label htmlFor="scene-voice-input" className="field-label">
+          Voice {voiceLocked || isSceneLocked("voice") ? <span className="lock-chip">voice locked</span> : null}
+        </label>
+        <input
+          id="scene-voice-input"
+          data-testid="scene-voice-input"
+          type="text"
+          className="field-control field-control--input"
+          value={studio.sceneVoiceDraft}
+          disabled={disabled}
+          placeholder="Voice direction or actor"
+          onChange={(event) => studio.setSceneDraft("voice", event.target.value)}
+        />
+      </div>
+
+      <div className="field-group">
+        <label htmlFor="scene-duration-input" className="field-label">
+          Duration (seconds) {timingLocked || isSceneLocked("timing") ? <span className="lock-chip">timing locked</span> : null}
+        </label>
+        <input
+          id="scene-duration-input"
+          data-testid="scene-duration-input"
+          type="number"
+          min="0.01"
+          max="600"
+          step="0.1"
+          className="field-control field-control--input"
+          value={studio.sceneDurationDraft}
+          disabled={disabled}
+          placeholder="e.g. 3.5"
+          onChange={(event) => studio.setSceneDraft("duration", event.target.value)}
+        />
+      </div>
+
+      <div className="field-group">
         <label htmlFor="scene-visual-input" className="field-label">
-          Visual action {visualLocked ? <span className="lock-chip">visual locked</span> : null}
+          Visual action {visualLocked || isSceneLocked("visual") ? <span className="lock-chip">visual locked</span> : null}
         </label>
         <input
           id="scene-visual-input"
@@ -164,7 +230,64 @@ export default function SceneControls({ studio }: SceneControlsProps) {
         >
           Apply visual to canvas
         </button>
+        <button
+          type="button"
+          className="btn btn--ghost"
+          data-testid="scene-apply-caption"
+          disabled={disabled || !studio.selectedSceneId}
+          onClick={() => void studio.applySceneEdit("caption")}
+        >
+          Apply caption
+        </button>
+        <button
+          type="button"
+          className="btn btn--ghost"
+          data-testid="scene-apply-voice"
+          disabled={disabled || !studio.selectedSceneId}
+          onClick={() => void studio.applySceneEdit("voice")}
+        >
+          Apply voice
+        </button>
+        <button
+          type="button"
+          className="btn btn--ghost"
+          data-testid="scene-apply-duration"
+          disabled={disabled || !studio.selectedSceneId}
+          onClick={() => void studio.applySceneEdit("duration")}
+        >
+          Apply duration
+        </button>
+        <button
+          type="button"
+          className="btn btn--ghost"
+          data-testid="scene-regenerate"
+          disabled={disabled || !studio.selectedSceneId}
+          onClick={() => void studio.regenerateScene()}
+        >
+          Regenerate selected scene
+        </button>
       </div>
+
+      <fieldset className="scene-locks" disabled={disabled || !studio.selectedSceneId}>
+        <legend className="field-label">Selected-scene locks</legend>
+        <div className="locks-toggles">
+          {SCENE_LOCKS.map((scope) => {
+            const checked = isSceneLocked(scope.id);
+            return (
+              <label key={scope.id} className="lock-toggle" htmlFor={`scene-lock-toggle-${scope.id}`}>
+                <input
+                  id={`scene-lock-toggle-${scope.id}`}
+                  data-testid={`scene-lock-toggle-${scope.id}`}
+                  type="checkbox"
+                  checked={checked}
+                  onChange={(event) => void studio.toggleSceneLock(scope.id, event.target.checked)}
+                />
+                <span className="field-label">{scope.label}</span>
+              </label>
+            );
+          })}
+        </div>
+      </fieldset>
       <p className="helper-text" data-testid="selection-summary">
         Current selection: {studio.selectionDescription}
       </p>

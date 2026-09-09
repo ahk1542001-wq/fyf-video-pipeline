@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from backend.script_pipeline import (
     _is_transient_error,
+    _parse_full_script,
     _script_max_retries,
     _sleep_before_script_retry,
     _terminal_error_message,
@@ -136,6 +137,58 @@ class ScriptPipelineTests(unittest.TestCase):
             self.assertEqual(narration.call_args.args[1], "long")
             self.assertEqual(len(list(job.glob("locked-batch-*.json"))), 10)
             self.assertEqual(status["batch_size"], 2)
+
+    def test_full_script_parser_preserves_explicit_scene_blocks(self):
+        supplied = "Opening claim exactly.\n\nSecond scene stays unchanged.\n\nFinal invitation."
+        self.assertEqual(
+            _parse_full_script(supplied),
+            [
+                {"id": "s1", "text": "Opening claim exactly."},
+                {"id": "s2", "text": "Second scene stays unchanged."},
+                {"id": "s3", "text": "Final invitation."},
+            ],
+        )
+
+    def test_full_script_bypasses_writer_and_plans_all_scenes_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            jobs, locks = self.make_job(root)
+            job = jobs / "abcd1234"
+            supplied = "Opening claim.\n\nWhat the equation asks.\n\nWhy it matters."
+            (job / "request.json").write_text(
+                json.dumps({
+                    "topic": supplied,
+                    "title": "A supplied proof script",
+                    "source_mode": "full_script",
+                    "duration_mode": "short",
+                    "use_adk_agent": True,
+                    "language": "en-US",
+                    "genre": "cinematic_documentary",
+                    "presenter_mode": "voiceover_only",
+                }),
+                encoding="utf-8",
+            )
+            planned = lock_batch({
+                "title": "A supplied proof script",
+                "approved_segments": _parse_full_script(supplied),
+            })
+            with (
+                patch("backend.agent.runner.run_adk_pipeline") as adk,
+                patch("writer_agent_vertex.generate_narration_script") as writer,
+                patch("writer_agent_vertex.generate_exact_lock", return_value=planned) as planner,
+            ):
+                run_script_pipeline("abcd1234", jobs, locks)
+
+            self.assertFalse(adk.called)
+            self.assertFalse(writer.called)
+            self.assertEqual(planner.call_count, 1)
+            payload = planner.call_args.args[0]
+            self.assertEqual(payload["approved_segments"], _parse_full_script(supplied))
+            result = json.loads((job / "result.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                [(segment["id"], segment["text"]) for segment in result["segments"]],
+                [(segment["id"], segment["text"]) for segment in _parse_full_script(supplied)],
+            )
 
     def test_direct_writer_path_persists_requested_studio_metadata(self):
         with tempfile.TemporaryDirectory() as directory:

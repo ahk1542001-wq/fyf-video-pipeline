@@ -13,7 +13,6 @@ from backend.agent.tools import (
     audit_story_quality,
     draft_story_segments,
     plan_visual_shots,
-    research_topic,
 )
 
 
@@ -118,17 +117,6 @@ def _mock_exact_lock():
 
 
 class ADKAgentTests(unittest.TestCase):
-    def test_research_topic_returns_structured_dossier(self):
-        result = research_topic("ဆန်စပါး စိုက်ပျိုးရေး", duration_mode="short")
-        self.assertEqual(result["topic"], "ဆန်စပါး စိုက်ပျိုးရေး")
-        self.assertEqual(result["duration_mode"], "short")
-        self.assertIn("target_audience", result)
-        self.assertEqual(result["suggested_segments"], 4)
-
-    def test_research_topic_treats_micro_as_short_duration(self):
-        result = research_topic("Quantum Computing", duration_mode="micro")
-        self.assertEqual(result["suggested_segments"], 4)
-
     def test_draft_story_segments_validates_schema(self):
         with patch(
             "writer_agent_vertex.generate_narration_script",
@@ -222,10 +210,46 @@ class ADKAgentTests(unittest.TestCase):
         )
         self.assertGreaterEqual(generated_count, 2)
 
+    def test_visual_variety_keeps_precision_graphics_and_adds_cinematic_companions(self):
+        all_motion = _mock_exact_lock()
+        for segment in all_motion["segments"]:
+            segment["visual"]["evidence_claims"][0]["evidence_type"] = "count"
+            shot = segment["visual"]["evidence_shots"][0]
+            shot["media_type"] = "motion_graphic"
+            shot["motion_spec"] = {
+                "layout": "count",
+                "labels": ["စိုက်ပျိုးရေး"],
+                "values": ["1"],
+            }
+
+        with patch(
+            "writer_agent_vertex.lock_narration_in_batches",
+            return_value=all_motion,
+        ):
+            script = plan_visual_shots(
+                "လယ်ယာကဏ္ဍ အခွင့်အလမ်းများ",
+                _mock_draft()["segments"],
+            )
+
+        shots = [
+            shot
+            for segment in script["segments"]
+            for shot in segment["visual"]["evidence_shots"]
+        ]
+        self.assertGreaterEqual(
+            sum(shot["media_type"] == "generated_image" for shot in shots),
+            2,
+        )
+        self.assertGreaterEqual(
+            sum(shot["media_type"] == "motion_graphic" for shot in shots),
+            5,
+        )
+
     def test_create_fyf_producer_agent_creates_adk_instance(self):
         agent = create_fyf_producer_agent()
         self.assertEqual(agent.name, "fyf_producer")
-        self.assertEqual(len(agent.tools), 4)
+        self.assertEqual(len(agent.tools), 3)
+        self.assertNotIn("research_topic", [tool.__name__ for tool in agent.tools])
 
     def test_create_fyf_producer_agent_uses_shared_vertex_client_configuration(self):
         client_kwargs = {
@@ -249,12 +273,6 @@ class ADKAgentTests(unittest.TestCase):
             "google.adk.Runner.run_async",
         ) as mock_run_async:
             async def fake_events(*args, **kwargs):
-                e1 = MagicMock()
-                e1.get_function_responses.return_value = [
-                    MagicMock(response={"topic": "စမ်းသပ်ချက်", "suggested_segments": 4, "target_audience": "Burmese"})
-                ]
-                yield e1
-
                 e2 = MagicMock()
                 e2.get_function_responses.return_value = [
                     MagicMock(response=_mock_draft())
@@ -281,7 +299,7 @@ class ADKAgentTests(unittest.TestCase):
                 self.assertEqual(result["script"]["title"], "လယ်ယာကဏ္ဍ အခွင့်အလမ်းများ")
                 self.assertEqual(len(result["script"]["segments"]), 5)
                 self.assertTrue(result["audit"]["passed"])
-                self.assertTrue((job_dir / "research.json").exists())
+                self.assertFalse((job_dir / "research.json").exists())
                 self.assertTrue((job_dir / "narration.json").exists())
                 self.assertTrue((job_dir / "story_audit.json").exists())
                 self.assertTrue((job_dir / "result.json").exists())

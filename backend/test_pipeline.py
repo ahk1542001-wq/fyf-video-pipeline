@@ -487,6 +487,55 @@ class TestPipeline(unittest.TestCase):
             self.assertEqual(reused, produced)
             self.assertEqual(self.plan_mock.call_count, 1)
 
+    def test_visual_planning_excludes_top_level_only_controls_and_preserves_them(self):
+        from backend.job_store import initialize_job_status
+        from backend.pipeline import _prepare_visual_artifact
+        from video_contract import VideoScript
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            job_id = "1234abcd"
+            job_dir = root / "jobs" / job_id
+            job_dir.mkdir(parents=True)
+            initialize_job_status(job_dir, job_id, "gemini")
+            script_with_controls = {
+                "title": "Locked",
+                "language": "en-US",
+                "segments": [{
+                    "id": "s1",
+                    "text": "Approved narration.",
+                    "visual_action": "A stable fluid simulation.",
+                    "scene_type": "demo",
+                    "mascot_action": "present",
+                    "emotion": "focused",
+                    "emphasis": [],
+                }],
+                "render_controls": {
+                    "aspect_ratio": "9:16",
+                },
+                "aspect_ratio": "9:16",
+                "reduced_motion": False,
+            }
+
+            def validate_story_boundary(script, _artifact_dir, policy=None):
+                return VideoScript.model_validate(script).model_dump(mode="json", exclude_none=True)
+
+            self.plan_mock.side_effect = validate_story_boundary
+            produced = _prepare_visual_artifact(
+                job_id,
+                job_dir,
+                script_with_controls,
+                root / "visual-artifacts",
+            )
+
+            planned_input = self.plan_mock.call_args.args[0]
+            self.assertIn("render_controls", planned_input)
+            self.assertEqual(planned_input["aspect_ratio"], "9:16")
+            self.assertNotIn("reduced_motion", planned_input)
+            self.assertEqual(produced["render_controls"]["aspect_ratio"], "9:16")
+            self.assertEqual(produced["aspect_ratio"], "9:16")
+            self.assertFalse(produced["reduced_motion"])
+
     def test_visual_producer_migrates_job_local_director_checkpoint(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

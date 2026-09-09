@@ -61,7 +61,7 @@ most in production:
 
 | Variable | Purpose |
 | --- | --- |
-| `FYF_LOCK_METADATA_MODE` | `per_segment` (prod) splits lock calls per segment; `combined` is the default for small scripts/tests |
+| `FYF_LOCK_METADATA_MODE` | `per_segment` (default) splits lock calls per segment; set `combined` only for controlled small-script tests |
 | `FYF_VERTEX_THINKING_LOCK` | thinking level for lock stage (LOW/MEDIUM/HIGH) |
 | `FYF_VERTEX_CALL_TIMEOUT_SECONDS` | client-side HTTP timeout per call (default 120) |
 | `FYF_VERTEX_MAX_ATTEMPTS` | bounded stage retries (default 2, max 3); failures still surface |

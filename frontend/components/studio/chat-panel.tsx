@@ -6,11 +6,34 @@ type ChatPanelProps = {
   studio: ProjectStudioController;
 };
 
-// The persistent Creative Director chat (left pane). Chat is a COMMAND EMITTER:
-// it never writes project state directly. Each note plus the current canvas
-// selection is mapped server-side to ONE ProjectCommand and applied through the
-// same seam the canvas uses, so both panes edit the SAME canonical version. The
-// transcript below is NOT the decision record - versions / events / locks are.
+function formatProposalValue(value: unknown): string {
+  if (value === null || value === undefined) return "—";
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function proposalDiffValue(root: Record<string, unknown>, field: string): unknown {
+  if (Object.prototype.hasOwnProperty.call(root, field)) {
+    return root[field];
+  }
+  return field.split(".").reduce<unknown>((current, part) => {
+    if (!current || typeof current !== "object" || Array.isArray(current)) {
+      return undefined;
+    }
+    const record = current as Record<string, unknown>;
+    return Object.prototype.hasOwnProperty.call(record, part) ? record[part] : undefined;
+  }, root);
+}
+
+// The persistent Creative Director chat (left pane). Chat is a proposal
+// emitter: it never writes project state directly. Each note plus the current
+// canvas selection is mapped server-side to ONE ProjectCommand, then waits for
+// an explicit approval before the canonical version changes. The transcript is
+// NOT the decision record - versions / events / locks are.
 export default function ChatPanel({ studio }: ChatPanelProps) {
   const disabled = studio.pending || studio.status !== "ready";
 
@@ -64,6 +87,75 @@ export default function ChatPanel({ studio }: ChatPanelProps) {
         )}
       </ol>
 
+      <section className="chat-context" aria-labelledby="proposal-title" data-testid="proposal-review">
+        <p className="chat-context__label" id="proposal-title">Proposed changes</p>
+        {studio.proposals.length === 0 ? (
+          <p className="chat-context__selection" data-testid="proposal-empty">
+            Chat changes will appear here for review before they can change the canvas.
+          </p>
+        ) : (
+          <div style={{ display: "grid", gap: "0.65rem" }}>
+            {studio.proposals.map((proposal) => {
+              const isProposed = proposal.status === "proposed";
+              const isBusy = disabled && isProposed;
+              return (
+                <article
+                  key={proposal.proposal_id}
+                  className="chat-message chat-message--assistant"
+                  data-testid="chat-proposal-card"
+                  data-proposal-id={proposal.proposal_id}
+                >
+                  <span className="chat-message__role">Proposed change</span>
+                  <strong>{proposal.diff.summary}</strong>
+                  <span className="chat-message__meta" data-testid="proposal-status">
+                    {proposal.status} · base v{proposal.base_version} · {proposal.command.operation}
+                  </span>
+                  <span className="chat-context__selection">
+                    Affected scopes: {proposal.affected_scopes.join(", ") || "none"}
+                  </span>
+                  <div style={{ display: "grid", gap: "0.25rem" }} data-testid="proposal-affected-fields">
+                    <span className="chat-context__selection">Affected fields</span>
+                    {proposal.diff.affected_fields.map((field) => (
+                      <div key={field} className="chat-context__selection">
+                        <strong>{field}</strong>: {formatProposalValue(proposalDiffValue(proposal.diff.before, field))} → {formatProposalValue(proposalDiffValue(proposal.diff.after, field))}
+                      </div>
+                    ))}
+                  </div>
+                  {isProposed ? (
+                    <div className="chat-composer__actions">
+                      <button
+                        type="button"
+                        className="btn btn--primary"
+                        data-testid="proposal-approve"
+                        disabled={isBusy}
+                        onClick={() => void studio.approveProposal(proposal.proposal_id)}
+                      >
+                        Approve
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn--ghost"
+                        data-testid="proposal-reject"
+                        disabled={isBusy}
+                        onClick={() => void studio.rejectProposal(proposal.proposal_id)}
+                      >
+                        Reject
+                      </button>
+                    </div>
+                  ) : (
+                    <span className="chat-message__meta">
+                      {proposal.status === "approved"
+                        ? `Applied as v${proposal.target_version ?? "—"}`
+                        : proposal.reason ?? `No project change was made (${proposal.status}).`}
+                    </span>
+                  )}
+                </article>
+              );
+            })}
+          </div>
+        )}
+      </section>
+
       <div className="chat-composer">
         <label htmlFor="chat-input" className="field-label">
           Note to the Director
@@ -92,7 +184,7 @@ export default function ChatPanel({ studio }: ChatPanelProps) {
             disabled={disabled || studio.chatDraft.trim().length === 0}
             onClick={() => void studio.sendChatMessage()}
           >
-            {studio.pending ? "Applying…" : "Send to canvas"}
+            {studio.pending ? "Preparing…" : "Propose change"}
           </button>
           <button
             type="button"
@@ -106,7 +198,8 @@ export default function ChatPanel({ studio }: ChatPanelProps) {
           </button>
         </div>
         <p className="helper-text">
-          Chat maps your note plus the current selection to one command. It never edits a
+          Chat maps your note plus the current selection to one proposed command. Review
+          the affected fields above and explicitly Approve or Reject it. It never edits a
           private copy and never moves a preference to another project unless you press
           Save to Brand.
         </p>

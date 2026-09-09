@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -52,50 +53,42 @@ def _restore_storyboard_visual_variety(video_script: dict[str, Any]) -> dict[str
         if generated_count >= 2:
             break
 
+    # Precision-first storyboards may legitimately need every primary shot to
+    # remain a motion graphic (counts, comparisons, and sequences). Preserve
+    # those evidence shots and add a generated cinematic companion instead of
+    # failing the whole script job or weakening the precise visual proof.
+    if generated_count < 2:
+        for segment in segments:
+            shots = segment.get("visual", {}).get("evidence_shots", [])
+            if len(shots) >= 4:
+                continue
+            source = next(
+                (shot for shot in shots if shot.get("media_type") == "motion_graphic"),
+                None,
+            )
+            if source is None:
+                continue
+            companion = deepcopy(source)
+            companion["shot_id"] = f"{source.get('shot_id', 'shot')}_cinematic"
+            companion["media_type"] = "generated_image"
+            companion["motion_spec"] = None
+            companion["motion_preset"] = "slow_push"
+            companion["transition"] = "crossfade"
+            companion["caption"] = f"{source.get('caption', 'Scene')} · context"
+            source_hold = float(source.get("hold_fraction", 1.0))
+            source["hold_fraction"] = source_hold / 2
+            companion["hold_fraction"] = source_hold / 2
+            shots.append(companion)
+            generated_count += 1
+            if generated_count >= 2:
+                break
+
     if generated_count < 2:
         raise ValueError(
             "Storyboard visual variety requires at least two generated story-scene shots; "
             "do not render every segment as cards or diagrams"
         )
     return video_script
-
-
-def research_topic(
-    topic: str,
-    duration_mode: str = "short",
-    language: str = "my-MM",
-    genre: str = "explainer",
-    studio_name: str = "FYF Studio",
-) -> dict[str, Any]:
-    """Research a topic to extract factual focus, narrative hook, and visual concepts.
-
-    Args:
-        topic: The user's input topic or concept in Burmese or English.
-        duration_mode: Target duration mode ("short" for 30-45s, "standard" for 60s).
-        language: Language code ("my-MM" or "en-US").
-        genre: Cinematic genre (e.g. "explainer", "cinematic_documentary", "tech_explainer").
-        studio_name: Name of the studio or channel brand.
-
-    Returns:
-        Structured research dossier containing narrative angles and evidence hooks.
-    """
-    clean_topic = topic.strip()
-    target_aud = (
-        f"Global audience interested in {genre} content by {studio_name}"
-        if language == "en-US"
-        else f"General Burmese social media viewers (youth & working adults) for {studio_name}"
-    )
-    return {
-        "topic": clean_topic,
-        "duration_mode": duration_mode,
-        "language": language,
-        "genre": genre,
-        "studio_name": studio_name,
-        "target_audience": target_aud,
-        "tone": f"Engaging, factual, clear, evidence-first ({genre})",
-        "key_focus": f"Core explanatory breakdown of {clean_topic}",
-        "suggested_segments": 4 if duration_mode in {"short", "micro"} else 6,
-    }
 
 
 def draft_story_segments(

@@ -24,15 +24,28 @@ from typing import Any, Mapping, Sequence
 from backend.job_store import write_json_atomically
 from backend import cancellation
 from backend.render_contract import validate_render_input
+from backend.render_manifest import (
+    build_render_manifest,
+    manifest_document,
+    seal_manifest_document,
+    write_render_manifest,
+)
 from backend.render_video import (
     REMOTION_COMPOSITION_ID,
     REPO_ROOT,
     render_video_segment,
+    resolve_render_config,
 )
 from video_contract import RenderControls
 
 
-CACHE_CONTRACT_VERSION = 1
+CACHE_CONTRACT_VERSION = 2
+"""Bumped for C6/D7: the segment fingerprint payload now covers the resolved
+font inventory and the reduced-motion output flag.  Both change rendered bytes
+without changing anything version 1 hashed, so every version-1 cache entry is
+stale by construction and is rejected instead of trusted.
+"""
+
 SEGMENT_CHECKPOINT_FILENAME = "segment_render_checkpoint.json"
 _SEGMENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
@@ -176,6 +189,8 @@ def segment_render_fingerprint(
     composition_id: str,
     output_settings: Mapping[str, Any] | None = None,
     asset_paths: Sequence[str | Path] = (),
+    fonts: Sequence[str] = (),
+    reduced_motion: bool = False,
 ) -> str:
     """Hash only the inputs that can change one segment's rendered bytes."""
 
@@ -202,6 +217,14 @@ def segment_render_fingerprint(
         }
     render_controls = RenderControls.model_validate(raw_controls).model_dump(mode="json")
 
+    # C6: fonts were NOT part of the version-1 payload, so swapping the declared
+    # typeface reused a stale cached segment.  The resolved inventory (declared
+    # families + shipped font file hashes) is hashed here so a font change
+    # invalidates every segment that could render with it.
+    font_inventory = sorted({str(entry) for entry in fonts})
+    # D7: reduced-motion output suppresses animation, so it is a distinct render.
+    motion_mode = "reduced" if bool(reduced_motion) else "full"
+
     payload = {
         "cache_contract_version": CACHE_CONTRACT_VERSION,
         "segment_id": target_id,
@@ -213,6 +236,8 @@ def segment_render_fingerprint(
         "render_width": render_input.get("width"),
         "render_height": render_input.get("height"),
         "render_controls": render_controls,
+        "fonts": font_inventory,
+        "motion_mode": motion_mode,
         "frame_range": [segment.get("startFrame"), segment.get("endFrame")],
         "segment": segment,
         "mouth_cues": _intersecting_mouth_cues(render_input, segment),
@@ -653,8 +678,13 @@ def _segment_asset_paths(job_dir: Path, render_input: Mapping[str, Any], segment
     for reference in references:
         path = _resolve_asset_reference(job_dir, reference)
         if not path.is_file():
-            if reference in {"fyf-mascot-presenting.png", "fyf-mascot-talking-atlas.png", "fyf-cut-paper-world.png"}:
-                path = (public_root / reference).resolve()
+            public_candidate = (public_root / reference).resolve()
+            try:
+                public_candidate.relative_to(public_root.resolve())
+            except ValueError:
+                public_candidate = path
+            if public_candidate.is_file():
+                path = public_candidate
             else:
                 raise FileNotFoundError(f"referenced segment asset not found: {reference}")
         if path not in seen:
@@ -663,7 +693,19 @@ def _segment_asset_paths(job_dir: Path, render_input: Mapping[str, Any], segment
     return paths
 
 
-def _manifest_fingerprint(results: Sequence[SegmentRenderResult]) -> str:
+def _manifest_fingerprint(
+    results: Sequence[SegmentRenderResult],
+    *,
+    spec: Mapping[str, Any] | None = None,
+) -> str:
+    """Hash the assembled segment set plus the render spec that produced it.
+
+    ``spec`` is optional so existing positional callers keep working.  When the
+    full :class:`backend.projects.models.RenderManifest` payload is supplied it
+    is folded in, making the manifest fingerprint sensitive to font, seed and
+    skill-version changes and not only to segment bytes.
+    """
+
     payload = {
         "cache_contract_version": CACHE_CONTRACT_VERSION,
         "segments": [
@@ -676,6 +718,8 @@ def _manifest_fingerprint(results: Sequence[SegmentRenderResult]) -> str:
             for result in results
         ],
     }
+    if spec:
+        payload["render_spec"] = dict(spec)
     return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
 
 
@@ -820,15 +864,17 @@ def render_segments_and_assemble(job_dir: str) -> RenderAssemblyReport:
     if not isinstance(fps, (int, float)) or isinstance(fps, bool) or fps <= 0:
         raise ValueError("render input fps must be positive")
 
-    renderer_source_hash = _renderer_source_hash()
-    remotion_version = _installed_remotion_version()
-    output_settings = {
-        "codec": "h264",
-        "pixel_format": "yuv420p",
-        "fps": fps,
-        "width": width,
-        "height": height,
-    }
+    # C6: preview and export resolve their render configuration through the same
+    # backend.render_video.resolve_render_config() seam, so the VideoSpec version,
+    # font inventory, renderer identity, output geometry and reduced-motion flag
+    # used to fingerprint segments here are identical to the ones handed to
+    # Remotion during staging.  Neither value is recomputed locally.
+    renderer_config = resolve_render_config(render_input, job_dir=str(root))
+    renderer_source_hash = renderer_config.renderer_source_hash
+    remotion_version = renderer_config.remotion_version
+    output_settings = dict(renderer_config.output_settings)
+    fonts = renderer_config.fonts
+    reduced_motion = renderer_config.reduced_motion
     ordered_specs: list[tuple[str, int, int, str, int]] = []
     seen_ids: set[str] = set()
     for index, segment in enumerate(segments):
@@ -857,8 +903,43 @@ def render_segments_and_assemble(job_dir: str) -> RenderAssemblyReport:
             composition_id=REMOTION_COMPOSITION_ID,
             output_settings=output_settings,
             asset_paths=_segment_asset_paths(root, render_input, segment, index),
+            fonts=fonts,
+            reduced_motion=reduced_motion,
         )
         ordered_specs.append((segment_id, start_frame, end_frame, fingerprint, end_frame - start_frame))
+
+    total_frames = max((spec[2] for spec in ordered_specs), default=0)
+    reproducibility_manifest = build_render_manifest(
+        root,
+        render_input,
+        renderer_version=remotion_version,
+        total_frames=total_frames,
+    )
+    spec_payload = reproducibility_manifest.model_dump(mode="json")
+
+    def persist_manifest(
+        results: Sequence[SegmentRenderResult],
+        fingerprint: str,
+        video_path: Path | None,
+    ) -> None:
+        """Write render_manifest.json next to the assembled output."""
+
+        resolved_video = Path(video_path) if video_path is not None else None
+        sealed = resolved_video is not None and resolved_video.is_file()
+        write_render_manifest(
+            root,
+            seal_manifest_document(manifest_document(
+                reproducibility_manifest,
+                results=results,
+                manifest_fingerprint=fingerprint,
+                renderer_source_hash=renderer_source_hash,
+                composition_id=renderer_config.composition_id,
+                remotion_version=remotion_version,
+                reduced_motion=reduced_motion,
+                video_sha256=_sha256_file(resolved_video) if sealed else None,
+                video_bytes=resolved_video.stat().st_size if sealed else None,
+            )),
+        )
 
     completed: dict[str, SegmentRenderResult] = {}
     cache_hits = 0
@@ -883,7 +964,7 @@ def render_segments_and_assemble(job_dir: str) -> RenderAssemblyReport:
 
     if len(completed) == len(ordered_specs):
         ordered_results = [completed[spec[0]] for spec in ordered_specs]
-        manifest = _manifest_fingerprint(ordered_results)
+        manifest = _manifest_fingerprint(ordered_results, spec=spec_payload)
         checkpoint = _read_checkpoint(root)
         video_path = (root / "video.mp4").resolve()
         if (
@@ -903,6 +984,7 @@ def render_segments_and_assemble(job_dir: str) -> RenderAssemblyReport:
             except (OSError, ValueError):
                 pass
             else:
+                persist_manifest(ordered_results, manifest, video_path)
                 return RenderAssemblyReport(
                     output_path=video_path,
                     total_segments=len(ordered_specs),
@@ -959,7 +1041,7 @@ def render_segments_and_assemble(job_dir: str) -> RenderAssemblyReport:
         raise failures[0]
 
     ordered_results = [completed[spec[0]] for spec in ordered_specs]
-    manifest = _manifest_fingerprint(ordered_results)
+    manifest = _manifest_fingerprint(ordered_results, spec=spec_payload)
     audio_src = render_input.get("audioSrc")
     if not isinstance(audio_src, str) or not audio_src.strip():
         raise ValueError("render input audioSrc must be a non-blank string")
@@ -983,6 +1065,7 @@ def render_segments_and_assemble(job_dir: str) -> RenderAssemblyReport:
         manifest_fingerprint=manifest,
         video_path=output_path,
     )
+    persist_manifest(ordered_results, manifest, output_path)
     return RenderAssemblyReport(
         output_path=output_path,
         total_segments=len(ordered_specs),

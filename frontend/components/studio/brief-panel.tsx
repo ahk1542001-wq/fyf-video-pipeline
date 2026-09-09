@@ -7,21 +7,39 @@ import type { CreateStudioController } from "./use-create-studio";
 
 type BriefPanelProps = {
   studio: CreateStudioController;
+  view?: "source" | "story" | "all";
 };
 
-export default function BriefPanel({ studio }: BriefPanelProps) {
+export default function BriefPanel({ studio, view = "all" }: BriefPanelProps) {
   return (
-    <section className="workspace-panel source-panel" aria-labelledby="source-title">
+    <section className={`workspace-panel source-panel source-panel--${view}`} aria-labelledby="source-title">
       <div className="section-heading">
         <div>
-          <p className="eyebrow">Start here</p>
-          <h2 id="source-title">Source and story</h2>
+          <p className="eyebrow">{view === "story" ? "Choose the direction" : "Start here"}</p>
+          <h2 id="source-title">{view === "story" ? "Story board" : "Source and story"}</h2>
         </div>
-        <span className="step-note" aria-label="Step 1">01</span>
+        <span className="step-note" aria-label={view === "story" ? "Step 2" : "Step 1"}>{view === "story" ? "02" : "01"}</span>
       </div>
 
+      {view === "story" && studio.writingStatus === "writing" && (
+        <div className="canvas-planning-state" role="status" aria-live="polite">
+          <span className="canvas-planning-state__pulse" aria-hidden="true" />
+          <div>
+            <p className="eyebrow">Building your storyboard</p>
+            <h3>Planning scenes and visual evidence</h3>
+            <p>{studio.scriptProgress}</p>
+          </div>
+          <div className="canvas-planning-state__skeleton" aria-hidden="true">
+            <span />
+            <span />
+            <span />
+            <span />
+          </div>
+        </div>
+      )}
+
       {/* Studio Quick Preset Pills */}
-      <div className="studio-presets" role="group" aria-label="Quick Studio Presets" style={{ marginBottom: "1.25rem", padding: "0.75rem 1rem", background: "var(--surface-soft)", border: "1px solid var(--hairline)", borderRadius: "8px" }}>
+      <div className="studio-presets source-only" role="group" aria-label="Quick Studio Presets" style={{ marginBottom: "1.25rem", padding: "0.75rem 1rem", background: "var(--surface-soft)", border: "1px solid var(--hairline)", borderRadius: "8px" }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "0.5rem" }}>
           <span style={{ fontSize: "0.75rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--muted)" }}>
             Quick Studio Presets
@@ -46,18 +64,57 @@ export default function BriefPanel({ studio }: BriefPanelProps) {
         </div>
       </div>
 
-      <div className="field-group">
-        <label htmlFor="topic-source" className="field-label">Topic or draft</label>
+      <div className="field-group source-only">
+        <div className="source-mode-control" role="group" aria-label="Source type">
+          <button
+            type="button"
+            aria-pressed={studio.sourceMode === "full_script"}
+            className={`pill-btn ${studio.sourceMode === "full_script" ? "pill-btn--active" : ""}`}
+            onClick={() => studio.setSourceMode("full_script")}
+          >
+            Full researched script
+          </button>
+          <button
+            type="button"
+            aria-pressed={studio.sourceMode === "brief"}
+            className={`pill-btn ${studio.sourceMode === "brief" ? "pill-btn--active" : ""}`}
+            onClick={() => studio.setSourceMode("brief")}
+          >
+            Brief
+          </button>
+        </div>
+        {studio.sourceMode === "full_script" && (
+          <label className="field-group" htmlFor="video-title">
+            <span className="field-label">Video title</span>
+            <input
+              id="video-title"
+              className="field-control field-control--input"
+              value={studio.videoTitle}
+              onChange={(event) => studio.setVideoTitle(event.target.value)}
+              placeholder="Give this video a working title"
+            />
+          </label>
+        )}
+        <label htmlFor="topic-source" className="field-label">
+          {studio.sourceMode === "full_script" ? "Full script" : "Topic or brief"}
+        </label>
         <textarea
           id="topic-source"
           className="field-control field-control--textarea"
-          placeholder="Paste a draft, an article, or describe the video you want."
+          placeholder={studio.sourceMode === "full_script"
+            ? "Paste the final narration. Separate scenes with a blank line."
+            : "Describe the video you want."}
           value={studio.topic}
           onChange={(event) => studio.setTopic(event.target.value)}
         />
+        {studio.sourceMode === "full_script" && (
+          <p className="field-help">FYF preserves your narration and only plans scenes, visuals, voice, and render.</p>
+        )}
       </div>
 
-      <div className="control-grid">
+      <details className="production-controls source-only">
+        <summary>Production controls <span>Brand, voice, format, and presenter</span></summary>
+        <div className="control-grid">
         <div className="field-group">
           <label htmlFor="studio-name" className="field-label">Studio / Channel Name</label>
           <input
@@ -219,12 +276,13 @@ export default function BriefPanel({ studio }: BriefPanelProps) {
             </span>
           </button>
         </div>
-      </div>
+        </div>
 
-      <BrandKitPanel studio={studio} />
+        <BrandKitPanel studio={studio} />
+      </details>
 
       {!studio.generationReady && (
-        <div className="notice-banner notice-banner--warning" role="status">
+        <div className="notice-banner notice-banner--warning source-only" role="status">
           <p><strong>Generation unavailable:</strong> {studio.runtime.generation_message}</p>
           {studio.runtimeSource === "api" && studio.runtime.generation_access_required && (
             <label className="field-group">
@@ -242,32 +300,14 @@ export default function BriefPanel({ studio }: BriefPanelProps) {
         </div>
       )}
 
-      <div className="action-stack">
-        {!studio.topic.trim() && studio.writingStatus !== "writing" && (
-          <p className="action-hint" role="note">
-            Enter a topic above to enable script generation.
-          </p>
-        )}
-        <button
-          type="button"
-          onClick={studio.generateScript}
-          disabled={studio.writingStatus === "writing" || !studio.topic.trim() || !studio.generationReady}
-          className="button button--primary"
-        >
-          {studio.writingStatus === "writing" ? "Generating script…" : "Generate script"}
-        </button>
-        <button
-          type="button"
-          onClick={studio.polishStory}
-          disabled={studio.writingStatus === "writing" || !studio.topic.trim() || !studio.generationReady}
-          className="button button--secondary"
-        >
-          {studio.writingStatus === "writing" ? "Creating FYF story options…" : "FYF Polish — create 3 story options"}
-        </button>
-      </div>
+      <p className="action-hint source-only" role="note">
+        {studio.sourceMode === "full_script"
+          ? "Separate narration scenes with blank lines. FYF will not research or rewrite them."
+          : "Describe the direction here, then submit it from the Creative Director."}
+      </p>
 
       {studio.writingStatus === "writing" && (
-        <div className="script-status-card" role="status" aria-live="polite" aria-atomic="true">
+        <div className="script-status-card source-only" role="status" aria-live="polite" aria-atomic="true">
           <span className="script-status-card__marker" aria-hidden="true" />
           <div>
             <p className="script-status-card__label">Script workspace</p>
@@ -277,7 +317,7 @@ export default function BriefPanel({ studio }: BriefPanelProps) {
       )}
 
       {studio.writingStatus === "needs_attention" && studio.resumableScriptJobId && (
-        <div className="notice-banner notice-banner--warning" role="alert">
+        <div className="notice-banner notice-banner--warning source-only" role="alert">
           <p><strong>Generation Paused:</strong> Provider encountered a temporary rate limit or timeout. Checkpoint is safely preserved.</p>
           <button
             type="button"
@@ -290,7 +330,7 @@ export default function BriefPanel({ studio }: BriefPanelProps) {
       )}
 
       {studio.variants.length > 0 && (
-        <div className="story-section">
+        <div className="story-section story-only">
           <div className="section-heading section-heading--compact">
             <div>
               <p className="eyebrow">Story</p>
@@ -409,25 +449,6 @@ export default function BriefPanel({ studio }: BriefPanelProps) {
           >
             Approve selected story &amp; lock narration
           </button>
-        </div>
-      )}
-
-      {studio.script && (
-        <div className="render-actions">
-          <button
-            type="button"
-            onClick={studio.generateVideo}
-            disabled={!studio.scriptLocked || !studio.scriptLockId || studio.renderBusy || !studio.generationReady}
-            className="button button--accent"
-          >
-            {studio.renderStatus === "queued" ? "Job queued…"
-              : studio.renderStatus === "visuals" ? "Creating visuals…"
-                : studio.renderStatus === "voice" ? "Generating voice…"
-                  : studio.renderStatus === "rendering" ? "Rendering video…"
-                    : studio.renderStatus === "qa" ? "Checking output…"
-                      : studio.scriptLocked ? "Generate locked video" : "Approve and lock before video"}
-          </button>
-          <p className="helper-text helper-text--center">Script, visual, voice, and render stages are checkpointed and restart-resumable.</p>
         </div>
       )}
 

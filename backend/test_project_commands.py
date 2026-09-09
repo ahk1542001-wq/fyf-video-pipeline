@@ -30,6 +30,8 @@ from backend.projects.models import (
     ProjectCommand,
     ProjectVersion,
     RenderRequestPayload,
+    RenderManifest,
+    OutputMetadata,
     SceneSelection,
     ScriptSegmentsPayload,
     SegmentTimingsPayload,
@@ -334,6 +336,91 @@ def test_denied_approval_does_not_authorize_spend(env):
     )
     with pytest.raises(ApprovalRequiredError):
         apply_command(store, _render_command(1, "render-denied"), budget_root=budget_root)
+
+
+def test_reframe_is_paid_and_requires_approval(env):
+    store, budget_root, _ = env
+    command = ProjectCommand(
+        project_id=PID,
+        base_version=1,
+        actor="bob",
+        operation="reframe_aspect",
+        payload=RenderRequestPayload(
+            estimated_cost_usd=0.25,
+            manifest=RenderManifest(
+                video_spec_version="1",
+                output=OutputMetadata(aspect_ratio="16:9", width=1920, height=1080),
+            ),
+        ),
+        idempotency_key="reframe-16x9",
+    )
+    with pytest.raises(ApprovalRequiredError):
+        apply_command(store, command, budget_root=budget_root)
+    assert store.current_version_no(PID) == 1
+
+
+def test_approved_reframe_updates_manifest_and_script_aspect(env, monkeypatch):
+    store, budget_root, _ = env
+    monkeypatch.setenv("FYF_DAILY_BUDGET_CAP_USD", "3")
+    monkeypatch.setenv("FYF_TOTAL_BUDGET_CAP_USD", "3")
+    record_approval(
+        "reframe_aspect",
+        approved_spend_usd=0.25,
+        decision="approved",
+        actor="approver",
+        target_ref="reframe-16x9",
+        root_dir=budget_root,
+    )
+    command = ProjectCommand(
+        project_id=PID,
+        base_version=1,
+        actor="bob",
+        operation="reframe_aspect",
+        payload=RenderRequestPayload(
+            estimated_cost_usd=0.25,
+            manifest=RenderManifest(
+                video_spec_version="1",
+                output=OutputMetadata(aspect_ratio="16:9", width=1920, height=1080),
+            ),
+        ),
+        idempotency_key="reframe-16x9",
+    )
+    changeset = apply_command(store, command, budget_root=budget_root)
+    version = store.load_version(PID, 2)
+    assert changeset.approval_effects is not None
+    assert changeset.approval_effects.required is True
+    assert version.render_manifest is not None
+    assert version.render_manifest.output.aspect_ratio == "16:9"
+    assert version.script.aspect_ratio == "16:9"
+
+
+def test_duration_reedit_requires_non_spend_story_approval(env):
+    store, budget_root, _ = env
+    command = ProjectCommand(
+        project_id=PID,
+        base_version=1,
+        actor="bob",
+        operation="reedit_duration",
+        payload=ScriptSegmentsPayload(segments=[_segment("s1", "shorter")]),
+        selection=SceneSelection(scene_ids=["s1"]),
+        idempotency_key="duration-15s",
+    )
+    with pytest.raises(ApprovalRequiredError):
+        apply_command(store, command, budget_root=budget_root)
+
+    record_approval(
+        "reedit_duration",
+        approved_spend_usd=0.0,
+        decision="approved",
+        actor="approver",
+        target_ref="duration-15s",
+        root_dir=budget_root,
+    )
+    changeset = apply_command(store, command, budget_root=budget_root)
+    assert changeset.estimated_spend_usd is None
+    assert changeset.approval_effects is not None
+    assert changeset.approval_effects.approved_spend_usd == 0.0
+    assert store.load_version(PID, 2).script.segments[0].text == "shorter"
 
 
 # --- ownership / not-found / restart-resume ---------------------------------

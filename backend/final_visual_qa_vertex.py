@@ -14,7 +14,12 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from video_contract import VideoScript
 from vertex_model_routing import model_for
-from visual_evidence_vertex import DEFAULT_LOCATION, EvidenceVerification, _quota_retry
+from visual_evidence_vertex import (
+    DEFAULT_LOCATION,
+    EvidenceVerification,
+    _read_unverified_fallbacks,
+    _quota_retry,
+)
 from backend.vertex_client import vertex_client_kwargs
 from backend.job_store import write_json_atomically
 from backend.job_store import update_job_status
@@ -512,7 +517,62 @@ def _extract_frame(video_path: Path, seconds: float, output: Path) -> None:
 def verify_final_rendered_meaning(job_dir: str) -> dict:
     """Fail closed unless sampled final frames visibly prove each locked segment claim."""
     root = Path(job_dir)
-    script = VideoScript.model_validate_json((root / "script.json").read_text(encoding="utf-8"))
+    raw_script = json.loads((root / "script.json").read_text(encoding="utf-8"))
+    try:
+        # Read through the same fail-closed sidecar validator used by visual
+        # generation.  An empty, directory, or symlinked registry is damage,
+        # not proof that no unverified fallback exists.
+        fallback_shots = _read_unverified_fallbacks(root / "visuals")
+    except ValueError:
+        return {
+            "passed": False,
+            "status": "invalid_provider_fallback_registry",
+            "provider_status": "not_called",
+            "automated_passed": False,
+            "semantic_verification_status": "unavailable",
+            "failure_codes": ["UNVERIFIED_FALLBACK_REGISTRY_INVALID"],
+            "segments": [],
+        }
+    if fallback_shots:
+        return {
+            "passed": False,
+            "status": "unverified_provider_fallback",
+            "provider_status": "unavailable",
+            "automated_passed": False,
+            "semantic_verification_status": "unverified",
+            "fallback_used": True,
+            "failure_codes": ["UNVERIFIED_DETERMINISTIC_FALLBACK"],
+            "segments": [
+                {
+                    "segment_id": item.get("segment_id"),
+                    "passed": False,
+                    "issues": [
+                        "deterministic visual fallback was not semantically verified by a provider"
+                    ],
+                    "shot_ids": [item.get("shot_id")],
+                }
+                for item in fallback_shots
+            ],
+        }
+    if (root / "render_manifest.json").is_file():
+        from backend.output_qa import audit_output_manifest
+
+        manifest_report = audit_output_manifest(root, require_manifest=True)
+        if not manifest_report.get("passed"):
+            return {
+                "passed": False,
+                "status": "manifest_integrity_failed",
+                "provider_status": "not_called",
+                "automated_passed": False,
+                "failure_codes": list(manifest_report.get("failure_codes") or ["MANIFEST_INTEGRITY_FAILED"]),
+                "manifest_integrity": manifest_report,
+                "segments": [],
+            }
+    script = VideoScript.model_validate({
+        key: value
+        for key, value in raw_script.items()
+        if key in VideoScript.model_fields
+    })
     render_input = json.loads((root / "render_input.json").read_text(encoding="utf-8"))
     timing = {str(segment["id"]): segment for segment in render_input["segments"]}
     expected_segment_ids = [segment.id for segment in script.segments]

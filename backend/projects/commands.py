@@ -30,7 +30,11 @@ exactly one winner (the loser sees the advanced head and is rejected/rebased).
 from __future__ import annotations
 
 import uuid
+import hashlib
+import json
+from contextlib import contextmanager
 from datetime import datetime, timezone
+from dataclasses import dataclass
 from typing import Callable, Optional
 
 from pydantic import ValidationError
@@ -52,6 +56,7 @@ from backend.projects.models import (
     ValidationResult,
     WorkflowEvent,
     operation_is_paid,
+    operation_requires_approval,
 )
 from backend.projects.selection import UnknownSelectionTargetError, resolve_selection
 from backend.projects.store import (
@@ -71,6 +76,11 @@ __all__ = [
     "LockConflictError",
     "ApprovalRequiredError",
     "CommandValidationError",
+    "IdempotencyConflictError",
+    "CommandPreview",
+    "preview_command",
+    "command_touched_scopes",
+    "command_fingerprint",
     "InvalidProjectIdError",
     "utc_now_iso",
 ]
@@ -130,6 +140,17 @@ class CommandValidationError(SpineError):
         )
 
 
+class IdempotencyConflictError(SpineError):
+    """An idempotency key is already bound to a different command."""
+
+    def __init__(self, project_id: str, idempotency_key: str) -> None:
+        self.project_id = project_id
+        self.idempotency_key = idempotency_key
+        super().__init__(
+            f"idempotency key {idempotency_key!r} is already bound to a different command"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -137,8 +158,77 @@ class CommandValidationError(SpineError):
 LockCheckHook = Callable[[Optional[ProjectVersion], ProjectCommand], list[str]]
 
 
+_SCENE_SCOPE_FIELDS: dict[str, str] = {
+    "text": "content",
+    "caption": "content",
+    "visual_action": "visual",
+    "visual": "visual",
+    "duration_seconds": "timing",
+    "voice": "voice",
+}
+
+
+def command_touched_scopes(
+    version: Optional[ProjectVersion], command: ProjectCommand
+) -> list[str]:
+    """Return every scene lock scope changed by ``command`` in stable order.
+
+    Older commands declare one operation scope, while ``edit_scene`` can carry
+    a validated atomic replacement containing fields from more than one scope.
+    Comparing the replacement to the current version keeps lock checks honest
+    when a caller submits a complete segment snapshot rather than a patch.
+    """
+
+    declared = command.effective_scope()
+    scopes: set[str] = {declared} if declared is not None else set()
+    payload = command.payload
+    if payload is None or payload.kind != "script_segments":
+        if command.operation == "edit_timing" and payload is not None:
+            scopes.add("timing")
+        return [scope for scope in ("content", "visual", "timing", "voice") if scope in scopes]
+
+    by_id = {segment.id: segment for segment in version.script.segments} if version else {}
+    for replacement in payload.segments:
+        current = by_id.get(replacement.id)
+        if current is None:
+            # Selection validation reports unknown ids later. Keep the declared
+            # operation scope here so a whole-scope lock still fails closed.
+            continue
+        replacement_values = replacement.model_dump(mode="python", exclude_none=False)
+        # ``exclude_if`` keeps legacy JSON compact when an optional field is
+        # absent, but it must not erase the distinction between an omitted
+        # field and an explicit ``null`` clear for lock checks.  Pydantic keeps
+        # that distinction in ``model_fields_set``.
+        replacement_fields = getattr(replacement, "model_fields_set", set(replacement_values))
+        for field, scope in _SCENE_SCOPE_FIELDS.items():
+            if field in replacement_fields and getattr(replacement, field, None) != getattr(current, field, None):
+                scopes.add(scope)
+    return [scope for scope in ("content", "visual", "timing", "voice") if scope in scopes]
+
+
+@dataclass(frozen=True)
+class CommandPreview:
+    """Validated command effect with no persisted version or event."""
+
+    head_version: int
+    selected_segment_ids: list[str]
+    resulting_version: ProjectVersion
+
+
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def command_fingerprint(command: ProjectCommand) -> str:
+    """Stable digest of the complete validated command identity."""
+
+    payload = json.dumps(
+        command.model_dump(mode="json"),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def default_lock_checker(
@@ -152,10 +242,11 @@ def default_lock_checker(
     """
     if version is None:
         return []
-    scope = command.effective_scope()
-    if scope is None:
-        return []
-    return [scope] if bool(getattr(version.locks, scope, False)) else []
+    return [
+        scope
+        for scope in command_touched_scopes(version, command)
+        if bool(getattr(version.locks, scope, False))
+    ]
 
 
 def _new_event_id() -> str:
@@ -163,16 +254,26 @@ def _new_event_id() -> str:
 
 
 def _match_approval(
-    approvals: dict, command: ProjectCommand, estimated: Optional[float]
+    approvals: dict,
+    command: ProjectCommand,
+    estimated: Optional[float],
+    *,
+    require_positive_spend: bool,
 ) -> Optional[dict]:
     """Find an approved record matching this command's operation + target.
 
-    Convention: an approval's ``target_ref`` equals the command idempotency_key
-    (or the bare project id). The approved spend must cover the estimate; an
-    unknown estimate (None) still requires an explicit approved spend so cost is
-    never treated as 0.
+    Convention: an approval's ``target_ref`` equals the command idempotency_key,
+    the bare project id, or the exact ``{project_id}@v{base_version}`` target.
+    When a project id is persisted on an approval it must match the command;
+    this prevents a key collision in one project from authorizing another.
+    The approved spend must cover the estimate; an unknown estimate (None)
+    still requires an explicit approved spend so cost is never treated as 0.
     """
-    targets = {command.idempotency_key, command.project_id}
+    targets = {
+        command.idempotency_key,
+        command.project_id,
+        f"{command.project_id}@v{command.base_version}",
+    }
     for record in approvals.values():
         if not isinstance(record, dict):
             continue
@@ -182,11 +283,14 @@ def _match_approval(
             continue
         if record.get("target_ref") not in targets:
             continue
+        record_project = record.get("project_id")
+        if record_project is not None and record_project != command.project_id:
+            continue
         approved_spend = record.get("approved_spend_usd")
         if not isinstance(approved_spend, (int, float)):
             return None
         if estimated is None:
-            if approved_spend <= 0:
+            if require_positive_spend and approved_spend <= 0:
                 return None
         elif approved_spend < estimated:
             return None
@@ -243,6 +347,8 @@ def _build_new_version(
     selected_ids: list[str],
     new_version_no: int,
     now: str,
+    *,
+    identity_command: Optional[ProjectCommand] = None,
 ) -> ProjectVersion:
     """Construct + FULLY re-validate the next version. Raises on any invalid edit."""
     data = base.model_dump(mode="json")
@@ -251,25 +357,70 @@ def _build_new_version(
     data["actor"] = command.actor
     data["created_at"] = now
     data["idempotency_key"] = command.idempotency_key
+    # Preserve the caller's submitted identity when an explicit rebase creates
+    # an effective command with a rewritten base_version. Retries must replay
+    # the same request rather than collide merely because the head moved.
+    data["command_fingerprint"] = command_fingerprint(identity_command or command)
     data["applied_operations"] = [command.operation]
     data["source_command_operation"] = command.operation
 
     operation = command.operation
     payload = command.payload
-    if operation in {"edit_script", "edit_visual"}:
+    if operation in {"edit_script", "edit_scene", "edit_visual", "edit_voice", "reedit_duration"}:
+        data["script"]["segments"] = _merged_segment_dicts(base, command, selected_ids)
+    elif operation == "edit_timing" and payload is not None and payload.kind == "script_segments":
         data["script"]["segments"] = _merged_segment_dicts(base, command, selected_ids)
     elif operation == "edit_timing":
         data["segment_timings"] = _merged_timing_dicts(base, command, selected_ids)
     elif operation == "update_surface":
         assert payload is not None and payload.kind == "surface"
         data["surface"] = payload.surface.model_dump(mode="json")
-    elif operation == "request_render":
+    elif operation in {"request_render", "reframe_aspect"}:
         assert payload is not None and payload.kind == "render_request"
+        if operation == "reframe_aspect":
+            if payload.manifest is None or payload.manifest.output.aspect_ratio is None:
+                raise ValueError(
+                    "reframe_aspect requires a manifest with output.aspect_ratio"
+                )
+            data["script"]["aspect_ratio"] = payload.manifest.output.aspect_ratio
         data["render_manifest"] = (
             payload.manifest.model_dump(mode="json") if payload.manifest is not None else None
         )
     else:  # pragma: no cover - operation is a closed Literal
         raise ValueError(f"unsupported operation {operation!r}")
+
+    # A draft edit creates a new semantic head.  Any video/manifest inherited
+    # from the previous head was rendered for different content (or a
+    # different timing/voice contract), so retaining it would let the client
+    # present stale output as the current Ready preview.  Keep the immutable
+    # source version intact and invalidate only the newly-created head; a
+    # subsequent result attachment can add an exact-head asset again.
+    if operation in {
+        "edit_script",
+        "edit_scene",
+        "edit_visual",
+        "edit_voice",
+        "edit_timing",
+        "reedit_duration",
+        "update_surface",
+        "request_render",
+        "reframe_aspect",
+    }:
+        data["asset_references"] = [
+            asset
+            for asset in data.get("asset_references", [])
+            if asset.get("kind") != "video"
+        ]
+    if operation in {
+        "edit_script",
+        "edit_scene",
+        "edit_visual",
+        "edit_voice",
+        "edit_timing",
+        "reedit_duration",
+        "update_surface",
+    }:
+        data["render_manifest"] = None
 
     # Full revalidation: a multi-scene invalid edit raises here, before any write.
     return ProjectVersion.model_validate(data)
@@ -290,6 +441,66 @@ def _rejected_changeset(
         idempotency_key=command.idempotency_key,
         reason="validation_failed",
     )
+
+
+@contextmanager
+def _transaction_if_needed(store: ProjectStore, project_id: str, lock_held: bool):
+    """Use the caller's project lock when proposal approval already holds it."""
+    if lock_held:
+        yield
+    else:
+        with store.transaction(project_id):
+            yield
+
+
+def _preview_command_locked(
+    store: ProjectStore,
+    command: ProjectCommand,
+    *,
+    now_fn: Callable[[], str],
+) -> CommandPreview:
+    """Validate one command against the current head without writing anything."""
+    if not store.project_exists(command.project_id):
+        raise ProjectNotFoundError(f"project {command.project_id} not found")
+    head = store.current_version_no(command.project_id)
+    if head < 1:
+        raise ProjectNotFoundError(f"project {command.project_id} has no versions")
+    if command.base_version != head:
+        raise StaleVersionError(command.project_id, command.base_version, head)
+    base = store.load_version(command.project_id, head)
+    try:
+        selected_ids = resolve_selection(base, command.selection)
+    except UnknownSelectionTargetError as exc:
+        raise CommandValidationError(_rejected_changeset(command, head, [str(exc)])) from exc
+    try:
+        resulting = _build_new_version(base, command, selected_ids, head + 1, now_fn())
+    except (ValidationError, ValueError) as exc:
+        raise CommandValidationError(
+            _rejected_changeset(command, head, [_sanitize_error(exc)])
+        ) from exc
+    return CommandPreview(
+        head_version=head,
+        selected_segment_ids=selected_ids,
+        resulting_version=resulting,
+    )
+
+
+def preview_command(
+    store: ProjectStore,
+    command: ProjectCommand,
+    *,
+    now_fn: Callable[[], str] = utc_now_iso,
+    _lock_held: bool = False,
+) -> CommandPreview:
+    """Return the fully validated effect of ``command`` without committing it.
+
+    This is the validation seam used by chat proposals.  It deliberately skips
+    persisted approvals and lock checks: those are re-checked at approval time
+    while the project transaction is held, so a review card cannot become stale
+    authority merely because it was created earlier.
+    """
+    with _transaction_if_needed(store, command.project_id, _lock_held):
+        return _preview_command_locked(store, command, now_fn=now_fn)
 
 
 # ---------------------------------------------------------------------------
@@ -375,6 +586,7 @@ def apply_command(
     rebase: bool = False,
     budget_root=None,
     now_fn: Callable[[], str] = utc_now_iso,
+    _lock_held: bool = False,
 ) -> ChangeSet:
     """Atomically validate + apply one command; return the resulting ChangeSet.
 
@@ -392,12 +604,21 @@ def apply_command(
         # id raises InvalidProjectIdError, a well-formed-but-absent one is 404.
         raise ProjectNotFoundError(f"project {command.project_id} not found")
 
-    with store.transaction(command.project_id):
+    with _transaction_if_needed(store, command.project_id, _lock_held):
         # 1) Idempotency replay: never a duplicate version/reservation/approval.
         existing = store.find_by_idempotency_key(
             command.project_id, command.idempotency_key
         )
         if existing is not None:
+            fingerprint = command_fingerprint(command)
+            # A replay is valid only for the exact command that originally
+            # committed this idempotency key. Older versions without a stored
+            # fingerprint cannot prove that identity and therefore fail closed.
+            if existing.command_fingerprint != fingerprint:
+                raise IdempotencyConflictError(
+                    command.project_id,
+                    command.idempotency_key,
+                )
             return ChangeSet(
                 project_id=command.project_id,
                 base_version=command.base_version,
@@ -430,37 +651,45 @@ def apply_command(
         if conflicts:
             raise LockConflictError(command.project_id, conflicts)
 
-        # 4) Paid operations require a persisted approval + available budget.
+        # 4) Approval-gated operations require a persisted human decision.
+        # Paid operations additionally require available budget. A duration
+        # re-edit is a zero-spend story decision, not a provider dispatch.
         approval_effects: Optional[ApprovalEffects] = None
         estimated_spend: Optional[float] = None
-        if operation_is_paid(effective.operation):
-            estimated_spend = getattr(effective.payload, "estimated_cost_usd", None)
+        is_paid = operation_is_paid(effective.operation)
+        if operation_requires_approval(effective.operation):
+            estimated_spend = (
+                getattr(effective.payload, "estimated_cost_usd", None) if is_paid else None
+            )
             approvals = read_approvals(root_dir=budget_root)
             if approvals.get("corrupted"):
                 raise ApprovalRequiredError(
                     command.project_id,
                     effective.operation,
                     approvals.get("reason") or "budget ledger unavailable (fail-closed)",
-                    get_budget_status(root_dir=budget_root),
+                    get_budget_status(root_dir=budget_root, project_id=command.project_id),
                 )
             matched = _match_approval(
-                approvals.get("approvals", {}), effective, estimated_spend
+                approvals.get("approvals", {}),
+                effective,
+                estimated_spend,
+                require_positive_spend=is_paid,
             )
             if matched is None:
                 raise ApprovalRequiredError(
                     project_id=command.project_id,
                     operation=effective.operation,
                     reason="no matching approved spend record for this operation",
-                    budget_status=get_budget_status(root_dir=budget_root),
+                    budget_status=get_budget_status(root_dir=budget_root, project_id=command.project_id),
                 )
-            if estimated_spend is not None and not is_budget_available(
-                estimated_spend, root_dir=budget_root
+            if is_paid and estimated_spend is not None and not is_budget_available(
+                estimated_spend, root_dir=budget_root, project_id=command.project_id
             ):
                 raise ApprovalRequiredError(
                     project_id=command.project_id,
                     operation=effective.operation,
                     reason="approved but budget is unavailable/exceeded (fail-closed)",
-                    budget_status=get_budget_status(root_dir=budget_root),
+                    budget_status=get_budget_status(root_dir=budget_root, project_id=command.project_id),
                 )
             approval_effects = ApprovalEffects(
                 required=True,
@@ -483,7 +712,12 @@ def apply_command(
         now = now_fn()
         try:
             new_version = _build_new_version(
-                base_version, effective, selected_ids, new_version_no, now
+                base_version,
+                effective,
+                selected_ids,
+                new_version_no,
+                now,
+                identity_command=command,
             )
         except (ValidationError, ValueError) as exc:
             raise CommandValidationError(
@@ -511,7 +745,7 @@ def apply_command(
         store.append_version(new_version)
         event_type = (
             "render_requested"
-            if effective.operation == "request_render"
+            if effective.operation in {"request_render", "reframe_aspect"}
             else "version_appended"
         )
         store.append_event(
@@ -526,7 +760,7 @@ def apply_command(
                 progress_source="actual",
                 artifact_refs=(
                     [new_version.render_manifest.video_spec_version]
-                    if effective.operation == "request_render"
+                    if effective.operation in {"request_render", "reframe_aspect"}
                     and new_version.render_manifest is not None
                     else []
                 ),

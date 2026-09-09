@@ -4,17 +4,18 @@ import {theme} from "./theme";
 
 export type CallToActionProps = {
   text: string;
+  reducedMotion?: boolean;
 };
 
 /** A deterministic end-card CTA that enters during the final four seconds. */
-export const CallToAction: React.FC<CallToActionProps> = ({text}) => {
+export const CallToAction: React.FC<CallToActionProps> = ({text, reducedMotion = false}) => {
   const frame = useCurrentFrame();
   const {fps, durationInFrames} = useVideoConfig();
   const label = text.trim();
   if (!label) return null;
 
   const entranceFrame = Math.max(0, durationInFrames - fps * 4);
-  const entered = spring({
+  const entered = reducedMotion ? (frame >= entranceFrame ? 1 : 0) : spring({
     frame: frame - entranceFrame,
     fps,
     config: {damping: 16, stiffness: 150, mass: 0.8},

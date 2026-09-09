@@ -16,12 +16,12 @@ import {
   shouldShowCinematicMascot,
 } from "./CinematicVisual";
 import {getFonts, theme} from "./theme";
-import {RenderInput} from "./types";
+import {RenderInput, requireExplicitRenderInput} from "./types";
 import {nonDuplicateStoryLabels} from "./storyLabels";
 import {selectActiveTreatment, shouldShowOverlayLabel} from "./treatmentRouting";
 import {CallToAction} from "./CallToAction";
 import {ProgressBar} from "./ProgressBar";
-import {normalizeRenderControls} from "./renderControls";
+import {normalizeRenderControls, resolveReducedMotion} from "./renderControls";
 import {presenterAllowsMascot} from "./presenterMode";
 import {studioBranding} from "./studioBranding";
 
@@ -139,9 +139,11 @@ const StoryLabel: React.FC<{
 };
 
 export const VisualSystemV3Full: React.FC<V3Input> = (props) => {
+  requireExplicitRenderInput(props);
   const frame = useCurrentFrame();
   const {durationInFrames, fps} = useVideoConfig();
   const renderControls = normalizeRenderControls(props);
+  const reducedMotion = resolveReducedMotion(props);
   const fonts = getFonts(props.language);
   const branding = studioBranding(props.studio_name);
   const mascotAllowed = presenterAllowsMascot(props.presenter_mode);
@@ -204,8 +206,8 @@ export const VisualSystemV3Full: React.FC<V3Input> = (props) => {
         />
       )}
 
-      {renderControls.retention_progress_bar && <ProgressBar position="top" />}
-      {renderControls.cta_text && <CallToAction text={renderControls.cta_text} />}
+      {renderControls.retention_progress_bar && <ProgressBar position="top" reducedMotion={reducedMotion} />}
+      {renderControls.cta_text && <CallToAction text={renderControls.cta_text} reducedMotion={reducedMotion} />}
       <div style={{position: "absolute", right: 64, bottom: 58, zIndex: 40, color: theme.colors.text, fontFamily: fonts.display, textAlign: "right"}}>
         <div style={{fontWeight: 850, fontSize: 26}}>{branding.name}</div>
         <div style={{fontSize: 13, opacity: 0.62}}>{branding.tagline}</div>

@@ -57,9 +57,20 @@ export default function StoryboardPanel({ studio }: StoryboardPanelProps) {
                 <p className="scene-visual" data-testid={`scene-visual-${segment.id}`}>
                   {segment.visual_action}
                 </p>
+                <p className="scene-caption" data-testid={`scene-caption-${segment.id}`}>
+                  {segment.caption || "No caption"}
+                </p>
+                <p className="scene-voice" data-testid={`scene-voice-${segment.id}`}>
+                  {segment.voice || "No voice direction"}
+                </p>
                 <p className="scene-meta">
                   <span>{segment.scene_type}</span>
                   <span>{segment.emotion}</span>
+                  {segment.duration_seconds != null ? (
+                    <span data-testid={`scene-duration-${segment.id}`}>
+                      {segment.duration_seconds}s
+                    </span>
+                  ) : null}
                   {timing ? (
                     <span data-testid={`scene-timing-${segment.id}`}>
                       {timing.start_seconds}–{timing.end_seconds}s

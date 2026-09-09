@@ -203,6 +203,22 @@ def test_named_variant_persists_and_survives_reload(client):
     assert fetched["variant_name"] == "Punchier Hook"
 
 
+def test_named_variant_is_idempotent_when_base_version_is_omitted(client):
+    _create(client)
+    first = client.post(
+        f"/api/projects/{PID}/variants",
+        json={"variant_name": "Punchier Hook", "idempotency_key": "variant-replay"},
+    )
+    replay = client.post(
+        f"/api/projects/{PID}/variants",
+        json={"variant_name": "Punchier Hook", "idempotency_key": "variant-replay"},
+    )
+    assert first.status_code == 200, first.text
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["status"] == "replayed"
+    assert _head_no(client) == 2
+
+
 def test_variant_name_length_is_bounded(client):
     _create(client)
     resp = client.post(f"/api/projects/{PID}/variants", json={"variant_name": "x" * 200})

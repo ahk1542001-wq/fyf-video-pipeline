@@ -21,7 +21,6 @@ from backend.agent.tools import (
     audit_story_quality,
     draft_story_segments,
     plan_visual_shots,
-    research_topic,
 )
 from backend.vertex_client import vertex_client_kwargs
 from vertex_model_routing import model_for
@@ -45,12 +44,14 @@ creating high-impact, cinematic global English vertical videos in the '{genre}' 
 
 Presenter Configuration: {presenter_clause}
 
+Treat the user's supplied text as the source of truth. Do not research, fact-check,
+or add claims that are not present in it.
+
 Follow this production workflow strictly:
-1. Research the user's topic using `research_topic` to extract a compelling narrative hook, clear thesis, and evidence angles tailored for {studio_name}.
-2. Draft punchy English narration segments using `draft_story_segments`, calibrated to natural spoken English pacing (130-150 words per minute) and visual clarity.
-3. Audit the draft narration quality using `audit_story_quality` to ensure optimal segment length, pacing, and spoken flow.
-4. Plan the visual storyboard, cinematic camera directions, and director treatments using `plan_visual_shots` matching the '{genre}' genre.
-5. Return the final locked VideoScript structure with all segments, scenes, and visual directions.
+1. Draft punchy English narration segments using `draft_story_segments`, calibrated to natural spoken English pacing (130-150 words per minute) and visual clarity.
+2. Audit the draft narration quality using `audit_story_quality` to ensure optimal segment length, pacing, and spoken flow.
+3. Plan the visual storyboard, cinematic camera directions, and director treatments using `plan_visual_shots` matching the '{genre}' genre.
+4. Return the final locked VideoScript structure with all segments, scenes, and visual directions.
 """.strip()
 
     presenter_clause = (
@@ -64,12 +65,14 @@ evidence-led Burmese vertical videos.
 
 Presenter Configuration: {presenter_clause}
 
+User ပေးထားသော script ကို source of truth အဖြစ် သတ်မှတ်ပါ။ Research, fact-check
+သို့မဟုတ် script မပါသော claim အသစ်ထည့်ခြင်း မလုပ်ပါနှင့်။
+
 Follow this production workflow strictly:
-1. Research the user's topic using `research_topic` to understand the factual angle and target audience.
-2. Draft the Burmese narration segments using `draft_story_segments`.
-3. Audit the draft narration quality using `audit_story_quality` to ensure Burmese character limits and pacing.
-4. Plan the visual storyboard and director treatments using `plan_visual_shots`.
-5. Return the final locked VideoScript structure with all segments, scenes, and visual directions.
+1. Draft the Burmese narration segments using `draft_story_segments`.
+2. Audit the draft narration quality using `audit_story_quality` to ensure Burmese character limits and pacing.
+3. Plan the visual storyboard and director treatments using `plan_visual_shots`.
+4. Return the final locked VideoScript structure with all segments, scenes, and visual directions.
 """.strip()
 
 
@@ -115,17 +118,6 @@ def create_fyf_producer_agent(
     # optional function arguments, so relying on it to repeat language/genre
     # would silently fall back to Burmese explainer defaults for an English
     # cinema run.
-    def research_topic_for_studio(
-        topic: str, duration_mode: str = "short"
-    ) -> dict[str, Any]:
-        return research_topic(
-            topic,
-            duration_mode=duration_mode,
-            language=language,
-            genre=genre,
-            studio_name=studio_name,
-        )
-
     def draft_story_segments_for_studio(
         topic: str, duration_mode: str = "short"
     ) -> dict[str, Any]:
@@ -150,7 +142,6 @@ def create_fyf_producer_agent(
         )
 
     # Preserve the stable tool names advertised in the producer instruction.
-    research_topic_for_studio.__name__ = "research_topic"
     draft_story_segments_for_studio.__name__ = "draft_story_segments"
     plan_visual_shots_for_studio.__name__ = "plan_visual_shots"
     return Agent(
@@ -159,7 +150,6 @@ def create_fyf_producer_agent(
         model=vertex_model,
         instruction=instruction,
         tools=[
-            research_topic_for_studio,
             draft_story_segments_for_studio,
             audit_story_quality,
             plan_visual_shots_for_studio,

@@ -17,8 +17,18 @@ from backend.job_store import (
     update_job_status,
     write_json_atomically,
 )
+from backend.latency_metrics import record_latency_sample
 from backend.mouth_cues import build_render_input
-from backend.output_qa import qa_job_directory
+from backend.output_qa import (
+    audit_output_manifest,
+    persist_qa_report,
+    qa_job_directory,
+)
+from backend.render_contract import (
+    repair_caption_audio_plan,
+    route_caption_audio_qa,
+    run_caption_audio_qa,
+)
 from backend.visual_artifact_store import (
     claim_artifact,
     fail_artifact,
@@ -42,7 +52,7 @@ from visual_evidence_vertex import (
 )
 from vertex_model_routing import model_for
 from backend.vertex_telemetry import telemetry_scope
-from video_contract import ASPECT_RATIO_DIMENSIONS, RenderControls
+from video_contract import ASPECT_RATIO_DIMENSIONS, RenderControls, VideoScript
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +69,7 @@ _RENDER_RETRYABLE_QA_CODES = {
 RENDER_CHECKPOINT_VERSION = 2
 MAX_FINAL_VISUAL_ATTEMPTS = 3
 MAX_CREATIVE_ATTEMPTS = 2
+MAX_CAPTION_AUDIO_REPAIRS = 1
 REMOTION_SOURCE_ROOT = Path(__file__).resolve().parents[1] / "remotion" / "src"
 
 
@@ -74,15 +85,361 @@ def _visual_model_routes() -> dict[str, str]:
     }
 
 
-def _record_stage_timing(job_dir: Path, stage: str, started_at: float) -> None:
+# D8: which pipeline stage publishes which latency metric.  Stages with no entry
+# still accumulate stage_timings but publish no sample, because a sample without
+# a defined target would be noise rather than measurement.
+_STAGE_LATENCY_METRIC: Dict[str, str] = {
+    "voice": "draft_to_animatic",
+    "animatic": "draft_to_animatic",
+    "render": "final_render",
+}
+
+
+def _mark_stage_cache_state(job_dir: Path, stage: str, warm: bool) -> None:
+    """Record whether a stage is about to run cold or warm (D8 condition tag).
+
+    The cache state is written BEFORE the stage runs so the latency sample taken
+    when it finishes is tagged with the truth rather than guessed at afterwards.
+    """
+
+    status = read_job_status(job_dir)
+    current = status.get("stage_cache_state")
+    states = dict(current) if isinstance(current, dict) else {}
+    states[stage] = "warm" if warm else "cold"
+    update_job_status(job_dir, {"stage_cache_state": states})
+
+
+def _stage_latency_conditions(job_dir: Path) -> Dict[str, Any]:
+    """Scene count, aspect ratio and language for a latency sample's conditions."""
+
+    conditions: Dict[str, Any] = {"scene_count": 0, "aspect_ratio": None, "language": None}
+    for name in ("render_input.json", "script.json"):
+        path = job_dir / name
+        if not path.is_file():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        segments = payload.get("segments")
+        if isinstance(segments, list) and segments:
+            conditions["scene_count"] = len(segments)
+        language = payload.get("language")
+        if isinstance(language, str) and language:
+            conditions["language"] = language
+        controls = payload.get("render_controls")
+        ratio = None
+        if isinstance(controls, dict):
+            ratio = controls.get("aspect_ratio")
+        if not isinstance(ratio, str):
+            ratio = payload.get("aspect_ratio")
+        if isinstance(ratio, str) and ratio:
+            conditions["aspect_ratio"] = ratio
+        if conditions["scene_count"]:
+            break
+    return conditions
+
+
+def _record_stage_timing(
+    job_dir: Path,
+    stage: str,
+    started_at: float,
+    *,
+    job_id: str | None = None,
+    provider_queue_depth: int | None = None,
+) -> None:
     elapsed = max(0.0, time.monotonic() - started_at)
-    current = read_job_status(job_dir).get("stage_timings") or {}
+    status = read_job_status(job_dir)
+    current = status.get("stage_timings") or {}
     timings = dict(current) if isinstance(current, dict) else {}
     previous = timings.get(stage, 0.0)
     if not isinstance(previous, (int, float)) or previous < 0:
         previous = 0.0
     timings[stage] = float(round(previous + elapsed, 3))
     update_job_status(job_dir, {"stage_timings": timings})
+
+    # D8: the same elapsed value is published as a latency SAMPLE tagged with the
+    # conditions it was measured under.  Recording is best-effort by design — a
+    # metrics store problem must never fail a render — but it is logged, never
+    # silently swallowed.
+    metric = _STAGE_LATENCY_METRIC.get(stage)
+    if metric is None:
+        return
+    states = status.get("stage_cache_state")
+    cache_state = states.get(stage) if isinstance(states, dict) else None
+    if cache_state not in ("cold", "warm"):
+        logger.warning(
+            "[%s] stage %s has no recorded cache state; latency sample not published "
+            "rather than published mislabelled",
+            job_id or job_dir.name,
+            stage,
+        )
+        return
+    conditions = _stage_latency_conditions(job_dir)
+    try:
+        record_latency_sample(
+            metric,
+            elapsed,
+            cache_state=cache_state,
+            scene_count=int(conditions["scene_count"]),
+            aspect_ratio=conditions["aspect_ratio"],
+            language=conditions["language"],
+            provider_queue_depth=provider_queue_depth,
+            job_id=job_id or job_dir.name,
+            stage=stage,
+        )
+    except (OSError, ValueError) as exc:
+        logger.warning("[%s] latency sample for %s was not recorded: %s", job_id or job_dir.name, stage, exc)
+
+
+def _write_timed_animatic(job_dir: Path, render_input: Dict[str, Any], *, has_music: bool = False) -> Dict[str, Any]:
+    """D4: persist the voice-timed animatic plan next to the render contract.
+
+    Pure planning over the approved draft plus the measured voice track — no
+    provider call, no cost.  The document itself declares whether its timings
+    were measured from real audio or fell back to text-weight estimates.
+    """
+
+    from voice_service.timed_animatic import build_timed_animatic, write_timed_animatic
+
+    segments = render_input.get("segments") if isinstance(render_input, dict) else None
+    if not isinstance(segments, list) or not segments:
+        # An animatic plan cannot exist without scenes.  Rather than fail the
+        # render for a derived artifact, or invent one, persist an explicit
+        # not-planned marker so the absence is visible and auditable.
+        document = {
+            "status": "not_planned",
+            "reason": "render input carries no segments, so no scene can be timed",
+            "generation_enabled": False,
+        }
+        write_timed_animatic(job_dir, document)
+        return document
+
+    timing_source = render_input.get("segmentTimingSource")
+    try:
+        document = build_timed_animatic(
+            render_input,
+            has_music=has_music,
+            voice_measured=timing_source in {"wav-silence-snap", "single-segment"},
+        )
+    except ValueError as exc:
+        document = {
+            "status": "not_planned",
+            "reason": f"animatic planning rejected the render input: {exc}",
+            "generation_enabled": False,
+        }
+    document.setdefault("status", "planned")
+    write_timed_animatic(job_dir, document)
+    return document
+
+
+def _run_caption_audio_quality(job_dir: Path, render_input: Dict[str, Any]) -> Dict[str, Any] | None:
+    """Run D7 technical/creative lanes against the persisted animatic.
+
+    Legacy test fixtures without scenes do not have a caption contract and are
+    left to the existing deterministic output QA. Production render inputs
+    always carry scenes; for those, a missing/corrupt animatic is a real defect
+    and fails rather than being treated as a pass.
+    """
+
+    segments = render_input.get("segments")
+    if not isinstance(segments, list) or not segments:
+        return None
+
+    def _blocked(code: str, detail: str) -> Dict[str, Any]:
+        report = {
+            "report_version": 1,
+            "status": "blocked",
+            "passed": False,
+            "technical_gate": {
+                "passed": False,
+                "lane": "technical",
+                "checks": [{"id": code, "passed": False, "detail": detail}],
+                "failure_codes": [code],
+            },
+            "creative_gate": {
+                "passed": False,
+                "lane": "creative",
+                "checks": [],
+                "failure_codes": [],
+                "route": "needs_human_review",
+            },
+            "human_acceptance": {
+                "lane": "human_acceptance",
+                "required": False,
+                "pending_ids": [],
+                "statement": (
+                    "human acceptance is a separate decision; nothing in this report "
+                    "approves the work on a human's behalf"
+                ),
+            },
+            "overall": {
+                "passed": False,
+                "technical_passed": False,
+                "creative_passed": False,
+            },
+            "lanes_independent": True,
+            "caption_cues": 0,
+        }
+        write_json_atomically(job_dir / "caption_audio_qa.json", report)
+        return report
+
+    animatic_path = job_dir / "animatic.json"
+    if not animatic_path.is_file():
+        return _blocked("ANIMATIC_MISSING", "Caption/audio QA requires animatic.json")
+    try:
+        animatic = json.loads(animatic_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return _blocked("ANIMATIC_UNREADABLE", f"Caption/audio QA could not read animatic.json: {exc}")
+    if not isinstance(animatic, dict) or animatic.get("status") == "not_planned":
+        return _blocked("ANIMATIC_NOT_PLANNED", "Caption/audio QA requires a planned animatic")
+    qa_input = dict(render_input)
+    mix = animatic.get("mix")
+    if isinstance(mix, dict):
+        qa_input["mix"] = mix
+    cues = animatic.get("captions")
+    try:
+        report = run_caption_audio_qa(
+            qa_input,
+            cues=[dict(cue) for cue in cues if isinstance(cue, dict)]
+            if isinstance(cues, list)
+            else None,
+        )
+    except (TypeError, ValueError, KeyError) as exc:
+        return _blocked("CAPTION_AUDIO_CONTRACT_INVALID", str(exc))
+    write_json_atomically(job_dir / "caption_audio_qa.json", report)
+    return report
+
+
+def _repair_caption_audio_quality(
+    job_dir: Path, render_input: Dict[str, Any], report: Dict[str, Any]
+) -> bool:
+    """Apply one real deterministic caption/audio repair, if it is safe.
+
+    A creative ``repair`` route is not permission to run the same QA against
+    unchanged inputs.  The persisted animatic is the only mutable plan at this
+    stage; when no supported, observable change can be made, return ``False``
+    so the caller escalates to human review without a duplicate report.
+    """
+
+    animatic_path = job_dir / "animatic.json"
+    try:
+        animatic = json.loads(animatic_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(animatic, dict):
+        return False
+    repaired = repair_caption_audio_plan(render_input, animatic, report)
+    if repaired is None or repaired == animatic:
+        return False
+    write_json_atomically(animatic_path, repaired)
+    return True
+
+
+def _caption_audio_plan_fingerprint(job_dir: Path) -> str | None:
+    """Return the persisted animatic identity used to prove a repair changed state."""
+
+    path = job_dir / "animatic.json"
+    try:
+        if not path.is_file() or path.stat().st_size == 0:
+            return None
+        return _sha256_file(path)
+    except OSError:
+        return None
+
+
+def _run_caption_audio_preflight(
+    job_dir: Path,
+    render_input: Dict[str, Any],
+    *,
+    max_repairs: int = MAX_CAPTION_AUDIO_REPAIRS,
+) -> tuple[Dict[str, Any] | None, Dict[str, Any] | None]:
+    """Run and persist caption/audio QA, applying only changed bounded repairs."""
+
+    if isinstance(max_repairs, bool) or not isinstance(max_repairs, int) or max_repairs < 0:
+        raise ValueError("max_repairs must be a non-negative integer")
+    if not isinstance(render_input.get("segments"), list) or not render_input.get("segments"):
+        return None, None
+
+    report: Dict[str, Any] | None = None
+    route: Dict[str, Any] | None = None
+    for caption_attempt in range(1, max_repairs + 2):
+        report = _run_caption_audio_quality(job_dir, render_input)
+        if report is None:
+            break
+        persist_qa_report(
+            job_dir,
+            report,
+            attempt=caption_attempt,
+            report_name="caption_audio_qa",
+        )
+        route = route_caption_audio_qa(
+            report,
+            attempt=caption_attempt - 1,
+            max_repairs=max_repairs,
+        )
+        if route["route"] != "repair":
+            break
+        plan_before = _caption_audio_plan_fingerprint(job_dir)
+        if not _repair_caption_audio_quality(job_dir, render_input, report):
+            route = {
+                **route,
+                "route": "needs_human_review",
+                "reason": "caption_audio_repair_unavailable",
+                "repair_applied": False,
+                "human_acceptance_required": True,
+            }
+            break
+        plan_after = _caption_audio_plan_fingerprint(job_dir)
+        if plan_before is None or plan_after is None or plan_before == plan_after:
+            route = {
+                **route,
+                "route": "needs_human_review",
+                "reason": "caption_audio_repair_noop",
+                "repair_applied": False,
+                "human_acceptance_required": True,
+            }
+            break
+        route = {**route, "repair_applied": True}
+    return report, route
+
+
+def _is_transient_render_failure(error: BaseException) -> bool:
+    """Return whether a segmented-render error is safe to retry/fallback.
+
+    A segmented renderer may fall back only for explicitly transient transport
+    or availability failures.  Contract, manifest, and assembly errors are
+    deterministic defects and must surface to the caller instead of being
+    hidden by a monolithic render.
+    """
+
+    if isinstance(error, (TimeoutError, ConnectionError)):
+        return True
+    if isinstance(error, (ValueError, json.JSONDecodeError)):
+        return False
+    message = str(error).upper()
+    transient_markers = (
+        "TIMEOUT",
+        "TIMED OUT",
+        "TEMPORARY",
+        "TRANSIENT",
+        "UNAVAILABLE",
+        "RESOURCE_EXHAUSTED",
+        "DEADLINE_EXCEEDED",
+        "HTTP 429",
+        "HTTP 500",
+        "HTTP 502",
+        "HTTP 503",
+        "HTTP 504",
+        "STATUS 429",
+        "STATUS 500",
+        "STATUS 502",
+        "STATUS 503",
+        "STATUS 504",
+    )
+    return any(marker in message for marker in transient_markers)
 
 
 def _migrate_best_director_checkpoint(job_dir: Path, artifact_dir: Path) -> None:
@@ -140,6 +497,17 @@ def _prepare_visual_artifact(
     artifacts_root: Path,
 ) -> Dict[str, Any]:
     policy = DirectorPolicy()
+    story_fields = set(VideoScript.model_fields)
+    # Keep the planner boundary free of render-only metadata without forcing a
+    # second validation pass here.  The production request was already
+    # validated, while tests and resume checkpoints may intentionally carry a
+    # minimal pre-planner shape that the planner itself enriches.
+    story_script = {
+        key: value for key, value in script_dict.items() if key in story_fields
+    }
+    render_metadata = {
+        key: value for key, value in script_dict.items() if key not in story_fields
+    }
     persisted_key = read_job_status(job_dir).get("visual_artifact_key")
     if isinstance(persisted_key, str) and persisted_key:
         try:
@@ -171,9 +539,13 @@ def _prepare_visual_artifact(
             artifact_dir = artifacts_root / key
             try:
                 _migrate_best_director_checkpoint(job_dir, artifact_dir)
-                produced = plan_visual_treatments(script_dict, str(artifact_dir), policy)
+                # Visual planning consumes the strict story contract only. Render
+                # controls are job-local output settings and are restored after
+                # the visual evidence stages complete.
+                produced = plan_visual_treatments(story_script, str(artifact_dir), policy)
                 produced = ensure_relationship_modes(produced, str(artifact_dir))
                 produced = generate_and_verify_visual_evidence(produced, str(artifact_dir))
+                produced.update(render_metadata)
                 write_json_atomically(artifact_dir / "script.json", produced)
                 files = ["script.json"]
                 for name in ("director_treatment_checkpoint.json", "visual_evidence_checkpoint.json"):
@@ -375,14 +747,25 @@ def _write_render_checkpoint(
 
 
 def _render_with_configured_strategy(job_dir: Path) -> tuple[Path, Dict[str, Any]]:
-    """Render with the opt-in segment cache, preserving a monolithic fallback."""
+    """Render with the opt-in segment cache and a transient-only fallback.
+
+    Direct callers that predate the persisted render contract are kept
+    compatible with the historical fallback behaviour.  ``run_pipeline``
+    writes ``render_input.json`` before this function is reached, so every
+    production render takes the strict path and deterministic failures cannot
+    be hidden by a monolithic retry.
+    """
     if os.getenv("FYF_SEGMENT_RENDER_ENABLED", "0").strip() == "1":
         try:
             report = render_segments_and_assemble(str(job_dir))
         except Exception as exc:
+            legacy_uncontracted_call = not (job_dir / "render_input.json").is_file()
+            if not _is_transient_render_failure(exc) and not legacy_uncontracted_call:
+                raise
             logger.warning(
-                "Segmented render failed for %s; falling back to monolithic render: %s",
+                "Segmented render failed for %s; falling back to monolithic render%s: %s",
                 job_dir,
+                " (legacy uncontracted call)" if legacy_uncontracted_call else "",
                 exc,
             )
             output_path = Path(render_video_remotion(str(job_dir)))
@@ -645,7 +1028,9 @@ async def run_pipeline(
             audio_path = job_dir / "voice.wav"
             voice_started = time.monotonic()
             try:
-                if _voice_checkpoint_is_usable(job_dir, script_dict, provider):
+                voice_warm = _voice_checkpoint_is_usable(job_dir, script_dict, provider)
+                _mark_stage_cache_state(job_dir, "voice", voice_warm)
+                if voice_warm:
                     logger.info(f"[{job_id}] Reusing checkpointed {provider} voice")
                 else:
                     logger.info(f"[{job_id}] Starting voice generation with {provider}")
@@ -679,15 +1064,48 @@ async def run_pipeline(
             reuse_render_output = _render_checkpoint_is_usable(
                 job_dir, script_dict, audio_path
             )
+            _mark_stage_cache_state(job_dir, "render", bool(reuse_render_output))
             if reuse_render_output:
                 logger.info(f"[{job_id}] Reusing checkpointed render contract")
             else:
                 render_input = build_render_input(script_dict, str(audio_path))
                 write_json_atomically(mouth_cues_path, render_input["mouthCues"])
                 write_json_atomically(render_input_path, render_input)
+                _write_timed_animatic(job_dir, render_input)
                 _write_render_checkpoint(
                     job_dir, script_dict, audio_path, render_progress=render_progress
                 )
+
+            try:
+                render_input = json.loads(render_input_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise RuntimeError("Render input contract is missing or unreadable") from exc
+            if not isinstance(render_input, dict):
+                raise RuntimeError("Render input contract must be an object")
+
+            # D7 caption/audio QA is deterministic preflight. Run it before the
+            # first expensive render and persist every bounded re-check.
+            caption_audio_report, caption_audio_route = _run_caption_audio_preflight(
+                job_dir,
+                render_input,
+                max_repairs=MAX_CAPTION_AUDIO_REPAIRS,
+            )
+            if isinstance(render_input.get("segments"), list) and render_input.get("segments"):
+                if caption_audio_route and caption_audio_route["route"] == "blocked":
+                    failures = caption_audio_route.get("failure_codes") or []
+                    raise RuntimeError(
+                        "Caption/audio technical QA failed: "
+                        + ",".join(str(item) for item in failures)
+                    )
+                if caption_audio_route and caption_audio_route["route"] == "needs_human_review":
+                    update_job_status(job_dir, {
+                        "status": "needs_human_review",
+                        "video_url": None,
+                        "restart_resumable": False,
+                    })
+                    return
+
+            qa_attempt_number = 0
 
             for semantic_attempt in range(1, MAX_FINAL_VISUAL_ATTEMPTS + 1):
                 update_job_status(job_dir, {"status": "rendering"})
@@ -722,7 +1140,12 @@ async def run_pipeline(
                 logger.info(f"[{job_id}] Running deterministic output QA")
                 qa_started = time.monotonic()
                 qa_report = await asyncio.to_thread(qa_job_directory, str(job_dir))
+                qa_attempt_number += 1
                 qa_report["attempts"] = 1
+                # Persist the first report before deciding whether a bounded
+                # renderer retry is warranted.  A retry must not erase the
+                # evidence for the failed attempt.
+                persist_qa_report(job_dir, qa_report, attempt=qa_attempt_number)
                 failure_codes = set(qa_report.get("failure_codes", []))
                 if failure_codes and failure_codes.issubset(_RENDER_RETRYABLE_QA_CODES):
                     logger.warning(f"[{job_id}] Retrying render after QA failure: {sorted(failure_codes)}")
@@ -738,17 +1161,43 @@ async def run_pipeline(
                     )
                     update_job_status(job_dir, {"status": "qa"})
                     qa_report = await asyncio.to_thread(qa_job_directory, str(job_dir))
+                    qa_attempt_number += 1
                     qa_report["attempts"] = 2
-                write_json_atomically(job_dir / "qa_report.json", qa_report)
+                    persist_qa_report(job_dir, qa_report, attempt=qa_attempt_number)
                 if not qa_report.get("passed"):
                     failure_codes = qa_report.get("failure_codes", [])
                     raise RuntimeError(f"Output QA failed: {','.join(failure_codes)}")
+
+                # A production render input must carry a verified reproducibility
+                # manifest. Missing/mismatched manifests are deterministic
+                # integrity failures, never a renderer fallback condition.
+                manifest_report = audit_output_manifest(
+                    job_dir,
+                    require_manifest=bool(render_input.get("segments")),
+                )
+                if not manifest_report.get("passed"):
+                    qa_report["manifest_integrity"] = manifest_report
+                    qa_report.setdefault("failure_codes", []).extend(
+                        code for code in manifest_report.get("failure_codes", [])
+                        if code not in qa_report.get("failure_codes", [])
+                    )
+                    qa_report["passed"] = False
+                    persist_qa_report(job_dir, qa_report, attempt=qa_attempt_number)
+                    raise RuntimeError(
+                        "Output QA failed: "
+                        + ",".join(str(item) for item in qa_report.get("failure_codes", []))
+                    )
 
                 logger.info(f"[{job_id}] Running Vertex final rendered-meaning QA")
                 final_visual_report = await asyncio.to_thread(
                     verify_final_rendered_meaning, str(job_dir)
                 )
-                write_json_atomically(job_dir / "final_visual_qa.json", final_visual_report)
+                persist_qa_report(
+                    job_dir,
+                    final_visual_report,
+                    attempt=semantic_attempt,
+                    report_name="final_visual_qa",
+                )
                 _record_stage_timing(job_dir, "qa", qa_started)
                 if final_visual_report.get("passed"):
                     break
@@ -761,10 +1210,6 @@ async def run_pipeline(
                     raise RuntimeError("Final rendered visual meaning QA failed: " + "; ".join(failed))
 
                 logger.info(f"[{job_id}] Dynamically repairing failed scenes for semantic retry")
-                write_json_atomically(
-                    job_dir / f"final_visual_qa.attempt-{semantic_attempt}.json",
-                    final_visual_report,
-                )
                 out_path.replace(job_dir / f"rejected-video.attempt-{semantic_attempt}.mp4")
                 script_dict = await asyncio.to_thread(
                     repair_final_visual_failures, script_dict, final_visual_report, str(job_dir)
@@ -776,6 +1221,7 @@ async def run_pipeline(
                 render_input = build_render_input(script_dict, str(audio_path))
                 write_json_atomically(mouth_cues_path, render_input["mouthCues"])
                 write_json_atomically(render_input_path, render_input)
+                _write_timed_animatic(job_dir, render_input)
                 _write_render_checkpoint(
                     job_dir, script_dict, audio_path, render_progress=render_progress
                 )
@@ -789,15 +1235,16 @@ async def run_pipeline(
                 qa_started = time.monotonic()
                 creative_report = await asyncio.to_thread(audit_creative_quality, render_input)
                 _record_stage_timing(job_dir, "qa", qa_started)
-                write_json_atomically(job_dir / "creative_qa.json", creative_report)
+                persist_qa_report(
+                    job_dir,
+                    creative_report,
+                    attempt=creative_attempt,
+                    report_name="creative_qa",
+                )
                 update_job_status(job_dir, {"status": "creative_qa", "creative_qa": creative_report})
                 if creative_report.get("passed"):
                     break
 
-                write_json_atomically(
-                    job_dir / f"creative_qa.attempt-{creative_attempt}.json",
-                    creative_report,
-                )
                 rendered = job_dir / "video.mp4"
                 if rendered.is_file():
                     rendered.replace(job_dir / f"rejected-creative.attempt-{creative_attempt}.mp4")
@@ -819,6 +1266,7 @@ async def run_pipeline(
                 render_input = build_render_input(script_dict, str(audio_path))
                 write_json_atomically(mouth_cues_path, render_input["mouthCues"])
                 write_json_atomically(render_input_path, render_input)
+                _write_timed_animatic(job_dir, render_input)
                 _write_render_checkpoint(job_dir, script_dict, audio_path)
 
                 update_job_status(job_dir, {"status": "rendering"})
@@ -834,13 +1282,35 @@ async def run_pipeline(
                 update_job_status(job_dir, {"status": "qa"})
                 qa_report = await asyncio.to_thread(qa_job_directory, str(job_dir))
                 qa_report["attempts"] = 1
-                write_json_atomically(job_dir / "qa_report.json", qa_report)
+                qa_attempt_number += 1
+                persist_qa_report(job_dir, qa_report, attempt=qa_attempt_number)
                 if not qa_report.get("passed"):
                     raise RuntimeError(f"Output QA failed: {','.join(qa_report.get('failure_codes', []))}")
+                manifest_report = audit_output_manifest(
+                    job_dir,
+                    require_manifest=bool(render_input.get("segments")),
+                )
+                if not manifest_report.get("passed"):
+                    qa_report["manifest_integrity"] = manifest_report
+                    qa_report.setdefault("failure_codes", []).extend(
+                        code for code in manifest_report.get("failure_codes", [])
+                        if code not in qa_report.get("failure_codes", [])
+                    )
+                    qa_report["passed"] = False
+                    persist_qa_report(job_dir, qa_report, attempt=qa_attempt_number)
+                    raise RuntimeError(
+                        "Output QA failed: "
+                        + ",".join(str(item) for item in qa_report.get("failure_codes", []))
+                    )
                 final_visual_report = await asyncio.to_thread(
                     verify_final_rendered_meaning, str(job_dir)
                 )
-                write_json_atomically(job_dir / "final_visual_qa.json", final_visual_report)
+                persist_qa_report(
+                    job_dir,
+                    final_visual_report,
+                    attempt=semantic_attempt,
+                    report_name="final_visual_qa",
+                )
                 if not final_visual_report.get("passed"):
                     raise RuntimeError("Final rendered visual meaning QA failed after creative repair")
 
@@ -859,6 +1329,8 @@ async def run_pipeline(
         safe_error = "An internal error occurred during video generation."
         if str(e).startswith("Output QA failed:"):
             safe_error = str(e)
+        if str(e).startswith("Caption/audio technical QA failed:"):
+            safe_error = str(e)
         if str(e).startswith("Final rendered visual meaning QA failed:"):
             safe_error = str(e)
         try:
@@ -874,7 +1346,9 @@ async def run_pipeline(
                 attempt_number = int(locals().get("semantic_attempt", 1))
                 rendered.replace(job_dir / f"rejected-video.attempt-{attempt_number}.mp4")
             deterministic_qa_failed = (
-                "qa_report" in locals() and not qa_report.get("passed")
+                ("qa_report" in locals() and not qa_report.get("passed"))
+                or str(e).startswith("Caption/audio technical QA failed:")
+                or str(e).startswith("Render input contract")
             )
             failure_update = {
                 "status": "failed",

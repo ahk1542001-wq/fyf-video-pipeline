@@ -23,7 +23,7 @@ import { SemanticVisual } from "./SemanticVisual";
 import { TypedVisual } from "./TypedVisual";
 import { CallToAction } from "./CallToAction";
 import { ProgressBar } from "./ProgressBar";
-import { normalizeRenderControls } from "./renderControls";
+import { normalizeRenderControls, resolveReducedMotion } from "./renderControls";
 import { studioBranding } from "./studioBranding";
 import {
   CinematicVisual,
@@ -36,6 +36,7 @@ export const VideoPipeline: React.FC<RenderInput> = (props) => {
   const { durationInFrames, fps } = useVideoConfig();
   const { title, segments, audioSrc, mouthCues } = props;
   const renderControls = normalizeRenderControls(props);
+  const reducedMotion = resolveReducedMotion(props);
   const fonts = getFonts(props.language);
   const branding = studioBranding(props.studio_name);
   const isEnglish = props.language === "en-US" || props.language === "en";
@@ -78,7 +79,7 @@ export const VideoPipeline: React.FC<RenderInput> = (props) => {
       )}
 
       {/* Layer 2: content */}
-      {renderControls.retention_progress_bar && <ProgressBar position="top" />}
+      {renderControls.retention_progress_bar && <ProgressBar position="top" reducedMotion={reducedMotion} />}
 
       {/* Scene badge */}
       {!cinematic && <div style={{ position: "absolute", top: 150, left: 80, zIndex: 20 }}>
@@ -233,7 +234,7 @@ export const VideoPipeline: React.FC<RenderInput> = (props) => {
         />
       </div>
 
-      {renderControls.cta_text && <CallToAction text={renderControls.cta_text} />}
+      {renderControls.cta_text && <CallToAction text={renderControls.cta_text} reducedMotion={reducedMotion} />}
 
       {/* Layer 4: color grade (subtle warm tint) */}
       <div

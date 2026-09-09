@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Mapping
 
 try:
     from backend.render_contract import validate_render_input
@@ -21,10 +21,92 @@ REMOTION_COMPOSITION_ID = "VisualSystemV3Full"
 
 
 @dataclass(frozen=True)
+class RenderConfig:
+    """The single render configuration shared by preview and export (C6).
+
+    Preview (:func:`render_video_remotion`) and export
+    (:func:`render_video_segment`) both flow through
+    :func:`_stage_render_inputs`, which resolves this object exactly once.  That
+    is the parity guarantee: the two modes cannot disagree about the VideoSpec
+    version, the font inventory, the renderer identity, the output geometry or
+    the reduced-motion flag, because neither mode is allowed to resolve them
+    itself.
+    """
+
+    composition_id: str
+    remotion_version: str
+    renderer_source_hash: str
+    video_spec_version: str
+    fonts: tuple[str, ...]
+    reduced_motion: bool
+    output_settings: dict[str, Any]
+    language: str | None = None
+
+
+def resolve_reduced_motion(render_input: Mapping[str, Any]) -> bool:
+    """Read the D7 reduced-motion flag from the TOP LEVEL of the render input.
+
+    The flag is deliberately NOT accepted inside ``render_controls``: that object
+    is validated by ``video_contract.RenderControls`` with ``extra="forbid"`` and
+    cannot grow a field.  This mirrors ``resolveReducedMotion()`` in
+    ``remotion/src/renderControls.ts``, which also reads only the top-level prop,
+    so the Python and TypeScript sides cannot disagree.
+    """
+
+    value = render_input.get("reduced_motion")
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    raise ValueError("reduced_motion must be a boolean")
+
+
+def resolve_render_config(
+    render_input: Mapping[str, Any], *, job_dir: str | None = None
+) -> RenderConfig:
+    """Resolve the identical render configuration for every render mode."""
+
+    from backend.render_manifest import resolve_font_inventory, video_spec_version
+    from backend.segment_render_cache import (
+        _installed_remotion_version,
+        _renderer_source_hash,
+    )
+
+    # A missing/invalid fps falls back to the pipeline's 30fps contract rather
+    # than raising here: validate_render_input() already owns strict rejection,
+    # and preview staging must not fail on inputs it is not responsible for.
+    raw_fps = render_input.get("fps")
+    if isinstance(raw_fps, (int, float)) and not isinstance(raw_fps, bool) and raw_fps > 0:
+        fps: float = raw_fps
+    else:
+        fps = 30
+    width = int(render_input.get("width") or 1080)
+    height = int(render_input.get("height") or 1920)
+    language = render_input.get("language")
+    return RenderConfig(
+        composition_id=REMOTION_COMPOSITION_ID,
+        remotion_version=_installed_remotion_version(),
+        renderer_source_hash=_renderer_source_hash(),
+        video_spec_version=video_spec_version(),
+        fonts=tuple(resolve_font_inventory(language if isinstance(language, str) else None)),
+        reduced_motion=resolve_reduced_motion(render_input),
+        output_settings={
+            "codec": "h264",
+            "pixel_format": "yuv420p",
+            "fps": fps,
+            "width": width,
+            "height": height,
+        },
+        language=language if isinstance(language, str) else None,
+    )
+
+
+@dataclass(frozen=True)
 class _RenderStaging:
     public_dir: str
     props_path: str
     render_input: dict[str, Any]
+    config: RenderConfig | None = None
 
 
 def _render_timeout() -> int:
@@ -173,11 +255,17 @@ def _stage_render_inputs(job_dir: str) -> Iterator[_RenderStaging]:
                     os.makedirs(os.path.dirname(destination), exist_ok=True)
                     shutil.copy2(source, destination)
 
-        # Root.tsx registers demo defaultProps (sampleInput). Remotion merges
-        # composition defaults with --props, so without explicit empty keys the
-        # demo v3SceneAssets leak into non-preset renders and 404 during render.
+        # Keep optional asset arrays explicit in the persisted render contract.
+        # Production compositions have no demo defaults and accept only injected
+        # props, so these values can never inherit a preview fixture.
         render_input.setdefault("v3SceneAssets", [])
         render_input.setdefault("v3MascotSegments", [])
+
+        # C6/D7 parity seam: resolve the render configuration ONCE, here, so the
+        # preview path and the segment/export path hand Remotion the identical
+        # VideoSpec, fonts, renderer identity and motion mode.
+        config = resolve_render_config(render_input, job_dir=job_dir)
+        render_input["reduced_motion"] = config.reduced_motion
 
         props_path = os.path.join(temp_dir, "props.json")
         with open(props_path, "w", encoding="utf-8") as handle:
@@ -187,6 +275,7 @@ def _stage_render_inputs(job_dir: str) -> Iterator[_RenderStaging]:
             public_dir=public_dir,
             props_path=props_path,
             render_input=render_input,
+            config=config,
         )
 
 
@@ -234,9 +323,53 @@ def render_video_remotion(job_dir: str) -> str:
     job_dir = os.path.abspath(job_dir)
     output_mp4 = os.path.join(job_dir, "video.mp4")
     with _stage_render_inputs(job_dir) as staging:
-        _run_remotion(staging, output_mp4)
-    if not os.path.isfile(output_mp4) or os.path.getsize(output_mp4) == 0:
-        raise RuntimeError("Remotion render produced empty or missing output")
+        _run_remotion(
+            staging,
+            output_mp4,
+            extra_args=[
+                "--codec=h264",
+                "--pixel-format=yuv420p",
+                "--color-space=bt709",
+            ],
+        )
+        if not os.path.isfile(output_mp4) or os.path.getsize(output_mp4) == 0:
+            raise RuntimeError("Remotion render produced empty or missing output")
+
+        # The staged props are the authority for the monolithic render.  Seal a
+        # manifest only after Remotion has produced a non-empty output so export
+        # can never treat an unverified/partial file as canonical.
+        from backend.render_manifest import (
+            _sha256_file,
+            build_render_manifest,
+            manifest_document,
+            seal_manifest_document,
+            write_render_manifest,
+        )
+
+        config = staging.config
+        if config is None:  # defensive guard for custom staging implementations
+            raise RuntimeError("render staging did not resolve a canonical config")
+        total_frames = staging.render_input.get("durationInFrames")
+        if not isinstance(total_frames, int) or isinstance(total_frames, bool):
+            total_frames = None
+        manifest = build_render_manifest(
+            job_dir,
+            staging.render_input,
+            renderer_version=config.remotion_version,
+            total_frames=total_frames,
+        )
+        document = manifest_document(
+            manifest,
+            results=[],
+            manifest_fingerprint="0" * 64,
+            renderer_source_hash=config.renderer_source_hash,
+            composition_id=config.composition_id,
+            remotion_version=config.remotion_version,
+            reduced_motion=config.reduced_motion,
+            video_sha256=_sha256_file(Path(output_mp4)),
+            video_bytes=os.path.getsize(output_mp4),
+        )
+        write_render_manifest(job_dir, seal_manifest_document(document))
     return output_mp4
 
 

@@ -234,6 +234,19 @@ def _burmese_or_amplitude_cues(
         return generate_amplitude_mouth_cues(wav_path), "amplitude-fallback"
 
 
+def _language_aware_fallback_cues(
+    script_data: dict[str, Any],
+    wav_path: str | Path,
+    timed_segments: list[dict[str, Any]],
+    *,
+    fps: int,
+) -> tuple[list[dict[str, Any]], str]:
+    language = str(script_data.get("language") or "my-MM").strip().lower()
+    if language.startswith("my"):
+        return _burmese_or_amplitude_cues(wav_path, timed_segments, fps=fps)
+    return generate_amplitude_mouth_cues(wav_path), "amplitude-fallback"
+
+
 def generate_rhubarb_mouth_cues(
     wav_path: str | Path,
     dialog_text: str | None = None,
@@ -521,12 +534,12 @@ def build_render_input(
             mouth_cues = generate_rhubarb_mouth_cues(wav_path, dialog_text=dialog_text, rhubarb_bin=bin_path, timeout_seconds=timeout)
             mouth_cue_source = "rhubarb-phonetic"
         except (ValueError, OSError, subprocess.SubprocessError):
-            mouth_cues, mouth_cue_source = _burmese_or_amplitude_cues(
-                wav_path, timed_segments, fps=fps
+            mouth_cues, mouth_cue_source = _language_aware_fallback_cues(
+                script_data, wav_path, timed_segments, fps=fps
             )
     else:
-        mouth_cues, mouth_cue_source = _burmese_or_amplitude_cues(
-            wav_path, timed_segments, fps=fps
+        mouth_cues, mouth_cue_source = _language_aware_fallback_cues(
+            script_data, wav_path, timed_segments, fps=fps
         )
 
     render_metadata = {

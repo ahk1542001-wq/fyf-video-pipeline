@@ -172,7 +172,6 @@ class FailClosedCeilingTests(unittest.TestCase):
                 self.assertIsNone(status["total_cap_usd"])
                 self.assertIsNone(status["remaining_usd"])
 
-                # Paid reservation is refused with the honest reason.
                 ok, reason = reserve_budget("op_x", 0.05, root_dir=root)
                 self.assertFalse(ok)
                 self.assertEqual(reason, REASON_CEILING_UNCONFIGURED)

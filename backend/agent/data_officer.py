@@ -100,10 +100,13 @@ def create_data_officer_agent(
         )
     )
 
-    resolved_model = model_name or model_for("script")
+    from backend.vertex_client import vertex_client_kwargs
+
+    resolved_model = model_name or os.getenv("FYF_DATA_OFFICER_MODEL") or "gemini-2.5-flash"
+    client_kwargs = vertex_client_kwargs(location=os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1"))
     agent = LlmAgent(
         name="fyf_data_officer",
-        model=Gemini(model=resolved_model),
+        model=Gemini(model=resolved_model, client_kwargs=client_kwargs),
         instruction=DATA_OFFICER_INSTRUCTION,
         tools=[toolset],
     )

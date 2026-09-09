@@ -411,6 +411,24 @@ class VisualEvidenceVertexTests(unittest.TestCase):
             self.assertEqual(shot["asset_path"], "job-visuals/s1-count.png")
             self.assertEqual((Path(temp_dir) / "visuals" / "s1-count.png").read_bytes(), b"png")
 
+    def test_empty_image_response_retries_on_quality_route(self):
+        client = MagicMock()
+        client.models.generate_content.side_effect = [
+            SimpleNamespace(candidates=[]),
+            self.image_response(),
+            SimpleNamespace(text='{"passed":true,"proved_claim_ids":["c1"],"observed_values":["5"],"issues":[]}'),
+        ]
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch(
+            "visual_evidence_vertex._client", return_value=client
+        ):
+            result = generate_and_verify_visual_evidence(script_fixture(), temp_dir)
+            self.assertEqual((Path(temp_dir) / "visuals" / "s1-count.png").read_bytes(), b"png")
+
+        shot = result["segments"][0]["visual"]["evidence_shots"][0]
+        self.assertEqual(client.models.generate_content.call_count, 3)
+        self.assertEqual(shot["verification_status"], "passed")
+
     def test_transient_image_generation_uses_deterministic_motion_fallback(self):
         client = MagicMock()
         client.models.generate_content.side_effect = ClientError(

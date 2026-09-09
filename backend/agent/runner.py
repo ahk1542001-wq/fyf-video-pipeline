@@ -92,7 +92,6 @@ def run_adk_pipeline(
     )
 
     collected_artifacts: dict[str, Any] = {
-        "research": None,
         "draft": None,
         "audit": None,
         "script": None,
@@ -158,8 +157,6 @@ def run_adk_pipeline(
                                     collected_artifacts["script"] = resp_data
                                 else:
                                     collected_artifacts["draft"] = resp_data
-                            elif "target_audience" in resp_data or "suggested_segments" in resp_data:
-                                collected_artifacts["research"] = resp_data
                             elif "passed" in resp_data and "issues" in resp_data:
                                 collected_artifacts["audit"] = resp_data
             except Exception:
@@ -210,8 +207,6 @@ def run_adk_pipeline(
     }
     validated = VideoScript.model_validate(script_data).model_dump(mode="json")
     if job_dir:
-        if collected_artifacts.get("research"):
-            write_json_atomically(job_dir / "research.json", collected_artifacts["research"])
         if collected_artifacts.get("draft"):
             write_json_atomically(job_dir / "narration.json", collected_artifacts["draft"])
         if collected_artifacts.get("audit"):
@@ -222,7 +217,6 @@ def run_adk_pipeline(
         "script": validated,
         "draft": collected_artifacts.get("draft") or {},
         "audit": collected_artifacts.get("audit") or {"passed": True},
-        "research": collected_artifacts.get("research") or {},
         "agent_name": producer_agent.name,
         "events_count": len(events),
     }

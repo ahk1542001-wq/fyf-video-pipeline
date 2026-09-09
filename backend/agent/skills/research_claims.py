@@ -3,7 +3,7 @@
 WRAPS (import/read only, never edited or re-implemented):
     * ``writer_agent_vertex._extract_complete_evidence_claims`` — claim extraction
     * ``visual_evidence_vertex.ensure_relationship_modes`` — relation-mode resolver
-    * ``backend.agent.tools.research_topic`` / ``plan_visual_shots`` — ADK tools
+    * ``backend.agent.tools.plan_visual_shots`` — ADK visual-planning tool
     * ``video_contract.{VideoScript, EvidenceClaim, EvidenceClaimsResponse}``
 
 This skill is the *evidence* boundary: for every narration segment it derives
@@ -35,11 +35,6 @@ INPUT_SCHEMA: tuple[type, ...] = (VideoScript,)
 OUTPUT_SCHEMA: tuple[type, ...] = (EvidenceClaimsResponse,)
 
 ALLOWED_TOOLS: tuple[ToolRef, ...] = (
-    ToolRef(
-        module="backend.agent.tools",
-        name="research_topic",
-        role="Source of the factual focus / evidence angles that seed claims.",
-    ),
     ToolRef(
         module="backend.agent.tools",
         name="plan_visual_shots",

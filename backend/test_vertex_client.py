@@ -102,6 +102,32 @@ class TestVertexClient(unittest.TestCase):
             "credentials": credentials,
         })
 
+    def test_local_service_account_can_be_skipped_to_use_application_default_credentials(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            credential_file = Path(temp_dir) / "gcp-key.json"
+            credential_file.write_text("{}", encoding="utf-8")
+            with patch.dict(
+                os.environ,
+                {
+                    "FYF_USE_LOCAL_GCP_KEY": "false",
+                    "GOOGLE_CLOUD_PROJECT": "project-a",
+                },
+                clear=True,
+            ), patch(
+                "backend.vertex_client.service_account.Credentials.from_service_account_file",
+            ) as load_credentials:
+                kwargs = vertex_client_kwargs(
+                    location="global",
+                    credential_file=credential_file,
+                )
+
+        load_credentials.assert_not_called()
+        self.assertEqual(kwargs, {
+            "vertexai": True,
+            "project": "project-a",
+            "location": "global",
+        })
+
 
 if __name__ == "__main__":
     unittest.main()
