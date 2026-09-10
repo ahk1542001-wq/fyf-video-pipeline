@@ -1293,9 +1293,26 @@ def generate_and_verify_visual_evidence(script_data: dict, job_dir: str) -> dict
                 try:
                     _validate_motion_spec(required, shot)
                 except ValueError as exc:
-                    raise ValueError(
-                        f"Motion graphic for segment={segment['id']} shot={shot['shot_id']} {exc}"
-                    ) from exc
+                    if "does not visibly encode claim values" not in str(exc):
+                        raise ValueError(
+                            f"Motion graphic for segment={segment['id']} "
+                            f"shot={shot['shot_id']} {exc}"
+                        ) from exc
+                    logger.warning(
+                        "Replacing incomplete planned motion graphic for %s/%s: %s",
+                        segment["id"],
+                        shot["shot_id"],
+                        exc,
+                    )
+                    _deterministic_motion_graphic_fallback(
+                        required, shot, language=language
+                    )
+                    _validate_motion_spec(required, shot)
+                    _record_unverified_fallback(
+                        asset_dir, segment["id"], shot["shot_id"]
+                    )
+                    _write_checkpoint(checkpoint, fingerprint, script)
+                    continue
                 semantic_verified = False
                 try:
                     _verify_motion_spec_semantics(client, required, shot, language=language)

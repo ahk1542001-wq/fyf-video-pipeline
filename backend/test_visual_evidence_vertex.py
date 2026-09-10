@@ -10,7 +10,7 @@ from google.genai.errors import ClientError
 from video_contract import VideoScript
 from visual_evidence_vertex import (
     _client, _enforce_attention_reset_cadence, _input_fingerprint, _plan_final_visual_repair, _quota_retry,
-    _verification_prompt, _verify_motion_spec_semantics,
+    _passed_shot_is_usable, _verification_prompt, _verify_motion_spec_semantics,
     generate_and_verify_visual_evidence,
     repair_creative_failures, repair_final_visual_failures, ensure_relationship_modes,
     plan_visual_treatments,
@@ -822,15 +822,20 @@ class VisualEvidenceVertexTests(unittest.TestCase):
         self.assertEqual(shot["media_type"], "generated_image")
         self.assertTrue(shot["fallback_used"])
 
-    def test_motion_graphic_missing_locked_value_fails_closed(self):
+    def test_motion_graphic_missing_locked_value_uses_complete_deterministic_fallback(self):
         script = script_fixture()
         shot = script["segments"][0]["visual"]["evidence_shots"][0]
         shot["media_type"] = "motion_graphic"
         shot["motion_spec"] = {"layout": "count", "labels": ["boxes"], "values": ["4"], "object_count": 4}
         client = MagicMock()
         with tempfile.TemporaryDirectory() as temp_dir, patch("visual_evidence_vertex._client", return_value=client):
-            with self.assertRaisesRegex(ValueError, "does not visibly encode claim values"):
-                generate_and_verify_visual_evidence(script, temp_dir)
+            result = generate_and_verify_visual_evidence(script, temp_dir)
+            repaired = result["segments"][0]["visual"]["evidence_shots"][0]
+            self.assertEqual(repaired["motion_spec"]["values"], ["5"])
+            self.assertTrue(repaired["fallback_used"])
+            self.assertFalse(
+                _passed_shot_is_usable(repaired, Path(temp_dir) / "visuals", segment_id="s1")
+            )
         client.models.generate_content.assert_not_called()
 
     def test_motion_graphic_accepts_equivalent_myanmar_digit_label(self):
