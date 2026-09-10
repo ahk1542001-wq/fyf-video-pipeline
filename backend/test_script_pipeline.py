@@ -184,6 +184,7 @@ class ScriptPipelineTests(unittest.TestCase):
             self.assertEqual(planner.call_count, 1)
             payload = planner.call_args.args[0]
             self.assertEqual(payload["approved_segments"], _parse_full_script(supplied))
+            self.assertTrue(payload["source_is_final_script"])
             result = json.loads((job / "result.json").read_text(encoding="utf-8"))
             self.assertEqual(
                 [(segment["id"], segment["text"]) for segment in result["segments"]],

@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import time
 import logging
 from google import genai
@@ -278,6 +279,35 @@ def _extract_complete_evidence_claims(request: ExactLockRequest) -> EvidenceClai
     if last_request_error and not last_error:
         raise RuntimeError(f"Vertex AI fact verification failed: {last_request_error}")
     raise last_error or ValueError("Fact Agent claim coverage incomplete")
+
+
+def _claims_from_final_script(request: ExactLockRequest) -> EvidenceClaimsResponse:
+    """Treat user-supplied final narration as the canonical visual claim source.
+
+    Full-script mode explicitly promises not to research or rewrite the user's
+    words. A single exact claim per scene prevents a second model from rejecting
+    editorial phrasing while still requiring the visual plan and storyboard to
+    cover every supplied scene. Numeric duration/count values remain locked for
+    downstream motion-graphic validation.
+    """
+    value_pattern = re.compile(
+        r"(?<![-\w])\d+(?:[.,]\d+)?(?:\s+(?:years?|days?|hours?|minutes?|seconds?|agents?|models?|dimensions?))?\b",
+        re.IGNORECASE,
+    )
+    return EvidenceClaimsResponse.model_validate({
+        "segments": [
+            {
+                "id": segment.id,
+                "claims": [{
+                    "claim_id": f"{segment.id}_user_claim",
+                    "statement": segment.text,
+                    "evidence_type": "concept",
+                    "values": value_pattern.findall(segment.text)[:6],
+                }],
+            }
+            for segment in request.approved_segments
+        ]
+    })
 
 
 def _direct_storyboard(
@@ -999,7 +1029,11 @@ def generate_exact_lock(request_data: dict) -> dict:
     ``build_exact_lock_instruction`` applies that contract (or the requested English equivalent) at runtime.
     """
     request = ExactLockRequest.model_validate(request_data)
-    claim_response = _extract_complete_evidence_claims(request)
+    claim_response = (
+        _claims_from_final_script(request)
+        if request.source_is_final_script
+        else _extract_complete_evidence_claims(request)
+    )
     claims_by_id = {segment.id: segment.claims for segment in claim_response.segments}
 
     client = _stage_client("lock")

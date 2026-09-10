@@ -231,6 +231,7 @@ def _run_script_pipeline(job_id: str, script_jobs_root: Path, locks_root: Path) 
             planned = generate_exact_lock({
                 "title": request["title"],
                 "approved_segments": approved_segments,
+                "source_is_final_script": True,
                 "studio_name": studio_name,
                 "language": language,
                 "genre": genre,

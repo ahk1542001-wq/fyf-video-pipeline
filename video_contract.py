@@ -593,6 +593,7 @@ class ExactLockRequest(BaseModel):
     genre: str | None = None
     presenter_mode: str | None = None
     voice_actor: str | None = None
+    source_is_final_script: bool = False
 
     @field_validator("approved_segments")
     @classmethod

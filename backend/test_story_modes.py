@@ -273,6 +273,41 @@ class StoryModesTests(unittest.TestCase):
         self.assertEqual(result["segments"][0]["text"], "Approved text 1")
         self.assertEqual(client.models.generate_content.call_count, 4)
 
+    def test_exact_lock_final_script_uses_user_narration_as_canonical_claims(self):
+        lock_response = json.loads(json.dumps(VALID_EXACT_LOCK_RESPONSE))
+        lock_response["segments"][0]["evidence_claims"][0].update({
+            "claim_id": "s1_user_claim",
+            "statement": "Approved text 1",
+        })
+        lock_response["segments"][0]["evidence_shots"][0]["proves_claim_ids"] = ["s1_user_claim"]
+        storyboard_response = json.loads(json.dumps(VALID_STORYBOARD_RESPONSE))
+        storyboard_response["segments"][0]["evidence_shots"][0]["proves_claim_ids"] = ["s1_user_claim"]
+        client = MagicMock()
+        client.models.generate_content.side_effect = [
+            SimpleNamespace(text=json.dumps(lock_response)),
+            SimpleNamespace(text=json.dumps(storyboard_response)),
+        ]
+        req = {
+            "title": "Approved Title",
+            "approved_segments": [{"id": "s1", "text": "Approved text 1"}],
+            "source_is_final_script": True,
+        }
+
+        with patch("writer_agent_vertex.genai.Client", return_value=client):
+            result = generate_exact_lock(req)
+
+        self.assertEqual(result["segments"][0]["text"], "Approved text 1")
+        self.assertEqual(
+            result["segments"][0]["visual"]["evidence_claims"],
+            [{
+                "claim_id": "s1_user_claim",
+                "statement": "Approved text 1",
+                "evidence_type": "concept",
+                "values": ["1"],
+            }],
+        )
+        self.assertEqual(client.models.generate_content.call_count, 2)
+
     def test_exact_lock_keeps_fact_agent_claims_canonical(self):
         lock_response = json.loads(json.dumps(VALID_EXACT_LOCK_RESPONSE))
         lock_response["segments"][0]["evidence_claims"][0]["statement"] = "Director rewrite"
