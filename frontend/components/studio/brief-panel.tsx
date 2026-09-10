@@ -72,7 +72,7 @@ export default function BriefPanel({ studio, view = "all" }: BriefPanelProps) {
             className={`pill-btn ${studio.sourceMode === "full_script" ? "pill-btn--active" : ""}`}
             onClick={() => studio.setSourceMode("full_script")}
           >
-            Full researched script
+            Full script
           </button>
           <button
             type="button"

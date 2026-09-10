@@ -2,8 +2,10 @@ const normalized = (value: string) => value.normalize("NFKC").toLocaleLowerCase(
 
 export const visibleMotionValues = (labels: string[], values: string[]) => {
   const labelTokens = new Set(labels.map(normalized));
+  const usesBurmeseLabels = labels.some((label) => /[\u1000-\u109f]/u.test(label));
   return values.map((value) => {
     if (labelTokens.has(normalized(value))) return "";
+    if (!usesBurmeseLabels) return value;
     const withoutAllowedAcronyms = value.replace(/\b(?:AI|XAI|FYF)\b/gi, "");
     return /[A-Za-z]/.test(withoutAllowedAcronyms) ? "" : value;
   });

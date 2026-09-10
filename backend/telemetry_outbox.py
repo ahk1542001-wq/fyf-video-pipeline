@@ -35,6 +35,7 @@ import hashlib
 import json
 import logging
 import os
+import tempfile
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -259,8 +260,8 @@ class TelemetryOutbox:
       monotonic sequence counter and the last drain summary.
 
     Both writes are durable (append + ``flush``/``fsync`` for the log, atomic
-    replace for the state file) so a crash mid-run cannot lose an enqueued
-    event.
+    replace + parent-directory ``fsync`` for the state file) so a crash
+    mid-run cannot lose an enqueued event.
     """
 
     def __init__(self, root: Path) -> None:
@@ -269,6 +270,7 @@ class TelemetryOutbox:
         self._log_path = self.root / "events.jsonl"
         self._state_path = self.root / "state.json"
         self._process_lock_path = self.root / ".outbox.lock"
+        self._drain_lock_path = self.root / ".outbox.drain.lock"
         self._lock = threading.RLock()
         self._drain_thread: Optional[threading.Thread] = None
         self._corrupted = False
@@ -423,9 +425,25 @@ class TelemetryOutbox:
         return state
 
     def _save_state(self, state: Dict[str, Any]) -> None:
-        tmp = self._state_path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(tmp, self._state_path)
+        descriptor, tmp_name = tempfile.mkstemp(
+            prefix=f".{self._state_path.name}.",
+            suffix=".tmp",
+            dir=self.root,
+        )
+        tmp = Path(tmp_name)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(state, ensure_ascii=False, indent=2))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, self._state_path)
+            directory_descriptor = os.open(self.root, os.O_RDONLY)
+            try:
+                os.fsync(directory_descriptor)
+            finally:
+                os.close(directory_descriptor)
+        finally:
+            tmp.unlink(missing_ok=True)
 
     def _append_log(self, event: OutboxEvent) -> None:
         with self._log_path.open("a", encoding="utf-8") as handle:
@@ -496,6 +514,25 @@ class TelemetryOutbox:
         ``event_id``: re-recording the same logical event returns the existing
         entry instead of appending a duplicate.
         """
+        event, _ = self._enqueue_if_absent(
+            table,
+            column_names,
+            row,
+            event_id=event_id,
+            now=now,
+        )
+        return event
+
+    def _enqueue_if_absent(
+        self,
+        table: str,
+        column_names: List[str],
+        row: List[Any],
+        *,
+        event_id: Optional[str] = None,
+        now: Optional[datetime] = None,
+    ) -> tuple[OutboxEvent, bool]:
+        """Enqueue one event and report whether this call created it."""
         moment = now or _utcnow()
         payload = dict(zip(column_names, row))
         resolved_id = event_id or stable_event_id(table, payload)
@@ -508,7 +545,10 @@ class TelemetryOutbox:
                 )
             known = state["events"].get(resolved_id)
             if known is not None:
-                return self._materialise(resolved_id, known, table, column_names, row, moment)
+                return (
+                    self._materialise(resolved_id, known, table, column_names, row, moment),
+                    False,
+                )
 
             sequence = int(state.get("next_sequence", 0))
             state["next_sequence"] = sequence + 1
@@ -542,7 +582,7 @@ class TelemetryOutbox:
             )
             self._append_log(event)
             self._save_state(state)
-            return event
+            return event, True
 
     def _materialise(
         self,
@@ -581,7 +621,7 @@ class TelemetryOutbox:
 
     def events(self) -> List[OutboxEvent]:
         """All durable events merged with their current delivery metadata."""
-        with self._lock:
+        with self._lock, _outbox_process_lock(self._process_lock_path):
             state = self._load_state()
             if state.get("corrupted"):
                 return []
@@ -600,7 +640,7 @@ class TelemetryOutbox:
 
     def status(self) -> Dict[str, Any]:
         """Visible delivery counters (Stage E2 / document line 149 & 151)."""
-        with self._lock:
+        with self._lock, _outbox_process_lock(self._process_lock_path):
             state = self._load_state()
             if state.get("corrupted"):
                 return {
@@ -673,10 +713,27 @@ class TelemetryOutbox:
         both cases events stay ``pending``; nothing is lost and nothing is
         silently duplicated.
         """
+        with _outbox_process_lock(self._drain_lock_path):
+            return self._drain_once_serialized(
+                client_factory,
+                schema_ready=schema_ready,
+                now=now,
+                max_batch=max_batch,
+            )
+
+    def _drain_once_serialized(
+        self,
+        client_factory: Callable[[], Any],
+        *,
+        schema_ready: bool,
+        now: Optional[datetime],
+        max_batch: int,
+    ) -> DrainReport:
+        """Drain while another drainer is excluded, but state stays available."""
         moment = now or _utcnow()
         report = DrainReport(schema_ready=bool(schema_ready))
 
-        with self._lock:
+        with self._lock, _outbox_process_lock(self._process_lock_path):
             state = self._load_state()
             if state.get("corrupted"):
                 report.corrupted = True
@@ -709,60 +766,100 @@ class TelemetryOutbox:
                 self._record_drain(state, report, moment)
                 return report
 
-            client = None
-            try:
-                client = client_factory()
-            except Exception as exc:  # pragma: no cover - defensive
-                logger.warning("Outbox client factory failed: %s", exc)
-            report.client_available = client is not None
-            if client is None:
-                report.blocked_reason = "clickhouse_unavailable_local_mirror_only"
+        # A drain lock serializes this network phase with other drainers, but
+        # the shared state lock is deliberately released so enqueue/status
+        # calls remain responsive while ClickHouse is unavailable or slow.
+        client = None
+        try:
+            client = client_factory()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("Outbox client factory failed: %s", exc)
+        report.client_available = client is not None
+        if client is None:
+            report.blocked_reason = "clickhouse_unavailable_local_mirror_only"
+            with self._lock, _outbox_process_lock(self._process_lock_path):
+                state = self._load_state()
+                if state.get("corrupted"):
+                    report.corrupted = True
+                    report.pending = None
+                    report.blocked_reason = "corrupt_outbox_state"
+                    return report
+                report.reconstructed = bool(state.get("reconstructed"))
+                report.pending = sum(
+                    1 for meta in state.get("events", {}).values()
+                    if meta.get("state") == _PENDING
+                )
                 self._record_drain(state, report, moment)
-                return report
+            return report
 
+        delivery_results: Dict[str, tuple[bool, Optional[str]]] = {}
+        for event in due_events:
+            report.attempted += 1
+            try:
+                row_to_insert = []
+                for col, val in zip(event.column_names, event.row):
+                    if (
+                        col in ("event_timestamp", "ingestion_timestamp", "created_at")
+                        or col.endswith(("_timestamp", "_at"))
+                    ) and isinstance(val, str):
+                        try:
+                            val = datetime.fromisoformat(val)
+                        except Exception:
+                            pass
+                    row_to_insert.append(val)
+                client.insert(event.table, [row_to_insert], column_names=event.column_names)
+            except Exception as exc:
+                error = str(exc)[:200]
+                delivery_results[event.event_id] = (False, error)
+                attempts = event.attempts + 1
+                logger.warning(
+                    "Outbox delivery failed for %s (attempt %s): %s",
+                    event.event_id, attempts, exc,
+                )
+            else:
+                delivery_results[event.event_id] = (True, None)
+
+        # Reload the state after network I/O so enqueues that happened during
+        # delivery are retained in the durable merge/commit.
+        with self._lock, _outbox_process_lock(self._process_lock_path):
+            state = self._load_state()
+            if state.get("corrupted"):
+                report.corrupted = True
+                report.pending = None
+                report.blocked_reason = "corrupt_outbox_state"
+                return report
+            report.reconstructed = bool(state.get("reconstructed"))
+            metas = state.get("events", {})
             for event in due_events:
-                report.attempted += 1
-                meta = metas[event.event_id]
-                try:
-                    row_to_insert = []
-                    for col, val in zip(event.column_names, event.row):
-                        if (
-                            col in ("event_timestamp", "ingestion_timestamp", "created_at")
-                            or col.endswith(("_timestamp", "_at"))
-                        ) and isinstance(val, str):
-                            try:
-                                val = datetime.fromisoformat(val)
-                            except Exception:
-                                pass
-                        row_to_insert.append(val)
-                    client.insert(event.table, [row_to_insert], column_names=event.column_names)
-                except Exception as exc:
-                    attempts = int(meta.get("attempts", 0)) + 1
-                    meta["attempts"] = attempts
-                    meta["last_error"] = str(exc)[:200]
-                    if attempts >= MAX_DELIVERY_ATTEMPTS:
-                        meta["state"] = _FAILED
-                        report.failed += 1
-                        report.pending -= 1
-                    else:
-                        meta["state"] = _PENDING
-                        backoff = compute_backoff(attempts)
-                        retry_at = datetime.fromtimestamp(
-                            moment.timestamp() + backoff, tz=timezone.utc
-                        )
-                        meta["next_retry_at"] = _iso(retry_at)
-                    logger.warning(
-                        "Outbox delivery failed for %s (attempt %s): %s",
-                        event.event_id, attempts, exc,
-                    )
-                else:
+                succeeded, error = delivery_results[event.event_id]
+                meta = metas.get(event.event_id)
+                if meta is None:
+                    continue
+                if succeeded:
                     meta["state"] = _DELIVERED
                     meta["delivered_at"] = _iso(moment)
                     meta["attempts"] = int(meta.get("attempts", 0)) + 1
                     meta["last_error"] = None
                     report.delivered += 1
-                    report.pending -= 1
+                    continue
 
+                attempts = int(meta.get("attempts", 0)) + 1
+                meta["attempts"] = attempts
+                meta["last_error"] = error
+                if attempts >= MAX_DELIVERY_ATTEMPTS:
+                    meta["state"] = _FAILED
+                    report.failed += 1
+                else:
+                    meta["state"] = _PENDING
+                    backoff = compute_backoff(attempts)
+                    retry_at = datetime.fromtimestamp(
+                        moment.timestamp() + backoff, tz=timezone.utc
+                    )
+                    meta["next_retry_at"] = _iso(retry_at)
+
+            report.pending = sum(
+                1 for meta in metas.values() if meta.get("state") == _PENDING
+            )
             self._record_drain(state, report, moment)
             return report
 
@@ -787,7 +884,7 @@ class TelemetryOutbox:
         local_dir = Path(local_dir)
         if not local_dir.is_dir() or local_dir.is_symlink():
             return 0
-        with self._lock:
+        with self._lock, _outbox_process_lock(self._process_lock_path):
             state = self._load_state()
             if state.get("corrupted"):
                 raise OutboxCorruptedError(
@@ -804,8 +901,7 @@ class TelemetryOutbox:
             if not isinstance(record, dict):
                 continue
             columns, row = _job_mirror_columns(record)
-            before = self.status()["total"]
-            self.enqueue(
+            _, created = self._enqueue_if_absent(
                 "video_pipeline_jobs",
                 columns,
                 row,
@@ -813,7 +909,7 @@ class TelemetryOutbox:
                     "video_pipeline_jobs", {"job_id": record.get("job_id")}
                 ),
             )
-            if self.status()["total"] > before:
+            if created:
                 enqueued += 1
         for scenes_file in sorted(local_dir.glob("scenes_*.jsonl")):
             if scenes_file.is_symlink():
@@ -832,8 +928,7 @@ class TelemetryOutbox:
                 if not isinstance(record, dict):
                     continue
                 columns, row = _scene_mirror_columns(record)
-                before = self.status()["total"]
-                self.enqueue(
+                _, created = self._enqueue_if_absent(
                     "video_scene_telemetry",
                     columns,
                     row,
@@ -845,7 +940,7 @@ class TelemetryOutbox:
                         },
                     ),
                 )
-                if self.status()["total"] > before:
+                if created:
                     enqueued += 1
         for qa_file in sorted(local_dir.glob("qa_*.jsonl")):
             if qa_file.is_symlink():
@@ -864,8 +959,7 @@ class TelemetryOutbox:
                 if not isinstance(record, dict):
                     continue
                 columns, row = _qa_mirror_columns(record)
-                before = self.status()["total"]
-                self.enqueue(
+                _, created = self._enqueue_if_absent(
                     "video_qa_records",
                     columns,
                     row,
@@ -877,7 +971,7 @@ class TelemetryOutbox:
                         },
                     ),
                 )
-                if self.status()["total"] > before:
+                if created:
                     enqueued += 1
         return enqueued
 

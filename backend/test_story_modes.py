@@ -141,6 +141,16 @@ VALID_STORYBOARD_RESPONSE = {
 
 
 class StoryModesTests(unittest.TestCase):
+    def setUp(self):
+        # These fixtures intentionally model the combined/global lock response.
+        # Keep the unit contract explicit instead of depending on the production
+        # default, which uses per-segment forced function calls.
+        self._lock_mode = patch.dict(
+            "os.environ", {"FYF_LOCK_METADATA_MODE": "combined"}
+        )
+        self._lock_mode.start()
+        self.addCleanup(self._lock_mode.stop)
+
     def test_storyboard_reconciles_ordered_segment_ids_when_claim_ids_repeat(self):
         first_plan = json.loads(json.dumps(VALID_EXACT_LOCK_RESPONSE["segments"][0]))
         second_plan = json.loads(json.dumps(first_plan))

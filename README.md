@@ -273,13 +273,24 @@ PROJECT_ID="your-gcp-project-id" bash scripts/deploy_cloudrun.sh
 ```
 
 The script automatically:
-1. Enables Cloud Run, Cloud Build, and Artifact Registry APIs.
+1. Enables Cloud Run, Cloud Build, Artifact Registry, Secret Manager, and Cloud Storage APIs.
 2. Creates the Artifact Registry repository.
-3. Securely pushes ClickHouse credentials to Google Secret Manager.
-4. Builds the container image via Cloud Build and deploys to Cloud Run with gen2 execution environment.
+3. Creates or reuses `gs://<project>-fyf-output-<region>` (override with `FYF_OUTPUT_BUCKET`) and grants the runtime service account bucket-scoped object access.
+4. Securely pushes ClickHouse credentials to Google Secret Manager.
+5. Builds the container image and deploys it with only `/app/output/jobs` mounted from Cloud Storage, so completed videos, QA evidence, manifests, and job status survive instance replacement. Queue, lock, telemetry-outbox, and project-transaction files remain on the single container's local filesystem because they require stronger POSIX semantics.
+
+The public-generation endpoints already support an optional
+`FYF_GENERATION_ACCESS_TOKEN` secret. When configured, the Studio sends the
+operator-entered value as `X-FYF-Access-Token`; the token is never baked into
+the frontend bundle. The deploy script also keeps explicit daily and total
+provider-spend ceilings in one owner-controlled block.
 
 ---
 
 ## Open Source License
 
 This project is licensed under the **MIT License** — see the full [LICENSE](LICENSE) file for details.
+
+## Contributor Agent Instructions
+
+The repository's tracked `AGENTS.md` is the sanitized public contributor contract for coding agents. It contains no credentials or private internal agent instructions; maintainers keep any private operational guidance outside the public repository.

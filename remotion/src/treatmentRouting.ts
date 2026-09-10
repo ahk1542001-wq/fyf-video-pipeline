@@ -93,9 +93,25 @@ export function treatmentLabelFontSize(label: string, preferred: number): number
   return preferred;
 }
 
+const COMPACT_METRIC = /^(?:\p{Sc}\s*)?[0-9၀-၉]+(?:[.,][0-9၀-၉]+)?(?:%|\s*(?:\p{L}\p{M}*){1,12})?$/u;
+const METRIC_NUMBER = /^(?:\p{Sc}\s*)?([0-9၀-၉]+(?:[.,][0-9၀-၉]+)?)/u;
+const MYANMAR_DIGITS = "၀၁၂၃၄၅၆၇၈၉";
+
 export function visibleDataValue(value: string | undefined): string {
-  const normalized = (value ?? "").trim();
-  return /^[0-9၀-၉]+(?:[.,][0-9၀-၉]+)?%?$/.test(normalized) ? normalized : "";
+  const normalized = (value ?? "").replace(/[\u200B-\u200D\uFEFF]/g, "").trim();
+  return COMPACT_METRIC.test(normalized) ? normalized : "";
+}
+
+export function dataValueBarPercent(value: string | undefined): number | null {
+  const normalized = visibleDataValue(value);
+  const match = METRIC_NUMBER.exec(normalized);
+  if (!match) return null;
+
+  const asciiNumber = match[1]
+    .replace(/[၀-၉]/g, (digit) => String(MYANMAR_DIGITS.indexOf(digit)))
+    .replace(",", ".");
+  const parsed = Number(asciiNumber);
+  return Number.isFinite(parsed) ? Math.max(0, Math.min(90, parsed)) : null;
 }
 
 export function resolveTreatment(input: TreatmentInput): TreatmentRoute {

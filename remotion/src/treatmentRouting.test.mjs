@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   CANONICAL_TREATMENTS,
+  dataValueBarPercent,
   routeTreatment,
   resolveTreatment,
   resolveVisualGrammar,
@@ -179,7 +180,19 @@ test("shrinks long Burmese evidence labels instead of overflowing their object",
 test("editorial metric column only exposes compact numeric evidence", () => {
   assert.equal(visibleDataValue("12"), "12");
   assert.equal(visibleDataValue("၂၅%"), "၂၅%");
+  assert.equal(visibleDataValue("90 years"), "90 years");
+  assert.equal(visibleDataValue("90 years\u200b"), "90 years");
+  assert.equal(visibleDataValue("$3"), "$3");
+  assert.equal(visibleDataValue("၂၅ နှစ်"), "၂၅ နှစ်");
+  assert.equal(visibleDataValue("၂၅ မှတ်\u200b"), "၂၅ မှတ်");
   assert.equal(visibleDataValue("လူသားစစ်ဆေးမှုနှင့် အတည်ပြုချက်"), "");
+});
+
+test("editorial metric bars derive numeric width from formatted values", () => {
+  assert.equal(dataValueBarPercent("$3"), 3);
+  assert.equal(dataValueBarPercent("90 years"), 90);
+  assert.equal(dataValueBarPercent("၂၅ နှစ်"), 25);
+  assert.equal(dataValueBarPercent("လူသားစစ်ဆေးမှု"), null);
 });
 
 test("selects the active planned treatment by hold_fraction boundaries", () => {

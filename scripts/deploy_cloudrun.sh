@@ -17,6 +17,7 @@ REGION="${GOOGLE_CLOUD_REGION:-asia-southeast1}"
 REPO="fyf"
 IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/$REPO/fyf-pipeline:latest"
 SERVICE="fyf-pipeline"
+FYF_OUTPUT_BUCKET="${FYF_OUTPUT_BUCKET:-${PROJECT_ID}-fyf-output-${REGION}}"
 
 # ===========================================================================
 # OWNER-APPROVED PAID-PRODUCTION BUDGET ENVELOPE  <-- single place to change.
@@ -35,10 +36,28 @@ FYF_TOTAL_BUDGET_CAP_USD="3"
 gcloud config set project "$PROJECT_ID"
 
 echo "== enable APIs =="
-gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com secretmanager.googleapis.com
+gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com secretmanager.googleapis.com storage.googleapis.com
+
+SA_NUM=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')
+EXISTING_RUNTIME_SERVICE_ACCOUNT=$(
+  gcloud run services list \
+    --project "$PROJECT_ID" \
+    --region "$REGION" \
+    --filter="metadata.name=$SERVICE" \
+    --format='value(spec.template.spec.serviceAccountName)'
+)
+RUNTIME_SERVICE_ACCOUNT="${FYF_RUNTIME_SERVICE_ACCOUNT:-${EXISTING_RUNTIME_SERVICE_ACCOUNT:-${SA_NUM}-compute@developer.gserviceaccount.com}}"
 
 echo "== artifact registry =="
 gcloud artifacts repositories create "$REPO" --repository-format=docker --location="$REGION" 2>/dev/null || echo "repo exists"
+
+echo "== durable completed-job storage =="
+if ! gcloud storage buckets describe "gs://$FYF_OUTPUT_BUCKET" >/dev/null 2>&1; then
+  gcloud storage buckets create "gs://$FYF_OUTPUT_BUCKET" \
+    --project "$PROJECT_ID" \
+    --location "$REGION" \
+    --uniform-bucket-level-access
+fi
 
 echo "== secrets from .env.clickhouse =="
 if [[ -f .env.clickhouse ]]; then
@@ -60,10 +79,12 @@ echo "== build =="
 gcloud builds submit --tag "$IMAGE" .
 
 echo "== allow runtime SA to read secrets =="
-SA_NUM=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member="serviceAccount:${SA_NUM}-compute@developer.gserviceaccount.com" \
-  --role="roles/secretmanager.secretAccessor" --quiet >/dev/null || true
+  --member="serviceAccount:${RUNTIME_SERVICE_ACCOUNT}" \
+  --role="roles/secretmanager.secretAccessor" --quiet >/dev/null
+gcloud storage buckets add-iam-policy-binding "gs://$FYF_OUTPUT_BUCKET" \
+  --member="serviceAccount:${RUNTIME_SERVICE_ACCOUNT}" \
+  --role="roles/storage.objectUser" --quiet >/dev/null
 
 echo "== deploy =="
 gcloud run deploy "$SERVICE" \
@@ -76,6 +97,9 @@ gcloud run deploy "$SERVICE" \
   --min-instances 0 --max-instances 1 \
   --timeout 3600 \
   --allow-unauthenticated \
+  --service-account "$RUNTIME_SERVICE_ACCOUNT" \
+  --add-volume "name=fyf-jobs,type=cloud-storage,bucket=$FYF_OUTPUT_BUCKET" \
+  --add-volume-mount "volume=fyf-jobs,mount-path=/app/output/jobs" \
   --set-env-vars "FYF_RUNTIME_MODE=hackathon,NEXT_PUBLIC_FYF_RUNTIME_MODE=hackathon,FYF_SEGMENT_RENDER_ENABLED=1,FYF_PUBLIC_DEPLOYMENT=true,FYF_BACKEND_URL=http://127.0.0.1:8000,GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_CLOUD_LOCATION=global,FYF_PUBLIC_GENERATION_ENABLED=true,FYF_DAILY_BUDGET_CAP_USD=$FYF_DAILY_BUDGET_CAP_USD,FYF_TOTAL_BUDGET_CAP_USD=$FYF_TOTAL_BUDGET_CAP_USD,FYF_LOCK_METADATA_MODE=per_segment" \
   "${SECRETS_FLAGS[@]}"
 

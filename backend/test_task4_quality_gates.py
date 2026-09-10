@@ -121,6 +121,32 @@ class Task4QualityGateTests(unittest.TestCase):
             )
             self.assertFalse(_passed_shot_is_usable(result, root / "visuals", segment_id="s1"))
 
+    def test_deterministic_motion_fallback_uses_declared_language_for_empty_labels(self):
+        required = [{
+            "claim_id": "c1",
+            "statement": "",
+            "evidence_type": "concept",
+            "values": [],
+        }]
+
+        english = _deterministic_motion_graphic_fallback(
+            required,
+            {"shot_id": "concept-en", "caption": "", "proves_claim_ids": ["c1"]},
+            language="en-US",
+        )
+        burmese = _deterministic_motion_graphic_fallback(
+            required,
+            {"shot_id": "concept-my", "caption": "", "proves_claim_ids": ["c1"]},
+            language="my-MM",
+        )
+
+        self.assertEqual(english["caption"], "Review the information")
+        self.assertEqual(english["motion_spec"]["labels"], ["Review the information"])
+        self.assertNotRegex(english["caption"], r"[\u1000-\u109f]")
+        self.assertEqual(burmese["caption"], "အချက်အလက်ကို စစ်ဆေးပါ")
+        self.assertEqual(burmese["motion_spec"]["labels"], ["အချက်အလက်ကို စစ်ဆေးပါ"])
+        self.assertRegex(burmese["caption"], r"[\u1000-\u109f]")
+
     def test_corrupt_unverified_fallback_registry_does_not_look_absent(self):
         """A broken fallback sidecar must fail closed instead of restoring semantic trust."""
         shot = {

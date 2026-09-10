@@ -14,6 +14,7 @@ COPY frontend ./
 # NEXT_PUBLIC_* vars are baked at build time.
 ARG NEXT_PUBLIC_FYF_RUNTIME_MODE=hackathon
 ENV NEXT_PUBLIC_FYF_RUNTIME_MODE=$NEXT_PUBLIC_FYF_RUNTIME_MODE
+ENV BUILD_STANDALONE=true
 RUN npm run build
 
 WORKDIR /build/remotion

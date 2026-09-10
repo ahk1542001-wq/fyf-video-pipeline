@@ -589,7 +589,17 @@ def _plan_final_visual_repair(
     repair_feedback: list[str] | None = None,
     *,
     model_stage: str = "repair",
+    language: str = "my-MM",
 ) -> dict:
+    audience_instruction = (
+        "Return one or two concise English screen lines for a beginner. Put all visible "
+        "wording in clear English except established mathematical notation and brand names. "
+        "Never use Burmese text. "
+        if str(language).lower().startswith("en")
+        else "Return one or two concise Burmese screen lines for a beginner. Put all visible "
+        "wording in beginner-friendly Burmese except established names such as AI or XAI. "
+        "Never use generated English text. "
+    )
     response = _quota_retry(lambda: client.models.generate_content(
         model=model_for(model_stage),
         contents=(
@@ -602,11 +612,11 @@ def _plan_final_visual_repair(
             "consequence; choose motion_graphic only when exact values, order, comparison, "
             "or relationship must be explicit. For one cause/actor producing multiple parallel "
             "outcomes, use directional_branch with the cause first and every outcome after it. "
-            "Return one or two concise Burmese screen "
-            "lines for a beginner. Do not change narration, facts, or claim IDs. Do not add "
+            + audience_instruction +
+            "Do not change narration, facts, or claim IDs. Do not add "
             "unlocked facts. For comparison, limitation, or negation claims, every named "
             "actor, attribute, and relation (including cannot/not) must be visibly encoded "
-            "in Burmese labels or values; color, accent, position, or inference alone is "
+            "in visible labels or values; color, accent, position, or inference alone is "
             "insufficient. If using motion_graphic, motion_spec is required; otherwise it "
             "must be null.\n"
             "For relationship motion graphics choose relation_mode: directional for cause or "
@@ -616,13 +626,12 @@ def _plan_final_visual_repair(
             "node chain. Therefore order labels from the true semantic source/cause/actor "
             "through any process to the target/result; never put a described object before "
             "the technology or actor that explains or changes it. If the claim needs three "
-            "or more visible stages, include every stage as a label. Put all visible wording "
-            "in beginner-friendly Burmese except established names such as AI or XAI. "
+            "or more visible stages, include every stage as a label. "
             "If rejected repair feedback says a motion layout still omits a cause, actor, "
             "branch, or outcome, do not repeat the same structure: switch to an ordered "
             "sequence whose first node is the cause/actor and whose remaining nodes visibly "
             "show every outcome, or choose a text-free generated action when exact wording is "
-            "not needed. Never use generated English text.\n"
+            "not needed.\n"
             f"Segment contract: {json.dumps(segment, ensure_ascii=False)}\n"
             f"Final QA issues: {json.dumps(issues, ensure_ascii=False)}\n"
             f"Rejected repair feedback: {json.dumps(repair_feedback or [], ensure_ascii=False)}"
@@ -631,7 +640,15 @@ def _plan_final_visual_repair(
             response_mime_type="application/json",
             response_json_schema=FinalVisualRepairPlan.model_json_schema(),
         ),
-    ), label=f"final visual repair plan {segment['id']}", provider_op_key=provider_operation_key("final_repair_plan", segment.get("id"), model_stage, json.dumps(repair_feedback or [], ensure_ascii=False)))
+    ), label=f"final visual repair plan {segment['id']}", provider_op_key=provider_operation_key(
+        "final_repair_plan",
+        segment.get("id"),
+        model_stage,
+        language,
+        json.dumps(segment, ensure_ascii=False, sort_keys=True),
+        json.dumps(issues, ensure_ascii=False, sort_keys=True),
+        json.dumps(repair_feedback or [], ensure_ascii=False, sort_keys=True),
+    ))
     return FinalVisualRepairPlan.model_validate_json(response.text or "").model_dump(mode="json")
 
 
@@ -792,7 +809,21 @@ def _validate_motion_spec(required: list[dict], shot: dict) -> None:
             raise ValueError("comparison layout must show every locked count as a separate panel")
 
 
-def _verify_motion_spec_semantics(client: genai.Client, required: list[dict], shot: dict) -> None:
+def _verify_motion_spec_semantics(
+    client: genai.Client,
+    required: list[dict],
+    shot: dict,
+    *,
+    language: str = "my-MM",
+) -> None:
+    audience_instruction = (
+        "The audience is English-speaking. Require visible labels and values to use clear English "
+        "except established notation and brand names; reject Burmese explanatory text. "
+        if str(language).lower().startswith("en")
+        else "The audience is a Burmese-speaking beginner. Burmese labels are required; do not require English "
+        "or reject correct Burmese wording merely because the claim contract is written in English. "
+        "Require every visible label and value to use Burmese except established acronyms such as AI or XAI. "
+    )
     visible_spec = {
         "shot_id": shot["shot_id"],
         "proves_claim_ids": shot["proves_claim_ids"],
@@ -802,11 +833,9 @@ def _verify_motion_spec_semantics(client: genai.Client, required: list[dict], sh
         model=model_for("visual_verification"),
         contents=(
             "Verify whether this deterministic motion graphic specification directly and "
-            "unambiguously communicates every locked claim to a Burmese-speaking beginner. "
-            "Burmese labels are required audience language; do not require English or reject "
-            "correct Burmese wording merely because the claim contract is written in English. "
-            "Require every visible label and value to use Burmese except established acronyms "
-            "such as AI or XAI. Treat label order "
+            "unambiguously communicates every locked claim to a beginner. "
+            + audience_instruction +
+            "Treat label order "
             "as visual order. Reject missing causes, constraints, states, or relationships. "
             "Do not infer meaning absent from the labels, values, objects, and layout. "
             "A caption is not visual evidence and is intentionally excluded. Reject a "
@@ -822,7 +851,12 @@ def _verify_motion_spec_semantics(client: genai.Client, required: list[dict], sh
             response_mime_type="application/json",
             response_json_schema=EvidenceVerification.model_json_schema(),
         ),
-    ), label=f"motion evidence verification {shot['shot_id']}", provider_op_key=provider_operation_key("motion_spec_verify", shot["shot_id"], json.dumps(shot.get("motion_spec"), ensure_ascii=False)))
+    ), label=f"motion evidence verification {shot['shot_id']}", provider_op_key=provider_operation_key(
+        "motion_spec_verify",
+        shot["shot_id"],
+        str(language).strip().lower(),
+        json.dumps(shot.get("motion_spec"), ensure_ascii=False),
+    ))
     verification = EvidenceVerification.model_validate_json(response.text or "")
     if not verification.passed or set(verification.proved_claim_ids) != set(shot["proves_claim_ids"]):
         raise RuntimeError(
@@ -945,6 +979,8 @@ def _generate_verified_video(
     destination: Path,
     required: list[dict],
     shot: dict,
+    *,
+    language: str = "my-MM",
 ) -> None:
     operation = _quota_retry(lambda: client.models.generate_videos(
         model=model_for("video_generation"),
@@ -979,14 +1015,16 @@ def _generate_verified_video(
     verify_response = _quota_retry(lambda: client.models.generate_content(
         model=model_for("visual_verification"),
         contents=[
-            _verification_prompt(required, shot).replace("attached image", "attached video from beginning to end"),
+            _verification_prompt(required, shot, language=language).replace("attached image", "attached video from beginning to end"),
             types.Part.from_bytes(data=destination.read_bytes(), mime_type="video/mp4"),
         ],
         config=generation_config_for("visual_verification",
             response_mime_type="application/json",
             response_json_schema=EvidenceVerification.model_json_schema(),
         ),
-    ), label="video evidence verification", provider_op_key=provider_operation_key("visual_video_verify", shot["shot_id"]))
+    ), label="video evidence verification", provider_op_key=provider_operation_key(
+        "visual_video_verify", shot["shot_id"], str(language).strip().lower()
+    ))
     verification = EvidenceVerification.model_validate_json(verify_response.text or "")
     if not verification.passed or set(verification.proved_claim_ids) != set(shot["proves_claim_ids"]):
         raise RuntimeError(
@@ -995,14 +1033,18 @@ def _generate_verified_video(
         )
 
 
-def _verification_prompt(claims: list[dict], shot: dict) -> str:
+def _verification_prompt(claims: list[dict], shot: dict, *, language: str = "my-MM") -> str:
+    language_rule = (
+        "The audience is English-speaking. Reject Burmese explanatory text and require any necessary wording to be clear English. "
+        if str(language).lower().startswith("en")
+        else "The audience is Burmese-speaking. Reject generated Latin-script prose or interface copy anywhere in the image; "
+        "allow only established acronyms such as AI, XAI, and FYF. Prefer text-free imagery, and require any necessary explanatory wording to be Burmese. "
+    )
     return (
         "Act as a strict visual evidence verifier. Inspect the attached image only. "
         "Pass only when an ordinary viewer can directly see every required claim and "
         "exact value/relationship without relying on a caption. Do not infer hidden facts. "
-        "The audience is Burmese-speaking. Reject generated Latin-script prose or interface "
-        "copy anywhere in the image; allow only established acronyms such as AI, XAI, and FYF. "
-        "Prefer text-free imagery, and require any necessary explanatory wording to be Burmese.\n"
+        + language_rule + "\n"
         f"Required claims: {json.dumps(claims, ensure_ascii=False)}\n"
         f"Shot requirement: {json.dumps(shot, ensure_ascii=False)}"
     )
@@ -1011,8 +1053,15 @@ def _verification_prompt(claims: list[dict], shot: dict) -> str:
 def _deterministic_motion_graphic_fallback(
     required: list[dict],
     shot: dict,
+    *,
+    language: str = "my-MM",
 ) -> dict:
     """Convert locked claims into a deterministic evidence frame during provider outage."""
+    fallback_caption = (
+        "Review the information"
+        if str(language).strip().lower().startswith("en")
+        else "အချက်အလက်ကို စစ်ဆေးပါ"
+    )
     evidence_types = {claim.get("evidence_type") for claim in required}
     if "sequence" in evidence_types:
         layout = "sequence"
@@ -1038,7 +1087,7 @@ def _deterministic_motion_graphic_fallback(
         if len(labels) >= 6:
             break
     if not labels:
-        labels = ["အချက်အလက်ကို စစ်ဆေးပါ"]
+        labels = [fallback_caption]
 
     values: list[str] = []
     for claim in required:
@@ -1066,7 +1115,7 @@ def _deterministic_motion_graphic_fallback(
         "relation_mode": "directional" if layout == "relationship" else None,
     })
     shot.update({
-        "caption": caption or "အချက်အလက်ကို စစ်ဆေးပါ",
+        "caption": caption or fallback_caption,
         "media_type": "motion_graphic",
         "motion_preset": "static",
         "motion_spec": motion_spec.model_dump(mode="json"),
@@ -1103,7 +1152,19 @@ def _locked_content_fingerprint(script: dict) -> str:
     ).hexdigest()
 
 
-def _repair_as_motion_graphic(client: genai.Client, required: list[dict], shot: dict, issues: list[str]) -> dict:
+def _repair_as_motion_graphic(
+    client: genai.Client,
+    required: list[dict],
+    shot: dict,
+    issues: list[str],
+    *,
+    language: str = "my-MM",
+) -> dict:
+    language_rule = (
+        "Return concise beginner-friendly English labels and never use Burmese text. "
+        if str(language).lower().startswith("en")
+        else "Return concise beginner-friendly Burmese labels. "
+    )
     repair_feedback = list(issues)
     repair = None
     verification = None
@@ -1113,14 +1174,14 @@ def _repair_as_motion_graphic(client: genai.Client, required: list[dict], shot: 
             model=repair_model,
             contents=(
                 "Convert this failed media shot into a deterministic FYF motion graphic. "
-                "Return concise beginner-friendly Burmese labels. The ordered labels and "
+                + language_rule + "The ordered labels and "
                 "values must directly show every claim without relying on inference. Use "
                 "layout count, comparison, sequence, relationship, directional_branch, or concept. "
                 "Use directional_branch when one cause/actor leads to multiple parallel outcomes. Do not add "
                 "facts. A causal claim must name/show its trigger, action, and result in order. "
                 "Treat every verifier issue as a mandatory visible correction: rewrite the labels "
                 "so each missing actor, condition, negation, qualifier, relationship, and outcome "
-                "is explicitly visible in Burmese. Do not merely acknowledge feedback in reasoning, "
+                "is explicitly visible in the required audience language. Do not merely acknowledge feedback in reasoning, "
                 "and do not rely on the caption because captions are excluded from evidence. "
                 "Keep object_count null unless exact repeated objects are required.\n"
                 f"Locked claims: {json.dumps(required, ensure_ascii=False)}\n"
@@ -1131,7 +1192,9 @@ def _repair_as_motion_graphic(client: genai.Client, required: list[dict], shot: 
                 response_mime_type="application/json",
                 response_json_schema=MotionRepair.model_json_schema(),
             ),
-        ), label=f"motion repair {shot['shot_id']}", provider_op_key=provider_operation_key("motion_repair", shot["shot_id"], attempt))
+        ), label=f"motion repair {shot['shot_id']}", provider_op_key=provider_operation_key(
+            "motion_repair", shot["shot_id"], attempt, str(language).strip().lower()
+        ))
         try:
             repair = MotionRepair.model_validate_json(response.text or "")
         except ValidationError as exc:
@@ -1155,9 +1218,8 @@ def _repair_as_motion_graphic(client: genai.Client, required: list[dict], shot: 
             model=model_for("visual_verification"),
             contents=(
                 "Verify whether this deterministic motion graphic specification directly and "
-                "unambiguously communicates every locked claim to a Burmese-speaking beginner. "
-                "Burmese labels are required audience language; do not require English or reject "
-                "correct Burmese wording merely because the claim contract is written in English. Do not infer a "
+                "unambiguously communicates every locked claim to a beginner in the required audience language. "
+                + language_rule + "Do not infer a "
                 "cause or sequence that is absent from labels/order.\n"
                 f"Claims: {json.dumps(required, ensure_ascii=False)}\n"
                 f"Motion spec: {repair.model_dump_json()}"
@@ -1166,7 +1228,9 @@ def _repair_as_motion_graphic(client: genai.Client, required: list[dict], shot: 
                 response_mime_type="application/json",
                 response_json_schema=EvidenceVerification.model_json_schema(),
             ),
-        ), label=f"motion repair verification {shot['shot_id']}", provider_op_key=provider_operation_key("motion_repair_verify", shot["shot_id"], attempt))
+        ), label=f"motion repair verification {shot['shot_id']}", provider_op_key=provider_operation_key(
+            "motion_repair_verify", shot["shot_id"], attempt, str(language).strip().lower()
+        ))
         verification = EvidenceVerification.model_validate_json(verify.text or "")
         if verification.passed and set(verification.proved_claim_ids) == set(shot["proves_claim_ids"]):
             break
@@ -1190,6 +1254,7 @@ def _repair_as_motion_graphic(client: genai.Client, required: list[dict], shot: 
 def generate_and_verify_visual_evidence(script_data: dict, job_dir: str) -> dict:
     """Generate every planned evidence shot, verify it, and return an updated script."""
     original = VideoScript.model_validate(script_data).model_dump(mode="json")
+    language = original.get("language", "my-MM")
     fingerprint = _input_fingerprint(original)
     script = original
     client = _client()
@@ -1233,7 +1298,7 @@ def generate_and_verify_visual_evidence(script_data: dict, job_dir: str) -> dict
                     ) from exc
                 semantic_verified = False
                 try:
-                    _verify_motion_spec_semantics(client, required, shot)
+                    _verify_motion_spec_semantics(client, required, shot, language=language)
                     semantic_verified = True
                 except Exception as exc:
                     if _is_transient_vertex_error(exc):
@@ -1243,11 +1308,11 @@ def generate_and_verify_visual_evidence(script_data: dict, job_dir: str) -> dict
                             shot["shot_id"],
                             type(exc).__name__,
                         )
-                        _deterministic_motion_graphic_fallback(required, shot)
+                        _deterministic_motion_graphic_fallback(required, shot, language=language)
                         _record_unverified_fallback(asset_dir, segment["id"], shot["shot_id"])
                     else:
                         try:
-                            _repair_as_motion_graphic(client, required, shot, [str(exc)])
+                            _repair_as_motion_graphic(client, required, shot, [str(exc)], language=language)
                             semantic_verified = True
                         except Exception as repair_exc:
                             if not _is_transient_vertex_error(repair_exc):
@@ -1258,7 +1323,7 @@ def generate_and_verify_visual_evidence(script_data: dict, job_dir: str) -> dict
                                 shot["shot_id"],
                                 type(repair_exc).__name__,
                             )
-                            _deterministic_motion_graphic_fallback(required, shot)
+                            _deterministic_motion_graphic_fallback(required, shot, language=language)
                             _record_unverified_fallback(asset_dir, segment["id"], shot["shot_id"])
                 shot["verification_status"] = "passed"
                 if semantic_verified:
@@ -1296,11 +1361,11 @@ def generate_and_verify_visual_evidence(script_data: dict, job_dir: str) -> dict
                             shot["shot_id"],
                             type(exc).__name__,
                         )
-                        _deterministic_motion_graphic_fallback(required, shot)
+                        _deterministic_motion_graphic_fallback(required, shot, language=language)
                         _record_unverified_fallback(asset_dir, segment["id"], shot["shot_id"])
                         break
                     try:
-                        _repair_as_motion_graphic(client, required, shot, last_issues)
+                        _repair_as_motion_graphic(client, required, shot, last_issues, language=language)
                     except Exception as repair_exc:
                         if _is_transient_vertex_error(repair_exc):
                             logger.warning(
@@ -1309,7 +1374,7 @@ def generate_and_verify_visual_evidence(script_data: dict, job_dir: str) -> dict
                                 shot["shot_id"],
                                 type(repair_exc).__name__,
                             )
-                            _deterministic_motion_graphic_fallback(required, shot)
+                            _deterministic_motion_graphic_fallback(required, shot, language=language)
                             _record_unverified_fallback(asset_dir, segment["id"], shot["shot_id"])
                             break
                         raise RuntimeError(
@@ -1329,7 +1394,7 @@ def generate_and_verify_visual_evidence(script_data: dict, job_dir: str) -> dict
                         )
                         continue
                     try:
-                        _repair_as_motion_graphic(client, required, shot, last_issues)
+                        _repair_as_motion_graphic(client, required, shot, last_issues, language=language)
                     except Exception as repair_exc:
                         raise RuntimeError(
                             f"Visual media unavailable for segment={segment['id']} "
@@ -1342,14 +1407,20 @@ def generate_and_verify_visual_evidence(script_data: dict, job_dir: str) -> dict
                 verify_response = _quota_retry(lambda: client.models.generate_content(
                     model=model_for("visual_verification"),
                     contents=[
-                        _verification_prompt(required, shot),
+                        _verification_prompt(required, shot, language=language),
                         types.Part.from_bytes(data=destination.read_bytes(), mime_type=image_mime),
                     ],
                     config=generation_config_for("visual_verification",
                         response_mime_type="application/json",
                         response_json_schema=EvidenceVerification.model_json_schema(),
                     ),
-                ), label=f"image evidence verification {segment['id']}/{shot['shot_id']}", provider_op_key=provider_operation_key("visual_image_verify", segment["id"], shot["shot_id"], attempt))
+                ), label=f"image evidence verification {segment['id']}/{shot['shot_id']}", provider_op_key=provider_operation_key(
+                    "visual_image_verify",
+                    segment["id"],
+                    shot["shot_id"],
+                    attempt,
+                    str(language).strip().lower(),
+                ))
                 verification = EvidenceVerification.model_validate_json(verify_response.text or "")
                 expected_ids = set(shot["proves_claim_ids"])
                 if verification.passed and set(verification.proved_claim_ids) == expected_ids:
@@ -1364,7 +1435,7 @@ def generate_and_verify_visual_evidence(script_data: dict, job_dir: str) -> dict
                             video_destination = asset_dir / video_filename
                             try:
                                 _generate_verified_video(
-                                    client, destination, video_destination, required, shot
+                                    client, destination, video_destination, required, shot, language=language
                                 )
                             except Exception as exc:
                                 video_destination.unlink(missing_ok=True)
@@ -1385,7 +1456,7 @@ def generate_and_verify_visual_evidence(script_data: dict, job_dir: str) -> dict
                 last_issues = verification.issues or ["required evidence was not directly visible"]
             else:
                 try:
-                    _repair_as_motion_graphic(client, required, shot, last_issues)
+                    _repair_as_motion_graphic(client, required, shot, last_issues, language=language)
                 except Exception as repair_exc:
                     raise RuntimeError(
                         f"Visual evidence failed after {MAX_GENERATION_ATTEMPTS} attempts for "
@@ -1399,7 +1470,10 @@ def generate_and_verify_visual_evidence(script_data: dict, job_dir: str) -> dict
 
 def repair_final_visual_failures(script_data: dict, report: dict, job_dir: str) -> dict:
     """Re-direct only final-QA-failed scenes from their locked claims and brand rules."""
-    original = VideoScript.model_validate(script_data).model_dump(mode="json")
+    original = VideoScript.model_validate({
+        key: value for key, value in script_data.items() if key in VideoScript.model_fields
+    }).model_dump(mode="json")
+    language = original.get("language", "my-MM")
     script = original
     root = Path(job_dir)
     checkpoint = root / "visual_evidence_checkpoint.json"
@@ -1457,6 +1531,7 @@ def repair_final_visual_failures(script_data: dict, report: dict, job_dir: str) 
                         issues,
                         feedback,
                         model_stage="repair" if attempt == 0 else "storyboard_direction",
+                        language=language,
                     )
                 except (ValueError, json.JSONDecodeError) as exc:
                     feedback = [f"Structured repair plan was invalid: {exc}"]
@@ -1481,7 +1556,7 @@ def repair_final_visual_failures(script_data: dict, report: dict, job_dir: str) 
                     continue
                 try:
                     _validate_motion_spec(required, shot)
-                    _verify_motion_spec_semantics(client, required, shot)
+                    _verify_motion_spec_semantics(client, required, shot, language=language)
                 except (ValueError, RuntimeError) as exc:
                     feedback = [str(exc)]
                     continue

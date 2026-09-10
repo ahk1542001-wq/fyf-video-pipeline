@@ -41,3 +41,13 @@ test("removes duplicate and unapproved English value pills", () => {
     ["", "", "", "AI"],
   );
 });
+
+test("keeps English relationship values when the visible nodes are English", () => {
+  assert.deepEqual(
+    visibleMotionValues(
+      ["AI", "Human judgment"],
+      ["cannot replace", "software", "AI"],
+    ),
+    ["cannot replace", "software", ""],
+  );
+});

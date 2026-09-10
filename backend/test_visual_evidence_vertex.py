@@ -10,6 +10,7 @@ from google.genai.errors import ClientError
 from video_contract import VideoScript
 from visual_evidence_vertex import (
     _client, _enforce_attention_reset_cadence, _input_fingerprint, _plan_final_visual_repair, _quota_retry,
+    _verification_prompt, _verify_motion_spec_semantics,
     generate_and_verify_visual_evidence,
     repair_creative_failures, repair_final_visual_failures, ensure_relationship_modes,
     plan_visual_treatments,
@@ -787,7 +788,7 @@ class VisualEvidenceVertexTests(unittest.TestCase):
             SimpleNamespace(text='{"passed":true,"proved_claim_ids":["c1"],"observed_values":["5"],"issues":[]}'),
         ]
 
-        def fake_video(_client, _still, destination, _required, _shot):
+        def fake_video(_client, _still, destination, _required, _shot, **_kwargs):
             destination.write_bytes(b"mp4")
 
         with tempfile.TemporaryDirectory() as temp_dir, patch("visual_evidence_vertex._client", return_value=client), patch(
@@ -809,7 +810,7 @@ class VisualEvidenceVertexTests(unittest.TestCase):
             SimpleNamespace(text='{"passed":true,"proved_claim_ids":["c1"],"observed_values":["5"],"issues":[]}'),
         ]
 
-        def failed_video(_client, _still, destination, _required, _shot):
+        def failed_video(_client, _still, destination, _required, _shot, **_kwargs):
             destination.write_bytes(b"broken")
             raise RuntimeError("video changed count")
 
@@ -971,6 +972,40 @@ class VisualEvidenceVertexTests(unittest.TestCase):
         self.assertNotIn("CAPTION_ONLY_SECRET", prompt)
         self.assertIn("Burmese-speaking beginner", prompt)
         self.assertIn("do not require English", prompt)
+
+    def test_image_verifier_uses_the_locked_english_audience_language(self):
+        prompt = _verification_prompt(
+            [{"claim_id": "c1", "statement": "A verified claim", "values": []}],
+            {"shot_id": "shot-1", "proves_claim_ids": ["c1"]},
+            language="en-US",
+        )
+        self.assertIn("English-speaking", prompt)
+        self.assertIn("Reject Burmese explanatory text", prompt)
+        self.assertNotIn("Burmese-speaking", prompt)
+
+    def test_motion_verifier_provider_key_is_language_sensitive(self):
+        client = MagicMock()
+        client.models.generate_content.return_value = SimpleNamespace(
+            text='{"passed":true,"proved_claim_ids":["c1"],"observed_values":["5"],"issues":[]}'
+        )
+        required = script_fixture()["segments"][0]["visual"]["evidence_claims"]
+        shot = script_fixture()["segments"][0]["visual"]["evidence_shots"][0]
+        shot["motion_spec"] = {"layout": "count", "labels": ["Items"], "values": ["5"], "object_count": 5}
+        keys = []
+
+        def capture_key(stage, *parts):
+            key = f"{stage}:" + "|".join(str(part) for part in parts)
+            keys.append(key)
+            return key
+
+        with patch("visual_evidence_vertex.provider_operation_key", side_effect=capture_key), patch(
+            "visual_evidence_vertex._quota_retry", side_effect=lambda call, **_kwargs: call()
+        ):
+            _verify_motion_spec_semantics(client, required, shot, language="en-US")
+            _verify_motion_spec_semantics(client, required, shot, language="my-MM")
+
+        self.assertEqual(len(keys), 2)
+        self.assertNotEqual(keys[0], keys[1])
 
     def test_transient_vertex_quota_is_retried(self):
         call = MagicMock(side_effect=[ClientError(429, {"error": {"message": "quota"}}), "ok"])

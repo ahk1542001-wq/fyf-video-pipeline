@@ -3,6 +3,12 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
+import os
+import stat
+import threading
+from concurrent.futures import TimeoutError as FutureTimeoutError
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -14,6 +20,7 @@ from backend.telemetry_outbox import (
     get_outbox,
     stable_event_id,
 )
+import backend.telemetry_outbox as telemetry_outbox_module
 
 JOB_COLUMNS = ["job_id", "status", "cost_usd"]
 
@@ -42,6 +49,40 @@ def _enqueue_jobs(outbox: TelemetryOutbox, count: int) -> list[str]:
         )
         ids.append(event.event_id)
     return ids
+
+
+class _BlockingProcessClient:
+    """Coordinate two drain workers so a duplicate insert is observable."""
+
+    def __init__(self, calls, first_insert, second_insert, release):
+        self.calls = calls
+        self.first_insert = first_insert
+        self.second_insert = second_insert
+        self.release = release
+
+    def insert(self, table, rows, column_names=None):
+        del table, rows, column_names
+        with self.calls.get_lock():
+            self.calls.value += 1
+            call_number = self.calls.value
+        if call_number == 1:
+            self.first_insert.set()
+            assert self.release.wait(timeout=5)
+        else:
+            self.second_insert.set()
+
+
+def _drain_worker(root, start, calls, first_insert, second_insert, release, results):
+    start.wait(timeout=5)
+    try:
+        outbox = TelemetryOutbox(Path(root))
+        report = outbox.drain_once(
+            lambda: _BlockingProcessClient(calls, first_insert, second_insert, release),
+            schema_ready=True,
+        )
+        results.put(("ok", report.delivered, report.pending))
+    except Exception as exc:  # pragma: no cover - failure is asserted in parent
+        results.put(("error", type(exc).__name__, str(exc)))
 
 
 def test_stable_event_id_is_deterministic_and_content_addressed():
@@ -82,6 +123,174 @@ def test_sequence_is_monotonic(tmp_path: Path):
     for index in range(4):
         seqs.append(outbox.enqueue("video_pipeline_jobs", JOB_COLUMNS, [f"j{index}", "x", 0.0]).sequence)
     assert seqs == [0, 1, 2, 3]
+
+
+def test_atomic_state_writes_do_not_share_a_temporary_path(tmp_path: Path, monkeypatch):
+    """Independent workers must not race on one fixed ``state.json.tmp`` file."""
+    first = TelemetryOutbox(tmp_path)
+    second = TelemetryOutbox(tmp_path)
+    barrier = threading.Barrier(2)
+    real_replace = os.replace
+
+    def synchronized_replace(source, destination):
+        barrier.wait(timeout=2)
+        real_replace(source, destination)
+
+    monkeypatch.setattr(telemetry_outbox_module.os, "replace", synchronized_replace)
+    states = [
+        {"events": {}, "next_sequence": value, "last_drain": None}
+        for value in (1, 2)
+    ]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(outbox._save_state, state)
+            for outbox, state in zip((first, second), states)
+        ]
+        for future in futures:
+            future.result()
+
+    assert json.loads((tmp_path / "state.json").read_text(encoding="utf-8")) in states
+
+
+def test_concurrent_process_drains_do_not_insert_the_same_event_twice(tmp_path: Path):
+    """A process lock must cover drain read, delivery, and metadata save."""
+    if telemetry_outbox_module.fcntl is None:
+        return
+
+    outbox = TelemetryOutbox(tmp_path)
+    _enqueue_jobs(outbox, 1)
+    context = multiprocessing.get_context("fork")
+    start = context.Event()
+    first_insert = context.Event()
+    second_insert = context.Event()
+    release = context.Event()
+    calls = context.Value("i", 0)
+    results = context.Queue()
+    processes = [
+        context.Process(
+            target=_drain_worker,
+            args=(tmp_path, start, calls, first_insert, second_insert, release, results),
+        )
+        for _ in range(2)
+    ]
+    for process in processes:
+        process.start()
+    start.set()
+
+    assert first_insert.wait(timeout=5)
+    assert not second_insert.wait(timeout=0.5)
+    release.set()
+
+    worker_results = [results.get(timeout=5) for _ in processes]
+    for process in processes:
+        process.join(timeout=5)
+        assert process.exitcode == 0
+
+    assert worker_results.count(("ok", 1, 0)) == 1
+    assert worker_results.count(("ok", 0, 0)) == 1
+    assert calls.value == 1
+
+
+def test_enqueue_completes_while_drain_client_is_blocked(tmp_path: Path):
+    """A stalled sink must not hold the shared enqueue/state lock."""
+    if telemetry_outbox_module.fcntl is None:
+        return
+
+    outbox = TelemetryOutbox(tmp_path)
+    _enqueue_jobs(outbox, 1)
+    context = multiprocessing.get_context("fork")
+    start = context.Event()
+    first_insert = context.Event()
+    second_insert = context.Event()
+    release = context.Event()
+    calls = context.Value("i", 0)
+    results = context.Queue()
+    process = context.Process(
+        target=_drain_worker,
+        args=(tmp_path, start, calls, first_insert, second_insert, release, results),
+    )
+    process.start()
+    start.set()
+    assert first_insert.wait(timeout=5)
+
+    pool = ThreadPoolExecutor(max_workers=1)
+    future = pool.submit(
+        outbox.enqueue,
+        "video_pipeline_jobs",
+        JOB_COLUMNS,
+        ["new-job", "completed", 1.0],
+    )
+    enqueue_error = None
+    new_event = None
+    try:
+        try:
+            new_event = future.result(timeout=1.5)
+        except FutureTimeoutError as exc:
+            enqueue_error = exc
+        except Exception as exc:
+            enqueue_error = exc
+    finally:
+        release.set()
+        pool.shutdown(wait=True)
+
+    worker_result = results.get(timeout=5)
+    process.join(timeout=5)
+    assert process.exitcode == 0
+    assert enqueue_error is None, enqueue_error
+    assert new_event is not None
+    assert worker_result[0] == "ok"
+    assert calls.value == 1
+    assert outbox.status()["total"] == 2
+    assert outbox.status()["pending"] == 1
+
+
+def test_rehydrate_count_does_not_use_concurrent_total_snapshots(
+    tmp_path: Path, monkeypatch
+):
+    """An unrelated writer must not make an idempotent rehydrate look new."""
+    outbox = TelemetryOutbox(tmp_path / "outbox")
+    mirror_dir = tmp_path / "mirror"
+    mirror_dir.mkdir()
+    (mirror_dir / "job_existing.json").write_text(
+        json.dumps({"job_id": "existing"}), encoding="utf-8"
+    )
+    outbox.enqueue("video_pipeline_jobs", ["job_id"], ["existing"])
+
+    real_status = outbox.status
+    status_calls = 0
+
+    def status_with_unrelated_writer():
+        nonlocal status_calls
+        result = real_status()
+        status_calls += 1
+        if status_calls == 1:
+            TelemetryOutbox(outbox.root).enqueue(
+                "video_pipeline_jobs",
+                ["job_id"],
+                ["unrelated"],
+                event_id="unrelated-writer-event",
+            )
+        return result
+
+    monkeypatch.setattr(outbox, "status", status_with_unrelated_writer)
+
+    assert outbox.rehydrate_from_mirror(mirror_dir) == 0
+
+
+def test_state_replace_fsyncs_parent_directory(tmp_path: Path, monkeypatch):
+    """Replacing state must durably persist the directory entry as well."""
+    outbox = TelemetryOutbox(tmp_path)
+    fsynced_modes = []
+    real_fsync = os.fsync
+
+    def recording_fsync(descriptor):
+        fsynced_modes.append(os.fstat(descriptor).st_mode)
+        return real_fsync(descriptor)
+
+    monkeypatch.setattr(telemetry_outbox_module.os, "fsync", recording_fsync)
+    outbox._save_state({"events": {}, "next_sequence": 0, "last_drain": None})
+
+    assert any(stat.S_ISDIR(mode) for mode in fsynced_modes)
 
 
 def test_backoff_is_exponential_and_bounded():

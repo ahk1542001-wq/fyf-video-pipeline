@@ -93,9 +93,152 @@ test.describe('Create Studio (/ and /create)', () => {
     await expect.poll(() => statusRequests, { timeout: 12_000 }).toBeGreaterThanOrEqual(3);
     await expect(page.getByText(/The narration is locked/)).toBeVisible();
     await expect(page.getByRole('button', { name: 'Generate locked video' })).toBeEnabled();
+    await page.locator('.workflow-stage__button').filter({ hasText: 'Brief' }).click();
     await expect(page.getByLabel('Language')).toHaveValue('en-US');
     expect(generationRequests).toBe(0);
     expect(await page.evaluate(() => window.sessionStorage.getItem('fyf-active-script-job'))).toBeNull();
+  });
+
+  test('keeps a resumed script job durable across refresh before it completes', async ({ page }) => {
+    await mockReadyRuntime(page);
+    let statusRequests = 0;
+    let resumeRequests = 0;
+    let generationRequests = 0;
+    const completedScript = {
+      title: 'Resume-safe production',
+      language: 'en-US',
+      segments: [{
+        id: 's1',
+        text: 'The resumed narration remains attached to the same job.',
+        visual_action: 'A stable equation resolves on the whiteboard.',
+        scene_type: 'demo',
+        mascot_action: 'present',
+        emotion: 'focused',
+        emphasis: ['same job'],
+      }],
+    };
+
+    await page.addInitScript(() => {
+      if (window.sessionStorage.getItem('resume-pointer-test-seeded')) return;
+      window.sessionStorage.setItem('resume-pointer-test-seeded', 'true');
+      window.sessionStorage.setItem('fyf-active-script-job', 'resume01');
+      window.sessionStorage.setItem('fyf-wizard-context', JSON.stringify({
+        topic: 'The resumed narration remains attached to the same job.',
+        sourceMode: 'full_script',
+        videoTitle: 'Resume-safe production',
+        submittedMessages: ['The resumed narration remains attached to the same job.'],
+      }));
+    });
+    await page.route('**/api/generate-script', async (route) => {
+      generationRequests += 1;
+      await route.fulfill({ status: 500, body: 'A new job must not be created.' });
+    });
+    await page.route('**/api/script-jobs/resume01/resume', async (route) => {
+      resumeRequests += 1;
+      await route.fulfill({
+        status: 202,
+        contentType: 'application/json',
+        body: JSON.stringify({ success: true, job_id: 'resume01', status_url: '/api/script-jobs/resume01/status' }),
+      });
+    });
+    await page.route('**/api/script-jobs/resume01/status', async (route) => {
+      statusRequests += 1;
+      const body = resumeRequests === 0
+        ? { status: 'needs_attention', error: 'Temporary provider issue.', restart_resumable: true }
+        : statusRequests <= 3
+          ? { status: 'writing', stage: 'visual_lock', progress: 40 }
+          : { status: 'completed', stage: 'locked', progress: 100, lock_id: 'abcd1234', data: completedScript };
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
+    });
+
+    await page.goto('/');
+    await expect(page.locator('.director-presence')).toHaveText('Ready');
+    await expect(page.getByRole('button', { name: 'Retry from checkpoint' })).toBeVisible();
+    expect(await page.evaluate(() => window.sessionStorage.getItem('fyf-active-script-job'))).toBe('resume01');
+    await page.reload();
+    await expect(page.getByRole('button', { name: 'Retry from checkpoint' })).toBeVisible();
+    expect(await page.evaluate(() => window.sessionStorage.getItem('fyf-active-script-job'))).toBe('resume01');
+    await page.getByRole('button', { name: 'Retry from checkpoint' }).click();
+    await expect.poll(() => resumeRequests).toBe(1);
+    await expect.poll(() => statusRequests).toBeGreaterThanOrEqual(2);
+    expect(await page.evaluate(() => window.sessionStorage.getItem('fyf-active-script-job'))).toBe('resume01');
+
+    await page.reload();
+    await expect(page.getByText(/The narration is locked/)).toBeVisible();
+    expect(generationRequests).toBe(0);
+    expect(await page.evaluate(() => window.sessionStorage.getItem('fyf-active-script-job'))).toBeNull();
+  });
+
+  test('clears the active job pointer when checkpoint resume is rejected', async ({ page }) => {
+    await mockReadyRuntime(page);
+    await page.addInitScript(() => {
+      window.sessionStorage.setItem('fyf-active-script-job', 'resume-fail');
+      window.sessionStorage.setItem('fyf-wizard-context', JSON.stringify({
+        topic: 'A resumable script job',
+        sourceMode: 'full_script',
+        videoTitle: 'Resume rejection',
+      }));
+    });
+    await page.route('**/api/script-jobs/resume-fail/status', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ status: 'needs_attention', error: 'Temporary provider issue.', restart_resumable: true }),
+      });
+    });
+    await page.route('**/api/script-jobs/resume-fail/resume', async (route) => {
+      await route.fulfill({
+        status: 409,
+        contentType: 'application/json',
+        body: JSON.stringify({ detail: 'Resume is no longer available.' }),
+      });
+    });
+
+    await page.goto('/');
+    await expect(page.locator('.director-presence')).toHaveText('Ready');
+    await expect(page.getByRole('button', { name: 'Retry from checkpoint' })).toBeVisible();
+    // Keep a pointer present so a rejected resume has observable cleanup.
+    await page.evaluate(() => window.sessionStorage.setItem('fyf-active-script-job', 'resume-fail'));
+    await page.getByRole('button', { name: 'Retry from checkpoint' }).click();
+    await expect(page.getByRole('alert', { name: 'Resume is no longer available.' })).toBeVisible();
+    expect(await page.evaluate(() => window.sessionStorage.getItem('fyf-active-script-job'))).toBeNull();
+  });
+
+  test('keeps generation busy while a script status check is transiently unavailable', async ({ page }) => {
+    await mockReadyRuntime(page);
+    let statusRequests = 0;
+    let generationRequests = 0;
+    await page.route('**/api/generate-script', async (route) => {
+      generationRequests += 1;
+      await route.fulfill({
+        status: 202,
+        contentType: 'application/json',
+        body: JSON.stringify({ success: true, job_id: 'poll01', status_url: '/api/script-jobs/poll01/status' }),
+      });
+    });
+    await page.route('**/api/script-jobs/poll01/status', async (route) => {
+      statusRequests += 1;
+      await route.fulfill({
+        status: statusRequests === 1 ? 503 : 200,
+        contentType: 'application/json',
+        body: JSON.stringify(statusRequests === 1
+          ? { detail: 'Temporary restart window' }
+          : { status: 'writing', stage: 'visual_lock', progress: 35 }),
+      });
+    });
+
+    await page.goto('/');
+    await expect(page.locator('.director-presence')).toHaveText('Ready');
+    await page.getByLabel('Video title').fill('Transient status recovery');
+    const directorInput = page.getByLabel('Paste your finished narration');
+    await directorInput.fill('The original narration must keep its active job.');
+    await page.getByRole('button', { name: 'Plan video' }).click();
+    await expect.poll(() => generationRequests).toBe(1);
+    await expect.poll(() => statusRequests, { timeout: 8_000 }).toBeGreaterThanOrEqual(2);
+    await expect(page.getByRole('button', { name: 'Building…' })).toBeDisabled();
+    await directorInput.fill('A retry must not create a second job.');
+    await expect(page.getByRole('button', { name: 'Building…' })).toBeDisabled();
+    expect(generationRequests).toBe(1);
   });
 
   test('keeps draft edits out of director history until the brief is submitted', async ({ page }) => {
@@ -108,6 +251,7 @@ test.describe('Create Studio (/ and /create)', () => {
       });
     });
     await page.goto('/');
+    await page.getByRole('group', { name: 'Source type' }).getByRole('button', { name: 'Brief', exact: true }).click();
     await expect(page.locator('.workflow-stage__label')).toHaveText([
       'Brief',
       'Story',
@@ -121,7 +265,7 @@ test.describe('Create Studio (/ and /create)', () => {
     await page.screenshot({ path: 'output/playwright/create-studio-source-step.png', fullPage: false });
 
     const directorBrief = page.getByRole('textbox', { name: 'What should we make?' });
-    const canvasBrief = page.getByRole('textbox', { name: 'Topic or draft' });
+    const canvasBrief = page.getByRole('textbox', { name: 'Topic or brief' });
 
     await directorBrief.fill('A Burmese product launch for independent shop owners');
     await expect(canvasBrief).toHaveValue('A Burmese product launch for independent shop owners');
@@ -165,6 +309,7 @@ test.describe('Create Studio (/ and /create)', () => {
       });
     });
     await page.goto('/');
+    await page.getByRole('group', { name: 'Source type' }).getByRole('button', { name: 'Brief', exact: true }).click();
 
     await expect(page.getByRole('button', { name: 'Build script', exact: true })).toHaveCount(1);
     await expect(page.getByRole('button', { name: /FYF Polish|3 directions|create 3 story options/i })).toHaveCount(0);
@@ -220,7 +365,7 @@ test.describe('Create Studio (/ and /create)', () => {
     await page.goto('/');
 
     const topicArea = page.locator('#topic-source');
-    const buildBtn = page.getByRole('button', { name: 'Build script', exact: true });
+    const buildBtn = page.getByRole('button', { name: 'Plan video', exact: true });
     const styleSelect = page.locator('#video-style');
     const personaSelect = page.locator('#presenter-persona');
     const mascotToggle = page.locator('#mascot-toggle');
@@ -228,7 +373,7 @@ test.describe('Create Studio (/ and /create)', () => {
     // Verify initial state: buttons disabled when topic is empty
     await expect(topicArea).toHaveValue('');
     await expect(buildBtn).toBeDisabled();
-    await expect(page.locator('.director-composer__hint')).toContainText('alternatives');
+    await expect(page.locator('.director-composer__hint')).toContainText('unchanged');
 
     await page.locator('details.production-controls > summary').click();
 
@@ -257,6 +402,7 @@ test.describe('Create Studio (/ and /create)', () => {
 
     // Enter topic
     await topicArea.fill('AI Video Production Workflow in Myanmar');
+    await page.locator('#video-title').fill('AI Video Production Workflow');
     await expect(buildBtn).toBeEnabled();
     await expect(page.locator('.director-message--user')).toHaveCount(0);
 
@@ -385,6 +531,7 @@ test.describe('Create Studio (/ and /create)', () => {
 
     await page.goto('/');
     await page.getByRole('button', { name: 'High-Converting Social Ad', exact: true }).click();
+    await page.getByRole('group', { name: 'Source type' }).getByRole('button', { name: 'Brief', exact: true }).click();
     const directorBrief = page.getByRole('textbox', { name: 'What should we make?' });
     await directorBrief.fill('Give me 3 story options for a product launch campaign for small businesses');
     await directorBrief.press('Enter');
@@ -518,6 +665,7 @@ test.describe('Create Studio (/ and /create)', () => {
     });
 
     await page.goto('/');
+    await page.getByRole('group', { name: 'Source type' }).getByRole('button', { name: 'Brief', exact: true }).click();
     const directorBrief = page.getByRole('textbox', { name: 'What should we make?' });
     await directorBrief.fill('Give me 3 story options for AI Verification in Myanmar');
     await directorBrief.press('Enter');
